@@ -1,6 +1,8 @@
 # snaq-lite
 
-A Rust-based simple arithmetic language that runs natively or from WebAssembly.
+A Rust-based reactive arithmetic language that runs natively or from WebAssembly. Expressions form a computation graph: when an argument changes, only dependent operations are recomputed (via [Salsa](https://github.com/salsa-rs/salsa)).
+
+**API:** `run(expression, a, b)` — parse the expression (e.g. `"a + b"`), evaluate with the two number arguments, return `Result<i64, RunError>`.
 
 ## Structure
 

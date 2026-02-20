@@ -1,0 +1,4 @@
+# Maximum cognitive complexity allowed per function.
+# Functions above this threshold will be reported by clippy::cognitive_complexity.
+# See: https://doc.rust-lang.org/stable/clippy/lint_configuration.html#cognitive-complexity-threshold
+cognitive-complexity-threshold = 25

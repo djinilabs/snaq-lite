@@ -3,5 +3,8 @@ name = "snaq-lite-lang"
 version = "0.1.0"
 edition = "2021"
 
+[lints]
+workspace = true
+
 [dependencies]
-salsa = { version = "0.26", features = ["inventory"] }
+salsa = { version = "0.26.0", features = ["inventory"] }

@@ -73,7 +73,7 @@ impl Parser<'_> {
                 self.chars.next();
                 Ok(ExprDef::LitB)
             }
-            Some(c) => Err(ParseError::new(format!("unexpected '{}'", c))),
+            Some(c) => Err(ParseError::new(format!("unexpected '{c}'"))),
             None => Err(ParseError::new("unexpected end of input")),
         }
     }

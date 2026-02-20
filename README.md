@@ -12,9 +12,11 @@ A Rust-based reactive arithmetic language that runs natively or from WebAssembly
 
 ## Run tests
 
-- **All tests:** `cargo test --workspace`
+- **All tests (native):** `cargo test --workspace`
 - **Core library only:** `cargo test -p snaq-lite-lang`
 - **With output:** `cargo test --workspace -- --nocapture`
+- **WASM build (generation only):** `cargo build -p snaq-lite-wasm --target wasm32-unknown-unknown`, or `./scripts/check-wasm-build.sh`
+- **WASM runtime (Node):** `wasm-pack test --node crates/snaq-lite-wasm` (requires [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) and Node). Optional: `--headless --firefox` or `--chrome` for browser.
 
 ## Build and run
 

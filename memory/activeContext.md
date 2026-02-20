@@ -1,6 +1,9 @@
 # Active context
 
 ## Just completed
+- **Unary minus:** Grammar and IR now support a leading minus (e.g. `-1`, `-(2*3)`). Added `ExprDef::Neg` and `ExprData::Neg`; Factor rule `"-" Factor => Neg`; resolve and value() handle Neg via `Quantity::neg`. Tests: `parse_unary_minus`, `eval_unary_minus`. All tests and clippy pass.
+
+## Just completed (earlier)
 - **Review and improve (SnaqNumber):** `SnaqNumber` now derives `Copy` (removes unnecessary clones in Quantity). Variance clamped to non-negative in Mul, Div, Mul<f64>, Div<f64> for float safety. Doc comments: propagation rules on `SnaqNumber`, `Quantity::value`/`variance` documented. Test `snaq_number_variance_always_non_negative` added. All 98 tests and clippy pass.
 - **SnaqNumber migration:** Numeric values are now `SnaqNumber` (value + variance). Variance is propagated through Add/Sub/Mul/Div/Neg and scaling by f64; literal variance derived from f64 precision `(value * ε/2)²`. `Quantity` uses `number: SnaqNumber`; `Quantity::new(f64, unit)` / `from_scalar(f64)` build via `SnaqNumber::from_literal`; arithmetic uses `Quantity::with_number`. `SnaqNumber` re-exported from crate; `Quantity::value()` and `Quantity::variance()` accessors. All tests and clippy pass.
 

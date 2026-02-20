@@ -19,6 +19,8 @@ pub enum ExprDef {
     Sub(Box<ExprDef>, Box<ExprDef>),
     Mul(Box<ExprDef>, Box<ExprDef>),
     Div(Box<ExprDef>, Box<ExprDef>),
+    /// Unary minus (e.g. "-1", "-(2 * 3)").
+    Neg(Box<ExprDef>),
 }
 
 /// Input that holds the root expression definition.
@@ -43,4 +45,5 @@ pub enum ExprData<'db> {
     Sub(Expression<'db>, Expression<'db>),
     Mul(Expression<'db>, Expression<'db>),
     Div(Expression<'db>, Expression<'db>),
+    Neg(Expression<'db>),
 }

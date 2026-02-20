@@ -62,6 +62,10 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
             let right = build_expression(db, *r);
             ExprData::Div(left, right)
         }
+        ExprDef::Neg(inner) => {
+            let inner_expr = build_expression(db, *inner);
+            ExprData::Neg(inner_expr)
+        }
     };
     Expression::new(db, data)
 }
@@ -105,5 +109,6 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Quantity,
             let right = value(db, *r)?;
             (left / right).map_err(|_| RunError::DivisionByZero)
         }
+        ExprData::Neg(inner) => value(db, *inner).map(std::ops::Neg::neg),
     })
 }

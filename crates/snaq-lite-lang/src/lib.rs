@@ -97,6 +97,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_unary_minus() {
+        assert_eq!(
+            parse("-1").unwrap(),
+            ExprDef::Neg(Box::new(lit_scalar(1.0)))
+        );
+        assert_eq!(
+            parse("-(2 * 3)").unwrap(),
+            ExprDef::Neg(Box::new(ExprDef::Mul(
+                Box::new(lit_scalar(2.0)),
+                Box::new(lit_scalar(3.0))
+            )))
+        );
+    }
+
+    #[test]
     fn parse_mul() {
         assert_eq!(
             parse("2 * 3").unwrap(),
@@ -208,6 +223,13 @@ mod tests {
         assert_eq!(run_scalar("1").unwrap(), 1.0);
         assert_eq!(run_scalar("42").unwrap(), 42.0);
         assert_eq!(run_scalar("1.5").unwrap(), 1.5);
+    }
+
+    #[test]
+    fn eval_unary_minus() {
+        assert_eq!(run_scalar("-1").unwrap(), -1.0);
+        assert_eq!(run_scalar("-0").unwrap(), 0.0);
+        assert_eq!(run_scalar("-(2 * 3)").unwrap(), -6.0);
     }
 
     #[test]

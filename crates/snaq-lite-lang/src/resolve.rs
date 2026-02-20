@@ -42,5 +42,9 @@ pub fn resolve(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, RunErro
             let r = resolve(*r, registry)?;
             Ok(ExprDef::Div(Box::new(l), Box::new(r)))
         }
+        ExprDef::Neg(inner) => {
+            let inner = resolve(*inner, registry)?;
+            Ok(ExprDef::Neg(Box::new(inner)))
+        }
     }
 }

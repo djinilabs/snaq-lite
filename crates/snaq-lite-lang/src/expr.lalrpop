@@ -37,6 +37,7 @@ Term: ExprDef = {
 };
 
 Factor: ExprDef = {
+    "-" <e:Factor> => ExprDef::Neg(Box::new(e)),
     <n:Num> <id:Ident> => ExprDef::LitWithUnit(n, id),
     <n:Num> => ExprDef::LitScalar(n),
     <id:Ident> => ExprDef::LitUnit(id),

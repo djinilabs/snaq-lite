@@ -1,9 +1,153 @@
 //! Quantity: value + unit. Arithmetic with dimension checking and conversion.
+//! Numeric values are SnaqNumber (value + variance) with variance propagation through arithmetic.
 
 use crate::unit::Unit;
 use crate::unit_registry::UnitRegistry;
 use ordered_float::OrderedFloat;
-use std::ops::{Div, Mul, Neg};
+use std::ops::{Add, Div, Mul, Neg, Sub};
+
+/// A numeric value with associated variance (uncertainty²).
+///
+/// Variance is propagated through arithmetic for uncorrelated operands:
+/// - **Add/Sub:** Var(A ± B) = Var(A) + Var(B)
+/// - **Mul:** Var(A×B) = B² Var(A) + A² Var(B)
+/// - **Div:** Var(A/B) = (1/B²) Var(A) + (A²/B⁴) Var(B)
+/// - **Scale by k:** Var(k×A) = k² Var(A)
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SnaqNumber {
+    value: OrderedFloat<f64>,
+    variance: OrderedFloat<f64>,
+}
+
+impl SnaqNumber {
+    /// Create from a literal f64; variance is derived from representable precision
+    /// (half-ulp in relative terms: (value * ε/2)² for non-zero; 0 for zero).
+    pub fn from_literal(x: f64) -> Self {
+        let value = OrderedFloat::from(x);
+        let variance = if x == 0.0 {
+            0.0
+        } else {
+            (x.abs() * f64::EPSILON / 2.0).powi(2)
+        };
+        Self {
+            value,
+            variance: OrderedFloat::from(variance),
+        }
+    }
+
+    /// Create with explicit value and variance (for tests and internal use).
+    pub fn new(value: f64, variance: f64) -> Self {
+        Self {
+            value: OrderedFloat::from(value),
+            variance: OrderedFloat::from(variance.max(0.0)),
+        }
+    }
+
+    pub fn value(&self) -> f64 {
+        self.value.0
+    }
+
+    pub fn variance(&self) -> f64 {
+        self.variance.0
+    }
+
+    /// Standard deviation (sqrt of variance).
+    pub fn std_dev(&self) -> f64 {
+        self.variance.0.sqrt()
+    }
+}
+
+impl Add for SnaqNumber {
+    type Output = SnaqNumber;
+
+    fn add(self, rhs: SnaqNumber) -> Self::Output {
+        SnaqNumber {
+            value: OrderedFloat::from(self.value.0 + rhs.value.0),
+            variance: OrderedFloat::from(self.variance.0 + rhs.variance.0),
+        }
+    }
+}
+
+impl Sub for SnaqNumber {
+    type Output = SnaqNumber;
+
+    fn sub(self, rhs: SnaqNumber) -> Self::Output {
+        SnaqNumber {
+            value: OrderedFloat::from(self.value.0 - rhs.value.0),
+            variance: OrderedFloat::from(self.variance.0 + rhs.variance.0),
+        }
+    }
+}
+
+impl Mul for SnaqNumber {
+    type Output = SnaqNumber;
+
+    fn mul(self, rhs: SnaqNumber) -> Self::Output {
+        let a = self.value.0;
+        let b = rhs.value.0;
+        let var_a = self.variance.0;
+        let var_b = rhs.variance.0;
+        // Var(A*B) = B² Var(A) + A² Var(B)
+        let variance = (b * b * var_a + a * a * var_b).max(0.0);
+        SnaqNumber {
+            value: OrderedFloat::from(a * b),
+            variance: OrderedFloat::from(variance),
+        }
+    }
+}
+
+impl Div for SnaqNumber {
+    type Output = SnaqNumber;
+
+    fn div(self, rhs: SnaqNumber) -> Self::Output {
+        let a = self.value.0;
+        let b = rhs.value.0;
+        let var_a = self.variance.0;
+        let var_b = rhs.variance.0;
+        // Var(A/B) = (1/B²) Var(A) + (A²/B⁴) Var(B)
+        let variance = ((1.0 / (b * b)) * var_a + (a * a) / (b * b * b * b) * var_b).max(0.0);
+        SnaqNumber {
+            value: OrderedFloat::from(a / b),
+            variance: OrderedFloat::from(variance),
+        }
+    }
+}
+
+impl Neg for SnaqNumber {
+    type Output = SnaqNumber;
+
+    fn neg(self) -> Self::Output {
+        SnaqNumber {
+            value: OrderedFloat::from(-self.value.0),
+            variance: self.variance,
+        }
+    }
+}
+
+impl Mul<f64> for SnaqNumber {
+    type Output = SnaqNumber;
+
+    fn mul(self, k: f64) -> Self::Output {
+        let variance = (self.variance.0 * k * k).max(0.0);
+        SnaqNumber {
+            value: OrderedFloat::from(self.value.0 * k),
+            variance: OrderedFloat::from(variance),
+        }
+    }
+}
+
+impl Div<f64> for SnaqNumber {
+    type Output = SnaqNumber;
+
+    fn div(self, k: f64) -> Self::Output {
+        let inv = 1.0 / k;
+        let variance = (self.variance.0 * inv * inv).max(0.0);
+        SnaqNumber {
+            value: OrderedFloat::from(self.value.0 * inv),
+            variance: OrderedFloat::from(variance),
+        }
+    }
+}
 
 /// Result of quantity operations that can fail (dimension mismatch, division by zero).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,30 +173,42 @@ impl std::fmt::Display for QuantityError {
 
 impl std::error::Error for QuantityError {}
 
-/// A physical quantity: numeric value and unit.
+/// A physical quantity: numeric value (with variance) and unit.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Quantity {
-    pub value: OrderedFloat<f64>,
+    pub number: SnaqNumber,
     pub unit: Unit,
 }
 
 impl Quantity {
+    /// Create a quantity from a literal f64 (variance derived from representation precision).
     pub fn new(value: f64, unit: Unit) -> Self {
         Self {
-            value: OrderedFloat::from(value),
+            number: SnaqNumber::from_literal(value),
             unit,
         }
     }
 
+    /// Create a quantity from an existing SnaqNumber (e.g. result of arithmetic).
+    pub fn with_number(number: SnaqNumber, unit: Unit) -> Self {
+        Self { number, unit }
+    }
+
     pub fn from_scalar(value: f64) -> Self {
         Self {
-            value: OrderedFloat::from(value),
+            number: SnaqNumber::from_literal(value),
             unit: Unit::scalar(),
         }
     }
 
+    /// Numeric value (mean).
     pub fn value(&self) -> f64 {
-        self.value.0
+        self.number.value()
+    }
+
+    /// Variance of the numeric value (uncertainty²), propagated through arithmetic.
+    pub fn variance(&self) -> f64 {
+        self.number.variance()
     }
 
     pub fn unit(&self) -> &Unit {
@@ -60,13 +216,13 @@ impl Quantity {
     }
 
     pub fn is_zero(&self) -> bool {
-        self.value.0 == 0.0
+        self.number.value() == 0.0
     }
 
     /// Extract numeric value if dimensionless; error otherwise.
     pub fn as_scalar(&self) -> Result<f64, QuantityError> {
         if self.unit.is_scalar() {
-            Ok(self.value.0)
+            Ok(self.number.value())
         } else {
             Err(QuantityError::IncompatibleUnits(
                 self.unit.clone(),
@@ -94,7 +250,7 @@ impl Quantity {
     pub fn full_simplify(&self, registry: &UnitRegistry) -> Quantity {
         match registry.to_base_unit_representation(&self.unit) {
             Some((base_unit, factor)) if base_unit.is_scalar() => {
-                Quantity::from_scalar(self.value.0 * factor)
+                Quantity::with_number(self.number * factor, Unit::scalar())
             }
             _ => self.clone(),
         }
@@ -157,7 +313,7 @@ impl Quantity {
         target: &Unit,
     ) -> Result<Quantity, QuantityError> {
         if &self.unit == target || self.is_zero() {
-            return Ok(Quantity::new(self.value.0, target.clone()));
+            return Ok(Quantity::with_number(self.number, target.clone()));
         }
         if !registry.same_dimension(&self.unit, target).unwrap_or(false) {
             return Err(QuantityError::IncompatibleUnits(
@@ -177,9 +333,11 @@ impl Quantity {
                     registry.to_base_unit_representation(&target_reduced)
                 {
                     if registry.same_dimension(&self_base, &target_base).unwrap_or(false) {
-                        let new_value =
-                            self.value.0 * (self_red_factor / target_red_factor);
-                        return Ok(Quantity::new(new_value, target.clone()));
+                        let ratio = self_red_factor / target_red_factor;
+                        return Ok(Quantity::with_number(
+                            self.number * ratio,
+                            target.clone(),
+                        ));
                     }
                 }
             }
@@ -191,8 +349,8 @@ impl Quantity {
         let (_, target_factor) = registry
             .to_base_unit_representation(target)
             .ok_or_else(|| QuantityError::IncompatibleUnits(self.unit.clone(), target.clone()))?;
-        let new_value = self.value.0 * (self_factor / target_factor);
-        Ok(Quantity::new(new_value, target.clone()))
+        let ratio = self_factor / target_factor;
+        Ok(Quantity::with_number(self.number * ratio, target.clone()))
     }
 
     /// Add two quantities; same dimension required. Uses smaller_unit for result.
@@ -219,7 +377,7 @@ impl Quantity {
         let result_unit = Self::smaller_unit(registry, &self.unit, &rhs.unit).cloned().unwrap_or_else(|| self.unit.clone());
         let a = self.convert_to(registry, &result_unit)?;
         let b = rhs.convert_to(registry, &result_unit)?;
-        Ok(Quantity::new(a.value.0 + b.value.0, result_unit))
+        Ok(Quantity::with_number(a.number + b.number, result_unit))
     }
 
     /// Subtract; same dimension required.
@@ -232,7 +390,7 @@ impl Quantity {
             return Ok(self);
         }
         if self.is_zero() {
-            return Ok(Quantity::new(-rhs.value.0, rhs.unit.clone()));
+            return Ok(Quantity::with_number(-rhs.number, rhs.unit.clone()));
         }
         if !registry
             .same_dimension(&self.unit, &rhs.unit)
@@ -246,7 +404,7 @@ impl Quantity {
         let result_unit = Self::smaller_unit(registry, &self.unit, &rhs.unit).cloned().unwrap_or_else(|| self.unit.clone());
         let a = self.convert_to(registry, &result_unit)?;
         let b = rhs.convert_to(registry, &result_unit)?;
-        Ok(Quantity::new(a.value.0 - b.value.0, result_unit))
+        Ok(Quantity::with_number(a.number - b.number, result_unit))
     }
 }
 
@@ -254,8 +412,8 @@ impl Mul for Quantity {
     type Output = Quantity;
 
     fn mul(self, rhs: Quantity) -> Self::Output {
-        Quantity::new(
-            self.value.0 * rhs.value.0,
+        Quantity::with_number(
+            self.number * rhs.number,
             self.unit.clone().mul(&rhs.unit),
         )
     }
@@ -265,11 +423,11 @@ impl Div for Quantity {
     type Output = Result<Quantity, QuantityError>;
 
     fn div(self, rhs: Quantity) -> Self::Output {
-        if rhs.value.0 == 0.0 {
+        if rhs.number.value() == 0.0 {
             return Err(QuantityError::DivisionByZero);
         }
-        Ok(Quantity::new(
-            self.value.0 / rhs.value.0,
+        Ok(Quantity::with_number(
+            self.number / rhs.number,
             self.unit.clone().div(&rhs.unit),
         ))
     }
@@ -279,16 +437,16 @@ impl Neg for Quantity {
     type Output = Quantity;
 
     fn neg(self) -> Self::Output {
-        Quantity::new(-self.value.0, self.unit)
+        Quantity::with_number(-self.number, self.unit)
     }
 }
 
 impl std::fmt::Display for Quantity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.unit.is_scalar() {
-            write!(f, "{}", self.value.0)
+            write!(f, "{}", self.number.value())
         } else {
-            write!(f, "{} {}", self.value.0, self.unit)
+            write!(f, "{} {}", self.number.value(), self.unit)
         }
     }
 }
@@ -383,5 +541,83 @@ mod tests {
         let simplified = q.full_simplify_with_registry(&reg);
         assert_eq!(simplified.unit().iter().next().unwrap().unit_name, "W");
         assert!((simplified.value() - 1.0).abs() < 1e-10);
+    }
+}
+
+#[cfg(test)]
+mod snaq_number_tests {
+    use super::SnaqNumber;
+
+    #[test]
+    fn snaq_number_from_literal_zero_has_zero_variance() {
+        let n = SnaqNumber::from_literal(0.0);
+        assert_eq!(n.value(), 0.0);
+        assert_eq!(n.variance(), 0.0);
+    }
+
+    #[test]
+    fn snaq_number_from_literal_nonzero_has_positive_variance() {
+        let n = SnaqNumber::from_literal(1.0);
+        assert_eq!(n.value(), 1.0);
+        assert!(n.variance() > 0.0);
+        assert!(n.variance() < 1e-20); // small relative to 1
+    }
+
+    #[test]
+    fn snaq_number_add_sub_variance() {
+        let a = SnaqNumber::new(3.0, 1.0);
+        let b = SnaqNumber::new(2.0, 0.5);
+        let sum = a + b;
+        assert_eq!(sum.value(), 5.0);
+        assert_eq!(sum.variance(), 1.5);
+        let diff = a - b;
+        assert_eq!(diff.value(), 1.0);
+        assert_eq!(diff.variance(), 1.5);
+    }
+
+    #[test]
+    fn snaq_number_mul_div_variance() {
+        let a = SnaqNumber::new(10.0, 0.1);
+        let b = SnaqNumber::new(2.0, 0.2);
+        let prod = a * b;
+        assert_eq!(prod.value(), 20.0);
+        // Var(A*B) = B² Var(A) + A² Var(B) = 4*0.1 + 100*0.2 = 20.4
+        assert!((prod.variance() - 20.4).abs() < 1e-10);
+        let quot = a / b;
+        assert_eq!(quot.value(), 5.0);
+        // Var(A/B) = (1/B²)Var(A) + (A²/B⁴)Var(B) = 0.1/4 + 100/16*0.2 = 0.025 + 1.25 = 1.275
+        assert!((quot.variance() - 1.275).abs() < 1e-10);
+    }
+
+    #[test]
+    fn snaq_number_neg_preserves_variance() {
+        let a = SnaqNumber::new(3.0, 2.0);
+        let n = -a;
+        assert_eq!(n.value(), -3.0);
+        assert_eq!(n.variance(), 2.0);
+    }
+
+    #[test]
+    fn snaq_number_scale_by_f64() {
+        let a = SnaqNumber::new(5.0, 1.0);
+        let scaled = a * 10.0;
+        assert_eq!(scaled.value(), 50.0);
+        assert_eq!(scaled.variance(), 100.0);
+        let div = a / 2.0;
+        assert_eq!(div.value(), 2.5);
+        assert_eq!(div.variance(), 0.25);
+    }
+
+    #[test]
+    fn snaq_number_variance_always_non_negative() {
+        // Operations should never produce negative variance (float noise clamp).
+        let a = SnaqNumber::from_literal(1e-20);
+        let b = SnaqNumber::from_literal(1e20);
+        assert!(a.variance() >= 0.0);
+        assert!(b.variance() >= 0.0);
+        let prod = a * b;
+        let quot = a / b;
+        assert!(prod.variance() >= 0.0, "mul variance {}", prod.variance());
+        assert!(quot.variance() >= 0.0, "div variance {}", quot.variance());
     }
 }

@@ -12,7 +12,7 @@ pub mod unit;
 pub mod unit_registry;
 
 pub use error::{ParseError, RunError};
-pub use quantity::{Quantity, QuantityError};
+pub use quantity::{Quantity, QuantityError, SnaqNumber};
 pub use unit::Unit;
 pub use ir::{ExprDef, Expression, ProgramDef};
 pub use parser::parse;

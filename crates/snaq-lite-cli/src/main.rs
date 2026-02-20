@@ -9,7 +9,25 @@ fn main() {
     }
 
     match snaq_lite_lang::run(&expression) {
-        Ok(result) => println!("{result}"),
+        Ok(result) => {
+            let value = result.value();
+            let variance = result.variance();
+            if variance > 0.0 {
+                let std_dev = variance.sqrt();
+                let dev_str = if std_dev > 0.0 && !(1e-6..1e10).contains(&std_dev) {
+                    format!("{std_dev:.4e}")
+                } else {
+                    format!("{std_dev}")
+                };
+                if result.unit().is_scalar() {
+                    println!("{value} (± {dev_str})");
+                } else {
+                    println!("{value} (± {dev_str}) {}", result.unit());
+                }
+            } else {
+                println!("{result}");
+            }
+        }
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(1);

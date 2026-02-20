@@ -182,6 +182,11 @@ impl SymbolicExpr {
         if coef == 1.0 && symbols.len() == 1 {
             return SymbolicExpr::Symbol(symbols.into_iter().next().unwrap());
         }
+        if coef == -1.0 && symbols.len() == 1 {
+            return SymbolicExpr::Neg(Box::new(SymbolicExpr::Symbol(
+                symbols.into_iter().next().unwrap(),
+            )));
+        }
         SymbolicExpr::Product { coef, symbols }
     }
 
@@ -197,7 +202,11 @@ impl SymbolicExpr {
     }
 
     /// Divide a by b. If both are product-like, returns simplified product form; else returns Div(a, b).
+    /// When numerator is Neg(inner), simplifies to neg(inner/b) so e.g. (-2 abc)/2 -> -abc.
     pub fn div(a: &SymbolicExpr, b: &SymbolicExpr) -> SymbolicExpr {
+        if let SymbolicExpr::Neg(inner) = a {
+            return Self::neg(&Self::div(inner, b));
+        }
         let (bcoef, bsyms) = match b.to_product_form() {
             Some(x) => x,
             None => return SymbolicExpr::Div(Box::new(a.clone()), Box::new(b.clone())),
@@ -545,5 +554,19 @@ mod tests {
         let e = SymbolicExpr::add(&SymbolicExpr::Number(1.0), &SymbolicExpr::symbol("pi"));
         let v = e.substitute(&r).unwrap();
         assert!((v - (1.0 + std::f64::consts::PI)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn div_neg_product_simplifies_to_neg_symbol() {
+        // (-2*abc)/2 should simplify to -abc (not -1*abc)
+        let num = SymbolicExpr::mul(
+            &SymbolicExpr::neg(&SymbolicExpr::Number(2.0)),
+            &SymbolicExpr::symbol("abc"),
+        );
+        let den = SymbolicExpr::Number(2.0);
+        let result = SymbolicExpr::div(&num, &den);
+        let s = result.to_string();
+        assert!(s.contains("abc") && (s.contains('-') || s.starts_with('-')), "expected -abc, got {s}");
+        assert!(!s.contains("1*"), "should not show -1*abc");
     }
 }

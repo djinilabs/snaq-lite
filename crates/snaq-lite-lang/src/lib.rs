@@ -1,5 +1,6 @@
 //! snaq-lite: reactive arithmetic language (Salsa-based).
 
+pub mod cas;
 pub mod dimension;
 pub mod error;
 pub mod ir;
@@ -35,6 +36,7 @@ pub fn run(input: &str) -> Result<Value, RunError> {
 pub fn run_with_registry(input: &str, registry: &UnitRegistry) -> Result<Value, RunError> {
     let root_def = parse(input).map_err(RunError::from)?;
     let root_def = resolve::resolve(root_def, registry)?;
+    let root_def = cas::simplify_symbolic(root_def, registry)?;
     set_eval_registry(registry.clone());
     let db = salsa::DatabaseImpl::new();
     let program_def = ProgramDef::new(&db, root_def);
@@ -54,7 +56,14 @@ pub fn run_numeric_with_registry(
     unit_registry: &UnitRegistry,
     symbol_registry: &SymbolRegistry,
 ) -> Result<Quantity, RunError> {
-    let v = run_with_registry(input, unit_registry)?;
+    let root_def = parse(input).map_err(RunError::from)?;
+    let root_def = resolve::resolve(root_def, unit_registry)?;
+    let root_def = cas::simplify_numeric(root_def, unit_registry, symbol_registry)?;
+    set_eval_registry(unit_registry.clone());
+    let db = salsa::DatabaseImpl::new();
+    let program_def = ProgramDef::new(&db, root_def);
+    let root = program(&db, program_def);
+    let v = value(&db, root)?;
     v.to_quantity(symbol_registry)
 }
 
@@ -366,13 +375,14 @@ mod tests {
     }
 
     #[test]
+    /// With CAS, division by zero in constant folding yields DivisionByZero (no ±∞).
     fn run_division_by_zero_nonzero_yields_infinity() {
-        let q = run_numeric("1 / 0").unwrap();
-        assert_eq!(q.value(), f64::INFINITY);
-        let q = run_numeric("0 - 1/0").unwrap();
-        assert_eq!(q.value(), f64::NEG_INFINITY);
-        let q = run_numeric("3 m / 0 s").unwrap();
-        assert_eq!(q.value(), f64::INFINITY);
+        let e = run_numeric("1 / 0").unwrap_err();
+        assert!(matches!(e, RunError::DivisionByZero));
+        let e = run_numeric("0 - 1/0").unwrap_err();
+        assert!(matches!(e, RunError::DivisionByZero));
+        let e = run_numeric("3 m / 0 s").unwrap_err();
+        assert!(matches!(e, RunError::DivisionByZero));
     }
 
     #[test]
@@ -387,12 +397,13 @@ mod tests {
         assert!(matches!(e, RunError::DivisionByZero));
     }
 
+    /// With CAS, expressions that would yield ±∞ (1/0) are caught as DivisionByZero in rewrite.
     #[test]
     fn run_arithmetic_with_infinity() {
-        let q = run_numeric("1/0 + 1").unwrap();
-        assert_eq!(q.value(), f64::INFINITY);
-        let q = run_numeric("2 * (1/0)").unwrap();
-        assert_eq!(q.value(), f64::INFINITY);
+        let e = run_numeric("1/0 + 1").unwrap_err();
+        assert!(matches!(e, RunError::DivisionByZero));
+        let e = run_numeric("2 * (1/0)").unwrap_err();
+        assert!(matches!(e, RunError::DivisionByZero));
     }
 
     #[test]
@@ -565,6 +576,32 @@ mod tests {
         let q = run_numeric("1 km + pi * 1 m").unwrap();
         assert!((q.value() - (1000.0 + std::f64::consts::PI)).abs() < 1e-6);
         assert_eq!(q.unit().iter().next().unwrap().unit_name, "m");
+    }
+
+    #[test]
+    fn run_cas_symbolic_like_terms_2pi_plus_3pi() {
+        let v = run("2*pi + 3*pi").unwrap();
+        let s = v.to_string();
+        assert!(s.contains("5") && (s.contains("π") || s.contains("pi")), "expected 5π, got {s}");
+    }
+
+    #[test]
+    fn run_neg2_abc_over_2_simplifies_to_neg_abc() {
+        // "(-2 abc)/2" parses as Neg(2 abc)/2; should simplify to -(abc)
+        let v = run("(-2 abc)/2").unwrap();
+        let s = v.to_string();
+        assert!(
+            !s.contains(" / ") && s.contains("abc"),
+            "expected -abc (no division), got {s}"
+        );
+    }
+
+    #[test]
+    fn run_cas_numeric_2pi_plus_3pi() {
+        let q = run_numeric("2*pi + 3*pi").unwrap();
+        let expected = 5.0 * std::f64::consts::PI;
+        assert!((q.value() - expected).abs() < 1e-10);
+        assert!(q.unit().is_scalar());
     }
 
     #[test]

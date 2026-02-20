@@ -1,4 +1,4 @@
-//! Expression grammar: float literals, +, -, *, /, parentheses.
+//! Expression grammar: float literals, +, -, *, / (or "per"), parentheses.
 //! Produces crate::ir::ExprDef.
 //! Float literals use conventional syntax; invalid/overflow yields a parse error.
 
@@ -22,6 +22,8 @@ pub Expr: ExprDef = {
 Term: ExprDef = {
     <l:Term> "*" <r:Factor> => ExprDef::Mul(Box::new(l), Box::new(r)),
     <l:Term> "/" <r:Factor> => ExprDef::Div(Box::new(l), Box::new(r)),
+    // "per" is division alias; LALRPOP gives string literals higher lexer priority than Ident, so "per" is not parsed as identifier
+    <l:Term> "per" <r:Factor> => ExprDef::Div(Box::new(l), Box::new(r)),
     Factor,
 };
 

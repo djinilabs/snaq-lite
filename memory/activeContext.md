@@ -19,5 +19,9 @@
 - **SI units:** All BIPM SI base units (m, kg, s, A, K, mol, cd) and SI derived units with special names: J, C, V, F, ohm, S, Wb, T, H, Hz, N, Pa, W, lm, lx, Bq, Gy, Sv, kat; long forms (coulomb, volt, farad, ohm, siemens, weber, tesla, henry, lumen, lux, becquerel, gray, sievert, katal) and celsius. Removed these from unsupported list; tests and clippy pass.
 - **Review and improve:** README updated with full SI unit list and examples (1 second, 1 volt). Unit registry refactored with `add_derived_alias` helper to reduce repetition; long-form base unit aliases added (ampere, amperes, kelvin, kelvins, mole, moles, candela, candelas, gram, grams). Test `long_form_base_unit_aliases` added. All tests and clippy pass.
 
+## Just completed
+- **Division alias "per":** Grammar accepts `per` as alias for `/` (e.g. `3 kilometers per hour`). LALRPOP string literal has higher lexer priority than Ident, so "per" is parsed as operator. Test `run_per_alias_for_division`; README and systemPatterns updated.
+- **Review and improve (per):** Grammar comment on lexer priority for "per"; README example shows result (`3 km/hour`); `run()` doc mentions "per"; added `parse_per_same_as_div`, `parse_ident_containing_per_still_ident`, and `run_scalar("6 per 2")` in `eval_div`. All tests and clippy pass.
+
 ## Next steps
 - Optional: add more unit modules (time: week, year; imperial: foot, pound; etc.) or .nbt loader for full Numbat module set.

@@ -22,6 +22,7 @@ pub use unit_registry::{default_si_registry, UnitRegistry};
 /// Parse the expression string and evaluate it, returning a Quantity (value + unit).
 ///
 /// Supports float literals, quantity literals (e.g. `100 m`, `1.5 * km`), and unit-as-factor (e.g. `hour`).
+/// Division can be written as `/` or `per` (e.g. `3 kilometers per hour`).
 /// Uses the default registry: all 7 SI base units (m, kg, s, A, K, mol, cd), SI derived (J, C, V, F, ohm, S, Wb, T, H, Hz, N, Pa, W, lm, lx, Bq, Gy, Sv, kat), time/length (km, hour, minute, second, seconds), plus mile, au, parsec, light_year, joule, eV, celsius.
 /// Errors on parse failure, unknown unit, dimension mismatch (add/sub), or division by zero.
 pub fn run(input: &str) -> Result<Quantity, RunError> {
@@ -111,6 +112,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_per_same_as_div() {
+        assert_eq!(
+            parse("6 per 2").unwrap(),
+            ExprDef::Div(Box::new(lit_scalar(6.0)), Box::new(lit_scalar(2.0)))
+        );
+    }
+
+    #[test]
+    fn parse_ident_containing_per_still_ident() {
+        // "per" is reserved as operator; identifiers like "percent" are still parsed as Ident
+        assert_eq!(
+            parse("1 percent").unwrap(),
+            ExprDef::LitWithUnit(OrderedFloat::from(1.0), "percent".to_string())
+        );
+    }
+
+    #[test]
     fn parse_with_parens() {
         assert_eq!(
             parse("(1 + 2) - 1").unwrap(),
@@ -196,6 +214,7 @@ mod tests {
     #[test]
     fn eval_div() {
         assert_eq!(run_scalar("6 / 2").unwrap(), 3.0);
+        assert_eq!(run_scalar("6 per 2").unwrap(), 3.0);
     }
 
     #[test]
@@ -391,6 +410,15 @@ mod tests {
         assert!((q.value() - 100.0).abs() < 1e-10);
         let factors: Vec<_> = q.unit().iter().collect();
         assert_eq!(factors.len(), 2);
+    }
+
+    #[test]
+    fn run_per_alias_for_division() {
+        let q_slash = run("3 kilometers / hour").unwrap();
+        let q_per = run("3 kilometers per hour").unwrap();
+        assert!((q_slash.value() - q_per.value()).abs() < 1e-10);
+        assert_eq!(q_slash.unit(), q_per.unit());
+        assert!((q_per.value() - 3.0).abs() < 1e-10);
     }
 
     #[test]

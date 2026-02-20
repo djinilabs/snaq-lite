@@ -8,6 +8,8 @@ pub mod prefix;
 pub mod quantity;
 pub mod queries;
 pub mod resolve;
+pub mod symbol_registry;
+pub mod symbolic;
 pub mod unit;
 pub mod unit_registry;
 
@@ -17,21 +19,20 @@ pub use unit::Unit;
 pub use ir::{ExprDef, Expression, ProgramDef};
 pub use parser::parse;
 pub use queries::{program, set_eval_registry, value};
+pub use symbol_registry::SymbolRegistry;
+pub use symbolic::{SymbolicQuantity, SymbolicExpr, Value};
 pub use unit_registry::{default_si_registry, UnitRegistry};
 
-/// Parse the expression string and evaluate it, returning a Quantity (value + unit).
+/// Parse and evaluate the expression, returning a Value (symbolic by default, e.g. "6 + π").
 ///
-/// Supports float literals, quantity literals (e.g. `100 m`, `1.5 * km`), unit-as-factor (e.g. `hour`),
-/// implicit multiplication when the next token is a number or parenthesized expression (e.g. `10 20` → 200, `2 (3+4)` → 14).
-/// Division can be written as `/` or `per` (e.g. `3 kilometers per hour`).
-/// Uses the default registry: all 7 SI base units (m, kg, s, A, K, mol, cd), SI derived (J, C, V, F, ohm, S, Wb, T, H, Hz, N, Pa, W, lm, lx, Bq, Gy, Sv, kat), time/length (km, hour, minute, second, seconds), plus mile, au, parsec, light_year, joule, eV, celsius.
-/// Errors on parse failure, unknown unit, dimension mismatch (add/sub), or 0/0 (DivisionByZero). Nonzero/0 yields ±∞.
-pub fn run(input: &str) -> Result<Quantity, RunError> {
+/// Supports float literals, quantity literals (e.g. `100 m`), symbols (e.g. `pi`, `π`, `e`),
+/// implicit multiplication, and division as `/` or `per`. Uses the default unit registry.
+pub fn run(input: &str) -> Result<Value, RunError> {
     run_with_registry(input, &default_si_registry())
 }
 
-/// Like [run], but with a custom unit registry (e.g. for custom units or tests).
-pub fn run_with_registry(input: &str, registry: &UnitRegistry) -> Result<Quantity, RunError> {
+/// Like [run], but with a custom unit registry.
+pub fn run_with_registry(input: &str, registry: &UnitRegistry) -> Result<Value, RunError> {
     let root_def = parse(input).map_err(RunError::from)?;
     let root_def = resolve::resolve(root_def, registry)?;
     set_eval_registry(registry.clone());
@@ -41,10 +42,25 @@ pub fn run_with_registry(input: &str, registry: &UnitRegistry) -> Result<Quantit
     value(&db, root)
 }
 
-/// Evaluate and return the numeric value only if the result is dimensionless (scalar).
-/// Use this when you expect a plain number (e.g. `"1 + 2"` → `3.0`); errors if the result has a unit.
+/// Evaluate and substitute all symbols with their numeric values; returns a single Quantity.
+/// Errors if any symbol has no value in the default symbol registry.
+pub fn run_numeric(input: &str) -> Result<Quantity, RunError> {
+    run_numeric_with_registry(input, &default_si_registry(), &SymbolRegistry::default_registry())
+}
+
+/// Like [run_numeric], but with custom unit and symbol registries.
+pub fn run_numeric_with_registry(
+    input: &str,
+    unit_registry: &UnitRegistry,
+    symbol_registry: &SymbolRegistry,
+) -> Result<Quantity, RunError> {
+    let v = run_with_registry(input, unit_registry)?;
+    v.to_quantity(symbol_registry)
+}
+
+/// Evaluate in numeric mode and return the scalar value only if dimensionless.
 pub fn run_scalar(input: &str) -> Result<f64, RunError> {
-    let q = run(input)?;
+    let q = run_numeric(input)?;
     q.as_scalar().map_err(|e| match e {
         QuantityError::IncompatibleUnits(..) => {
             RunError::DimensionMismatch {
@@ -290,21 +306,21 @@ mod tests {
 
     #[test]
     fn eval_quantity_with_units() {
-        let q = run("1.5 km + 500 m").unwrap();
+        let q = run_numeric("1.5 km + 500 m").unwrap();
         assert!((q.value() - 2000.0).abs() < 1e-10);
         assert_eq!(q.unit().iter().next().unwrap().unit_name, "m");
     }
 
     #[test]
     fn eval_implicit_mul_with_units() {
-        let q = run("10 m 2").unwrap();
+        let q = run_numeric("10 m 2").unwrap();
         assert!((q.value() - 20.0).abs() < 1e-10);
         assert_eq!(q.unit().iter().next().unwrap().unit_name, "m");
     }
 
     #[test]
     fn eval_compound_unit() {
-        let q = run("10 m / 2 s").unwrap();
+        let q = run_numeric("10 m / 2 s").unwrap();
         assert!((q.value() - 5.0).abs() < 1e-10);
         let factors: Vec<_> = q.unit().iter().collect();
         assert_eq!(factors.len(), 2);
@@ -341,33 +357,41 @@ mod tests {
     }
 
     #[test]
-    fn run_unknown_unit_returns_err() {
-        assert!(run("1 foo").is_err());
-        assert!(run("bar").is_err());
+    fn run_unknown_identifier_treated_as_symbol() {
+        // Identifiers that are not units are treated as symbols (e.g. "foo", "bar").
+        let v = run("1 foo").unwrap();
+        assert!(matches!(v, Value::Symbolic(_)));
+        let v = run("bar").unwrap();
+        assert!(matches!(v, Value::Symbolic(_)));
     }
 
     #[test]
     fn run_division_by_zero_nonzero_yields_infinity() {
-        let q = run("1 / 0").unwrap();
+        let q = run_numeric("1 / 0").unwrap();
         assert_eq!(q.value(), f64::INFINITY);
-        // 0 - 1/0 = -∞ (grammar has no leading unary minus)
-        let q = run("0 - 1/0").unwrap();
+        let q = run_numeric("0 - 1/0").unwrap();
         assert_eq!(q.value(), f64::NEG_INFINITY);
-        let q = run("3 m / 0 s").unwrap();
+        let q = run_numeric("3 m / 0 s").unwrap();
         assert_eq!(q.value(), f64::INFINITY);
     }
 
     #[test]
     fn run_zero_over_zero_returns_err() {
-        let e = run("0 / 0").unwrap_err();
+        let e = run_numeric("0 / 0").unwrap_err();
+        assert!(matches!(e, RunError::DivisionByZero));
+    }
+
+    #[test]
+    fn run_numeric_symbolic_div_by_zero_returns_division_by_zero() {
+        let e = run_numeric("(1 + pi) / 0").unwrap_err();
         assert!(matches!(e, RunError::DivisionByZero));
     }
 
     #[test]
     fn run_arithmetic_with_infinity() {
-        let q = run("1/0 + 1").unwrap();
+        let q = run_numeric("1/0 + 1").unwrap();
         assert_eq!(q.value(), f64::INFINITY);
-        let q = run("2 * (1/0)").unwrap();
+        let q = run_numeric("2 * (1/0)").unwrap();
         assert_eq!(q.value(), f64::INFINITY);
     }
 
@@ -377,46 +401,45 @@ mod tests {
         assert!(matches!(e, RunError::DimensionMismatch { .. }));
     }
 
-    /// Adding or subtracting quantities with *different units* but the *same dimension* is supported:
-    /// both are converted to the smaller unit and the result is in that unit.
+    /// Adding or subtracting quantities with *different units* but the *same dimension* is supported.
     #[test]
     fn add_same_dimension_different_units_length() {
-        let q = run("1 km + 500 m").unwrap();
+        let q = run_numeric("1 km + 500 m").unwrap();
         assert!((q.value() - 1500.0).abs() < 1e-6, "1 km + 500 m = 1500 m");
         assert_eq!(q.unit().iter().next().unwrap().unit_name, "m");
 
-        let q2 = run("500 m + 1 km").unwrap();
-        assert!((q2.value() - 1500.0).abs() < 1e-6, "commutativity: 500 m + 1 km = 1500 m");
+        let q2 = run_numeric("500 m + 1 km").unwrap();
+        assert!((q2.value() - 1500.0).abs() < 1e-6, "commutativity");
         assert_eq!(q2.unit().iter().next().unwrap().unit_name, "m");
 
-        let q3 = run("1 mile + 1 km").unwrap();
-        assert!((q3.value() - 2.609_344).abs() < 1e-3, "1 mile + 1 km = 2.609344 km (result in smaller unit)");
+        let q3 = run_numeric("1 mile + 1 km").unwrap();
+        assert!((q3.value() - 2.609_344).abs() < 1e-3);
         assert_eq!(q3.unit().iter().next().unwrap().unit_name, "km");
     }
 
     #[test]
     fn add_same_dimension_different_units_time() {
-        let q = run("1 hour + 30 minute").unwrap();
-        assert!((q.value() - 90.0).abs() < 1e-6, "1 h + 30 min = 90 min (result in smaller unit)");
+        let q = run_numeric("1 hour + 30 minute").unwrap();
+        assert!((q.value() - 90.0).abs() < 1e-6);
         assert_eq!(q.unit().iter().next().unwrap().unit_name, "minute");
 
-        let q2 = run("60 minute + 1 hour").unwrap();
-        assert!((q2.value() - 120.0).abs() < 1e-6, "60 min + 1 h = 120 min");
+        let q2 = run_numeric("60 minute + 1 hour").unwrap();
+        assert!((q2.value() - 120.0).abs() < 1e-6);
         assert_eq!(q2.unit().iter().next().unwrap().unit_name, "minute");
     }
 
     #[test]
     fn second_and_seconds_recognized_as_time_units() {
-        let q = run("1 second").unwrap();
+        let q = run_numeric("1 second").unwrap();
         assert!((q.value() - 1.0).abs() < 1e-10);
         assert_eq!(q.unit().iter().next().unwrap().unit_name, "second");
 
-        let q2 = run("5 seconds").unwrap();
+        let q2 = run_numeric("5 seconds").unwrap();
         assert!((q2.value() - 5.0).abs() < 1e-10);
         assert_eq!(q2.unit().iter().next().unwrap().unit_name, "seconds");
 
-        let q3 = run("1 minute + 30 seconds").unwrap();
-        assert!((q3.value() - 90.0).abs() < 1e-6, "1 min + 30 s = 90 s");
+        let q3 = run_numeric("1 minute + 30 seconds").unwrap();
+        assert!((q3.value() - 90.0).abs() < 1e-6);
         assert_eq!(q3.unit().iter().next().unwrap().unit_name, "seconds");
     }
 
@@ -429,7 +452,7 @@ mod tests {
             ("1 gram", "gram"),
             ("1 volt", "volt"),
         ] {
-            let q = run(expr).unwrap();
+            let q = run_numeric(expr).unwrap();
             assert!((q.value() - 1.0).abs() < 1e-10, "{}", expr);
             assert_eq!(q.unit().iter().next().unwrap().unit_name, unit_name, "{}", expr);
         }
@@ -437,19 +460,19 @@ mod tests {
 
     #[test]
     fn add_same_dimension_different_units_mass() {
-        let q = run("1 kg + 500 g").unwrap();
-        assert!((q.value() - 1500.0).abs() < 1e-6, "1 kg + 500 g = 1500 g (smaller unit)");
+        let q = run_numeric("1 kg + 500 g").unwrap();
+        assert!((q.value() - 1500.0).abs() < 1e-6);
         assert_eq!(q.unit().iter().next().unwrap().unit_name, "g");
     }
 
     #[test]
     fn sub_same_dimension_different_units() {
-        let q = run("1 km - 300 m").unwrap();
-        assert!((q.value() - 700.0).abs() < 1e-6, "1 km - 300 m = 700 m");
+        let q = run_numeric("1 km - 300 m").unwrap();
+        assert!((q.value() - 700.0).abs() < 1e-6);
         assert_eq!(q.unit().iter().next().unwrap().unit_name, "m");
 
-        let q2 = run("1 hour - 15 minute").unwrap();
-        assert!((q2.value() - 45.0).abs() < 1e-6, "1 h - 15 min = 45 min");
+        let q2 = run_numeric("1 hour - 15 minute").unwrap();
+        assert!((q2.value() - 45.0).abs() < 1e-6);
         assert_eq!(q2.unit().iter().next().unwrap().unit_name, "minute");
     }
 
@@ -462,25 +485,25 @@ mod tests {
 
     #[test]
     fn run_numbat_parity_mile_parsec_ev() {
-        let q_mile = run("1 mile").unwrap();
+        let q_mile = run_numeric("1 mile").unwrap();
         assert!((q_mile.value() - 1.0).abs() < 1e-10);
         assert_eq!(q_mile.unit().iter().next().unwrap().unit_name, "mile");
-        let q_parsec = run("1 parsec").unwrap();
+        let q_parsec = run_numeric("1 parsec").unwrap();
         assert!((q_parsec.value() - 1.0).abs() < 1e-10);
-        let q_ev = run("1 eV").unwrap();
+        let q_ev = run_numeric("1 eV").unwrap();
         assert!((q_ev.value() - 1.0).abs() < 1e-10);
     }
 
     #[test]
     fn run_long_form_units_kilometers() {
-        let q = run("32 kilometers").unwrap();
+        let q = run_numeric("32 kilometers").unwrap();
         assert!((q.value() - 32.0).abs() < 1e-10);
         assert_eq!(q.unit().iter().next().unwrap().unit_name, "kilometers");
     }
 
     #[test]
     fn run_numbat_parity_compound_velocity() {
-        let q = run("100 km / hour").unwrap();
+        let q = run_numeric("100 km / hour").unwrap();
         assert!((q.value() - 100.0).abs() < 1e-10);
         let factors: Vec<_> = q.unit().iter().collect();
         assert_eq!(factors.len(), 2);
@@ -488,27 +511,83 @@ mod tests {
 
     #[test]
     fn run_per_alias_for_division() {
-        let q_slash = run("3 kilometers / hour").unwrap();
-        let q_per = run("3 kilometers per hour").unwrap();
+        let q_slash = run_numeric("3 kilometers / hour").unwrap();
+        let q_per = run_numeric("3 kilometers per hour").unwrap();
         assert!((q_slash.value() - q_per.value()).abs() < 1e-10);
         assert_eq!(q_slash.unit(), q_per.unit());
         assert!((q_per.value() - 3.0).abs() < 1e-10);
     }
 
     #[test]
+    fn run_symbolic_default_pi() {
+        let v = run("1 + pi").unwrap();
+        let s = v.to_string();
+        assert!(s.contains("pi") || s.contains("π"), "expected 1 + pi or 1 + π, got {s}");
+        let v = run("3 + 2 + pi + 1").unwrap();
+        let s = v.to_string();
+        assert!(s.contains("6") && (s.contains("pi") || s.contains("π")), "expected 6 + π, got {s}");
+    }
+
+    #[test]
+    fn run_numeric_substitutes_pi() {
+        let q = run_numeric("1 + pi").unwrap();
+        assert!((q.value() - (1.0 + std::f64::consts::PI)).abs() < 1e-10);
+        assert!(q.unit().is_scalar());
+    }
+
+    #[test]
+    fn parse_unicode_pi_symbol() {
+        let v = run("π").unwrap();
+        assert!(matches!(v, Value::Symbolic(_)));
+        assert_eq!(v.to_string(), "π");
+    }
+
+    #[test]
+    fn run_symbolic_mul_div_neg() {
+        let v = run("2 * pi").unwrap();
+        let s = v.to_string();
+        assert!(s.contains("2") && (s.contains("pi") || s.contains("π")), "2*π: {s}");
+        let v = run("(1 + pi) / 2").unwrap();
+        let s = v.to_string();
+        assert!(s.contains("1") || s.contains("pi") || s.contains("π"), " (1+π)/2: {s}");
+        let v = run("-pi").unwrap();
+        assert!(matches!(v, Value::Symbolic(_)));
+        let s = v.to_string();
+        assert!(s.starts_with('-') && (s.contains("pi") || s.contains("π")), "-π: {s}");
+    }
+
+    #[test]
+    fn run_symbolic_add_mixed_units_same_dimension() {
+        let v = run("1 km + pi * 1 m").unwrap();
+        assert!(matches!(v, Value::Symbolic(_)));
+        let s = v.to_string();
+        assert!(s.contains("m") && (s.contains("1000") || s.contains("π") || s.contains("pi")), "1 km + π*1 m in m: {s}");
+        let q = run_numeric("1 km + pi * 1 m").unwrap();
+        assert!((q.value() - (1000.0 + std::f64::consts::PI)).abs() < 1e-6);
+        assert_eq!(q.unit().iter().next().unwrap().unit_name, "m");
+    }
+
+    #[test]
     fn reactivity_when_program_changes_value_updates() {
         let registry = default_si_registry();
-        set_eval_registry(registry);
+        set_eval_registry(registry.clone());
+        let sym = SymbolRegistry::default_registry();
         let db = salsa::DatabaseImpl::new();
         let parsed = parse("1 + 2").unwrap();
-        let resolved = resolve::resolve(parsed, &crate::unit_registry::default_si_registry()).unwrap();
+        let resolved = resolve::resolve(parsed, &default_si_registry()).unwrap();
         let program_def = ProgramDef::new(&db, resolved);
         let root = program(&db, program_def);
-        assert_eq!(value(&db, root).unwrap().value(), 3.0);
+        assert_eq!(
+            value(&db, root).unwrap().to_quantity(&sym).unwrap().value(),
+            3.0
+        );
         let parsed2 = parse("10 + 2").unwrap();
-        let resolved2 = resolve::resolve(parsed2, &crate::unit_registry::default_si_registry()).unwrap();
+        let resolved2 = resolve::resolve(parsed2, &default_si_registry()).unwrap();
         let program_def2 = ProgramDef::new(&db, resolved2);
         let root2 = program(&db, program_def2);
-        assert_eq!(value(&db, root2).unwrap().value(), 12.0);
+        assert_eq!(
+            value(&db, root2).unwrap().to_quantity(&sym).unwrap().value(),
+            12.0
+        );
     }
 }

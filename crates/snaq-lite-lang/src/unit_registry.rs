@@ -592,7 +592,7 @@ mod si_tests {
     fn si_base_units_run_as_quantity_literal() {
         for name in SI_BASE_UNITS {
             let expr = format!("1 {name}");
-            let q = crate::run(&expr).unwrap_or_else(|e| panic!("run({expr:?}): {e}"));
+            let q = crate::run_numeric(&expr).unwrap_or_else(|e| panic!("run_numeric({expr:?}): {e}"));
             assert!((q.value() - 1.0).abs() < 1e-12, "{}", expr);
             assert_eq!(q.unit().iter().next().unwrap().unit_name, *name);
         }
@@ -692,14 +692,14 @@ mod si_tests {
 
     #[test]
     fn si_add_length_conversion() {
-        let q = crate::run("1 km + 500 m").unwrap();
+        let q = crate::run_numeric("1 km + 500 m").unwrap();
         assert!((q.value() - 1500.0).abs() < 1e-6, "1 km + 500 m = 1500 m");
         assert_eq!(q.unit().iter().next().unwrap().unit_name, "m");
     }
 
     #[test]
     fn si_compound_velocity_m_per_s() {
-        let q = crate::run("10 m / 2 s").unwrap();
+        let q = crate::run_numeric("10 m / 2 s").unwrap();
         assert!((q.value() - 5.0).abs() < 1e-10);
         let factors: Vec<_> = q.unit().iter().map(|f| f.unit_name.as_str()).collect();
         assert!(factors.contains(&"m"));
@@ -709,7 +709,7 @@ mod si_tests {
     #[test]
     fn si_compound_force_newton() {
         let reg = default_si_registry();
-        let q = crate::run("1 kg * 1 m / 1 s / 1 s").unwrap();
+        let q = crate::run_numeric("1 kg * 1 m / 1 s / 1 s").unwrap();
         assert!((q.value() - 1.0).abs() < 1e-10);
         let n = Unit::from_base_unit("N");
         assert!(reg.same_dimension(q.unit(), &n).unwrap());
@@ -718,7 +718,7 @@ mod si_tests {
     #[test]
     fn si_compound_power_watt() {
         let reg = default_si_registry();
-        let q = crate::run("1 joule / 1 s").unwrap();
+        let q = crate::run_numeric("1 joule / 1 s").unwrap();
         assert!((q.value() - 1.0).abs() < 1e-10);
         let w = Unit::from_base_unit("W");
         assert!(reg.same_dimension(q.unit(), &w).unwrap());
@@ -727,7 +727,7 @@ mod si_tests {
     #[test]
     fn si_compound_energy_joule() {
         let reg = default_si_registry();
-        let q = crate::run("1 N * 1 m").unwrap();
+        let q = crate::run_numeric("1 N * 1 m").unwrap();
         assert!((q.value() - 1.0).abs() < 1e-10);
         let j = Unit::from_base_unit("joule");
         assert!(reg.same_dimension(q.unit(), &j).unwrap());
@@ -735,7 +735,7 @@ mod si_tests {
 
     #[test]
     fn si_frequency_hertz() {
-        let q = crate::run("1 Hz").unwrap();
+        let q = crate::run_numeric("1 Hz").unwrap();
         assert!((q.value() - 1.0).abs() < 1e-12);
         assert_eq!(q.unit().iter().next().unwrap().unit_name, "Hz");
     }
@@ -763,7 +763,6 @@ mod si_tests {
 #[cfg(test)]
 mod all_units_tests {
     use super::*;
-    use crate::error::RunError;
 
     /// Every unit in the default registry must parse as "1 <name>" and evaluate to quantity 1 in that unit.
     #[test]
@@ -773,7 +772,7 @@ mod all_units_tests {
         assert!(!names.is_empty(), "registry has at least one unit");
         for name in &names {
             let expr = format!("1 {name}");
-            let q = crate::run(&expr).unwrap_or_else(|e| panic!("run({expr:?}) failed: {e}"));
+            let q = crate::run_numeric(&expr).unwrap_or_else(|e| panic!("run_numeric({expr:?}) failed: {e}"));
             assert!((q.value() - 1.0).abs() < 1e-12, "{}", expr);
             assert_eq!(q.unit().iter().next().unwrap().unit_name, *name, "{}", expr);
         }
@@ -787,48 +786,24 @@ mod all_units_tests {
         let mut sorted = names.clone();
         sorted.sort();
         for name in &sorted {
-            let q = crate::run(&format!("1 {name}")).unwrap();
+            let q = crate::run_numeric(&format!("1 {name}")).unwrap();
             assert!((q.value() - 1.0).abs() < 1e-12);
         }
     }
 
-    /// Numbat supports many more units (week, year, inch, foot, pound, nautical, cgs, etc.).
-    /// We do not support these until we add them; this test ensures we don't accidentally
-    /// claim support and that run fails with UnknownUnit for a sample of unsupported Numbat units.
+    /// Numbat supports many more units (week, year, inch, etc.). We treat unknown identifiers
+    /// as symbols, so run() succeeds with Value::Symbolic; run_numeric() fails with SymbolHasNoValue.
     #[test]
-    fn numbat_units_we_do_not_support_fail_with_unknown_unit() {
-        let unsupported = [
-            "week",
-            "year",
-            "inch",
-            "foot",
-            "yard",
-            "pound",
-            "ounce",
-            "gallon",
-            "liter",
-            "day",
-            "nautical_mile",
-            "knot",
-            "fathom",
-            "acre",
-            "erg",
-            "dyne",
-            "calorie",
-            "horsepower",
-            "psi",
-            "bar",
-        ];
+    fn numbat_units_we_do_not_support_treated_as_symbols() {
+        use crate::Value;
+        let unsupported = ["week", "year", "inch", "foot", "pound"];
         for name in unsupported {
             let expr = format!("1 {name}");
             let res = crate::run(&expr);
-            assert!(
-                res.is_err(),
-                "expected unsupported unit {name} to fail, got Ok"
-            );
-            if let Err(RunError::UnknownUnit(u)) = res {
-                assert_eq!(&u, name);
-            }
+            assert!(res.is_ok(), "run({expr}) should succeed (symbolic)");
+            let v = res.unwrap();
+            assert!(matches!(v, Value::Symbolic(_)), "{} should be symbolic", expr);
+            assert!(crate::run_numeric(&expr).is_err(), "run_numeric({expr}) should fail (no value for symbol)");
         }
     }
 }

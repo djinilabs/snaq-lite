@@ -8,6 +8,8 @@ pub enum RunError {
         right: crate::unit::Unit,
     },
     DivisionByZero,
+    /// A symbol in the expression has no numeric value in the symbol registry (cannot substitute).
+    SymbolHasNoValue(String),
 }
 
 /// Parse error for expression strings.
@@ -39,6 +41,9 @@ impl std::fmt::Display for RunError {
                 write!(f, "dimension mismatch: {left} vs {right}")
             }
             RunError::DivisionByZero => write!(f, "division by zero"),
+            RunError::SymbolHasNoValue(name) => {
+                write!(f, "symbol '{name}' has no numeric value")
+            }
         }
     }
 }

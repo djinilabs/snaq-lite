@@ -1,6 +1,10 @@
 # Active context
 
 ## Just completed
+- **Review and improve (symbols):** README updated for `run` → `Value`, `run_numeric`, `run_scalar`, symbols, and CLI `--numeric`. Symbolic substitution: division-by-zero during substitute now returns `RunError::DivisionByZero` (not `SymbolHasNoValue`). Doc: `SymbolRegistry` (symbols without value = not in map), `Value` (Display and `to_quantity`). Test: `run_numeric_symbolic_div_by_zero_returns_division_by_zero` for `(1+pi)/0`. All 118 tests and clippy pass.
+- **Symbols:** Symbols (e.g. pi, π, e or any unknown identifier) are supported. Default evaluation returns `Value` (symbolic by default): `1 + π` → "1 + π", `3 + 2 + π + 1` → "6 + π". `SymbolRegistry` (built-ins pi/π, e), `SymbolicExpr`/`SymbolicQuantity` with simplification (Sum/Product), `Value::Numeric`|`Value::Symbolic`. IR: `LitSymbol`; resolve treats unknown idents as symbols; grammar has `"π"` → LitSymbol("pi"). `run()` returns `Result<Value, RunError>`; `run_numeric()` substitutes and returns `Quantity`; CLI `--numeric` for numeric output; WASM `evaluate_numeric()`.
+
+## Just completed (earlier)
 - **Unary minus:** Grammar and IR now support a leading minus (e.g. `-1`, `-(2*3)`). Added `ExprDef::Neg` and `ExprData::Neg`; Factor rule `"-" Factor => Neg`; resolve and value() handle Neg via `Quantity::neg`. Tests: `parse_unary_minus`, `eval_unary_minus`. All tests and clippy pass.
 
 ## Just completed (earlier)
@@ -46,3 +50,4 @@
 
 ## Next steps
 - Optional: add more unit modules (time: week, year; imperial: foot, pound; etc.) or .nbt loader for full Numbat module set.
+- Optional: variance in symbolic form; user-defined symbols (let x = 2); more built-in constants (φ, c).

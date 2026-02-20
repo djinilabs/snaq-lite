@@ -40,6 +40,7 @@ Factor: ExprDef = {
     "-" <e:Factor> => ExprDef::Neg(Box::new(e)),
     <n:Num> <id:Ident> => ExprDef::LitWithUnit(n, id),
     <n:Num> => ExprDef::LitScalar(n),
+    "π" => ExprDef::LitSymbol("pi".to_string()),
     <id:Ident> => ExprDef::LitUnit(id),
     "(" <e:Expr> ")" => e,
 };

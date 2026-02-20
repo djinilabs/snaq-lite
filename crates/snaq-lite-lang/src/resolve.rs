@@ -1,27 +1,33 @@
-//! Resolve parsed expression (LitScalar, LitWithUnit, LitUnit) to Lit(Quantity).
+//! Resolve parsed expression (LitScalar, LitWithUnit, LitUnit) to Lit(Quantity) or LitSymbol.
+//! Identifiers that are units resolve to quantities; others resolve to symbols.
 
 use crate::error::RunError;
 use crate::ir::ExprDef;
 use crate::quantity::Quantity;
 use crate::unit_registry::UnitRegistry;
 
-/// Convert parsed ExprDef (with LitScalar, LitWithUnit, LitUnit) to fully resolved ExprDef (only Lit(Quantity) for literals).
+/// Convert parsed ExprDef (with LitScalar, LitWithUnit, LitUnit) to fully resolved ExprDef (Lit(Quantity), LitSymbol, or compound).
 pub fn resolve(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, RunError> {
     match def {
         ExprDef::LitScalar(n) => Ok(ExprDef::Lit(Quantity::from_scalar(n.0))),
         ExprDef::LitWithUnit(n, ref name) => {
-            let unit = registry
-                .get_unit_with_prefix(name)
-                .ok_or_else(|| RunError::UnknownUnit(name.clone()))?;
-            Ok(ExprDef::Lit(Quantity::new(n.0, unit)))
+            if let Some(unit) = registry.get_unit_with_prefix(name) {
+                Ok(ExprDef::Lit(Quantity::new(n.0, unit)))
+            } else {
+                Ok(ExprDef::Mul(
+                    Box::new(ExprDef::Lit(Quantity::from_scalar(n.0))),
+                    Box::new(ExprDef::LitSymbol(name.clone())),
+                ))
+            }
         }
         ExprDef::LitUnit(ref name) => {
-            let unit = registry
-                .get_unit_with_prefix(name)
-                .ok_or_else(|| RunError::UnknownUnit(name.clone()))?;
-            Ok(ExprDef::Lit(Quantity::new(1.0, unit)))
+            if let Some(unit) = registry.get_unit_with_prefix(name) {
+                Ok(ExprDef::Lit(Quantity::new(1.0, unit)))
+            } else {
+                Ok(ExprDef::LitSymbol(name.clone()))
+            }
         }
-        ExprDef::Lit(_) => Ok(def),
+        ExprDef::Lit(_) | ExprDef::LitSymbol(_) => Ok(def),
         ExprDef::Add(l, r) => {
             let l = resolve(*l, registry)?;
             let r = resolve(*r, registry)?;

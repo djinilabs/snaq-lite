@@ -1,10 +1,17 @@
 use wasm_bindgen::prelude::*;
-use snaq_lite_lang::run;
+use snaq_lite_lang::{run, run_numeric};
 
 #[wasm_bindgen]
 pub fn evaluate(input: &str) -> String {
     run(input)
-        .map(|n| n.to_string())
+        .map(|v| v.to_string())
+        .unwrap_or_else(|e| e.to_string())
+}
+
+#[wasm_bindgen]
+pub fn evaluate_numeric(input: &str) -> String {
+    run_numeric(input)
+        .map(|q| q.to_string())
         .unwrap_or_else(|e| e.to_string())
 }
 

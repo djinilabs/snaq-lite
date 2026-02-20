@@ -4,7 +4,7 @@ use crate::quantity::Quantity;
 use ordered_float::OrderedFloat;
 
 /// Definition of the root expression (plain data, no Salsa).
-/// Parser produces LitScalar, LitWithUnit, LitUnit; after resolve() only Lit(Quantity) | Add | Sub | Mul | Div remain.
+/// Parser produces LitScalar, LitWithUnit, LitUnit; after resolve() only Lit(Quantity) | LitSymbol | Add | Sub | Mul | Div remain.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum ExprDef {
     /// Parsed: bare number (scalar).
@@ -15,6 +15,8 @@ pub enum ExprDef {
     LitUnit(String),
     /// Resolved: quantity (value + unit).
     Lit(Quantity),
+    /// Resolved: bare symbol (e.g. pi, e). Identifier not found in unit registry.
+    LitSymbol(String),
     Add(Box<ExprDef>, Box<ExprDef>),
     Sub(Box<ExprDef>, Box<ExprDef>),
     Mul(Box<ExprDef>, Box<ExprDef>),
@@ -41,6 +43,7 @@ pub struct Expression<'db> {
 #[derive(Clone, PartialEq, Eq, Hash, Debug, salsa::Update)]
 pub enum ExprData<'db> {
     Lit(Quantity),
+    LitSymbol(String),
     Add(Expression<'db>, Expression<'db>),
     Sub(Expression<'db>, Expression<'db>),
     Mul(Expression<'db>, Expression<'db>),

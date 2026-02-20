@@ -22,7 +22,7 @@ pub use unit_registry::{default_si_registry, UnitRegistry};
 /// Parse the expression string and evaluate it, returning a Quantity (value + unit).
 ///
 /// Supports float literals, quantity literals (e.g. `100 m`, `1.5 * km`), and unit-as-factor (e.g. `hour`).
-/// Uses the default registry (SI: m, s, kg, km, hour, minute; plus mile, au, parsec, light_year, joule, eV).
+/// Uses the default registry: all 7 SI base units (m, kg, s, A, K, mol, cd), SI derived (J, C, V, F, ohm, S, Wb, T, H, Hz, N, Pa, W, lm, lx, Bq, Gy, Sv, kat), time/length (km, hour, minute, second, seconds), plus mile, au, parsec, light_year, joule, eV, celsius.
 /// Errors on parse failure, unknown unit, dimension mismatch (add/sub), or division by zero.
 pub fn run(input: &str) -> Result<Quantity, RunError> {
     run_with_registry(input, &default_si_registry())
@@ -313,6 +313,36 @@ mod tests {
     }
 
     #[test]
+    fn second_and_seconds_recognized_as_time_units() {
+        let q = run("1 second").unwrap();
+        assert!((q.value() - 1.0).abs() < 1e-10);
+        assert_eq!(q.unit().iter().next().unwrap().unit_name, "second");
+
+        let q2 = run("5 seconds").unwrap();
+        assert!((q2.value() - 5.0).abs() < 1e-10);
+        assert_eq!(q2.unit().iter().next().unwrap().unit_name, "seconds");
+
+        let q3 = run("1 minute + 30 seconds").unwrap();
+        assert!((q3.value() - 90.0).abs() < 1e-6, "1 min + 30 s = 90 s");
+        assert_eq!(q3.unit().iter().next().unwrap().unit_name, "seconds");
+    }
+
+    #[test]
+    fn long_form_base_unit_aliases() {
+        for (expr, unit_name) in [
+            ("1 ampere", "ampere"),
+            ("1 kelvin", "kelvin"),
+            ("1 mole", "mole"),
+            ("1 gram", "gram"),
+            ("1 volt", "volt"),
+        ] {
+            let q = run(expr).unwrap();
+            assert!((q.value() - 1.0).abs() < 1e-10, "{}", expr);
+            assert_eq!(q.unit().iter().next().unwrap().unit_name, unit_name, "{}", expr);
+        }
+    }
+
+    #[test]
     fn add_same_dimension_different_units_mass() {
         let q = run("1 kg + 500 g").unwrap();
         assert!((q.value() - 1500.0).abs() < 1e-6, "1 kg + 500 g = 1500 g (smaller unit)");
@@ -346,6 +376,13 @@ mod tests {
         assert!((q_parsec.value() - 1.0).abs() < 1e-10);
         let q_ev = run("1 eV").unwrap();
         assert!((q_ev.value() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_long_form_units_kilometers() {
+        let q = run("32 kilometers").unwrap();
+        assert!((q.value() - 32.0).abs() < 1e-10);
+        assert_eq!(q.unit().iter().next().unwrap().unit_name, "kilometers");
     }
 
     #[test]

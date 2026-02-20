@@ -2,6 +2,22 @@
 
 Comparison based on Numbat source (sharkdp/numbat: quantity.rs, unit.rs, dimension.rs).
 
+## Unit coverage: we support a subset of Numbat
+
+We do **not** support every unit Numbat does. Our default registry includes:
+
+- **SI base:** m, kg, s, A, K, mol, cd  
+- **Length:** meter, meters, km, kilometer, kilometers, mile, au, parsec, light_year  
+- **Time:** hour, minute  
+- **Mass:** g  
+- **Frequency:** Hz  
+- **Energy:** joule, eV  
+- **Force:** N  
+- **Pressure:** Pa  
+- **Power:** W  
+
+Numbat additionally has (we do not): week, year, month, day; inch, foot, yard, fathom; pound, ounce, stone; gallon, liter, pint, quart; nautical (mile, knot, fathom); cgs (erg, dyne, barye, etc.); planck, fff, misc, currency, bit, partsperx, and more. Tests in `unit_registry::all_units_tests` assert every registered unit parses and that a sample of unsupported Numbat units fail with `UnknownUnit`.
+
 ## Differences
 
 ### 1. **Common-factor optimization in `convert_to`** (Numbat has it, we did not)

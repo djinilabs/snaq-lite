@@ -15,5 +15,9 @@
 - **Tests:** Added `run_division_by_zero_returns_err` (1/0, 3 m / 0 s) and `run_dimension_mismatch_returns_err` (1 m + 1 s).
 - **API:** `run_with_registry(input, &UnitRegistry)` for custom registries; `run()` delegates to it. Exported `UnitRegistry`; added `Clone` to `UnitRegistry` and `DimensionRegistry`. Doc comments clarified (default units, when to use `run_scalar`).
 
+## Just completed
+- **SI units:** All BIPM SI base units (m, kg, s, A, K, mol, cd) and SI derived units with special names: J, C, V, F, ohm, S, Wb, T, H, Hz, N, Pa, W, lm, lx, Bq, Gy, Sv, kat; long forms (coulomb, volt, farad, ohm, siemens, weber, tesla, henry, lumen, lux, becquerel, gray, sievert, katal) and celsius. Removed these from unsupported list; tests and clippy pass.
+- **Review and improve:** README updated with full SI unit list and examples (1 second, 1 volt). Unit registry refactored with `add_derived_alias` helper to reduce repetition; long-form base unit aliases added (ampere, amperes, kelvin, kelvins, mole, moles, candela, candelas, gram, grams). Test `long_form_base_unit_aliases` added. All tests and clippy pass.
+
 ## Next steps
 - Optional: add more unit modules (time: week, year; imperial: foot, pound; etc.) or .nbt loader for full Numbat module set.

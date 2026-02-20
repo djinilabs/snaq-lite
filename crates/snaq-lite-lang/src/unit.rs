@@ -204,7 +204,8 @@ impl std::fmt::Display for Unit {
         }
         let pos: Vec<_> = self.factors.iter().filter(|x| x.exponent > Ratio::from_integer(0)).collect();
         let neg: Vec<_> = self.factors.iter().filter(|x| x.exponent < Ratio::from_integer(0)).collect();
-        let fmt_one = |factors: &[&UnitFactor]| {
+        // When in_denominator is true, show exponent as positive (e.g. "hour" not "hour⁻¹") since the slash already means "per".
+        let fmt_one = |factors: &[&UnitFactor], in_denominator: bool| {
             factors
                 .iter()
                 .map(|f| {
@@ -214,23 +215,24 @@ impl std::fmt::Display for Unit {
                         format!("{}{}", f.prefix.short_symbol(), f.unit_name)
                     };
                     let e = f.exponent;
-                    if e == Ratio::from_integer(1) {
+                    let display_exp = if in_denominator { -e } else { e };
+                    if display_exp == Ratio::from_integer(1) {
                         symbol
-                    } else if e == Ratio::from_integer(-1) {
+                    } else if display_exp == Ratio::from_integer(-1) {
                         format!("{symbol}⁻¹")
                     } else {
-                        format!("{symbol}^{e}")
+                        format!("{symbol}^{display_exp}")
                     }
                 })
                 .collect::<Vec<_>>()
                 .join("·")
         };
         if neg.is_empty() {
-            write!(f, "{}", fmt_one(&pos))
+            write!(f, "{}", fmt_one(&pos, false))
         } else if pos.is_empty() {
-            write!(f, "1/{}", fmt_one(&neg))
+            write!(f, "1/{}", fmt_one(&neg, true))
         } else {
-            write!(f, "{}/{}", fmt_one(&pos), fmt_one(&neg))
+            write!(f, "{}/{}", fmt_one(&pos, false), fmt_one(&neg, true))
         }
     }
 }
@@ -277,5 +279,14 @@ mod tests {
         assert_eq!(common.iter().count(), 1);
         assert_eq!(common.iter().next().unwrap().unit_name, "hour");
         assert_eq!(common.iter().next().unwrap().exponent, Ratio::from_integer(-1));
+    }
+
+    #[test]
+    fn unit_display_division_no_redundant_inverse() {
+        // Denominator factors are shown without ⁻¹ since the slash already means "per".
+        let km_h = Unit::from_base_unit("km").div(&Unit::from_base_unit("hour"));
+        assert_eq!(km_h.to_string(), "km/hour");
+        let kilometers_hour = Unit::from_base_unit("kilometers").div(&Unit::from_base_unit("hour"));
+        assert_eq!(kilometers_hour.to_string(), "kilometers/hour");
     }
 }

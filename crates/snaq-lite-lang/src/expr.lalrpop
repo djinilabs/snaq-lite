@@ -1,4 +1,4 @@
-//! Expression grammar: float literals, +, -, *, / (or "per"), parentheses.
+//! Expression grammar: float literals, +, -, *, / (or "per"), parentheses, implicit multiplication.
 //! Produces crate::ir::ExprDef.
 //! Float literals use conventional syntax; invalid/overflow yields a parse error.
 
@@ -19,11 +19,20 @@ pub Expr: ExprDef = {
     Term,
 };
 
+// Right-hand side of implicit multiplication only: number or parenthesized expr.
+// Excludes Ident so that "10 m" stays one quantity literal (Num Ident), not 10 * m.
+ImplicitMulRight: ExprDef = {
+    <n:Num> => ExprDef::LitScalar(n),
+    "(" <e:Expr> ")" => e,
+};
+
 Term: ExprDef = {
     <l:Term> "*" <r:Factor> => ExprDef::Mul(Box::new(l), Box::new(r)),
     <l:Term> "/" <r:Factor> => ExprDef::Div(Box::new(l), Box::new(r)),
     // "per" is division alias; LALRPOP gives string literals higher lexer priority than Ident, so "per" is not parsed as identifier
     <l:Term> "per" <r:Factor> => ExprDef::Div(Box::new(l), Box::new(r)),
+    // Implicit multiplication: only when RHS is number or (expr), e.g. "10 20" → 10*20, "2 (3+4)" → 14
+    <l:Term> <r:ImplicitMulRight> => ExprDef::Mul(Box::new(l), Box::new(r)),
     Factor,
 };
 

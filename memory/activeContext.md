@@ -1,6 +1,9 @@
 # Active context
 
 ## Just completed
+- **Unit display fix:** Division units (e.g. `kilometers / hour`) now display as `kilometers/hour` instead of `kilometers/hour⁻¹`. In `Unit::fmt`, denominator factors use positive exponent for display (slash already means "per"). Test `unit_display_division_no_redundant_inverse` added. All tests and clippy pass.
+
+## Just completed (earlier)
 - **Phase 2 – Syntax and evaluation:** Grammar supports quantity literals (`Num`, `Num Ident`, `Ident`); parser produces `LitScalar`/`LitWithUnit`/`LitUnit`; two-step resolve converts to `Lit(Quantity)`. IR uses `ExprDef::Lit(Quantity)`; `value()` returns `Result<Quantity, RunError>`. `run()` returns `Result<Quantity, RunError>`; `run_scalar()` for dimensionless result. Errors: UnknownUnit, DimensionMismatch, DivisionByZero. CLI/WASM use `run()` and Display. All tests and clippy pass.
 - **Phase 1 – Core model and SI:** Dimension, Unit, Quantity, prefix, unit/dimension registries; default_si_registry (m, s, kg, km, hour, minute).
 
@@ -22,6 +25,13 @@
 ## Just completed
 - **Division alias "per":** Grammar accepts `per` as alias for `/` (e.g. `3 kilometers per hour`). LALRPOP string literal has higher lexer priority than Ident, so "per" is parsed as operator. Test `run_per_alias_for_division`; README and systemPatterns updated.
 - **Review and improve (per):** Grammar comment on lexer priority for "per"; README example shows result (`3 km/hour`); `run()` doc mentions "per"; added `parse_per_same_as_div`, `parse_ident_containing_per_still_ident`, and `run_scalar("6 per 2")` in `eval_div`. All tests and clippy pass.
+
+## Just completed
+- **Implicit multiplication:** Grammar uses `ImplicitMulRight` (Num or `"(" Expr ")"`) so only number or parenthesized expr can be RHS of implicit mul (e.g. `10 20` → 200, `2 (3 + 4)` → 14, `10 m 2` → 20 m). `10 m` stays one quantity literal; no Term-Ident implicit mul. Tests: `parse_implicit_mul`, `eval_implicit_mul`, `eval_implicit_mul_with_units`. Test `parse_invalid_float_is_error` renamed to `parse_1_2_3_as_implicit_mul` (e.g. `1.2.3` now parses as 1.2 * .3 = 0.36). systemPatterns updated.
+
+## Review and improve (implicit multiplication)
+- **Docs:** systemPatterns.md now states implicit mul only when RHS is number or (expr); README Language + Examples mention implicit mul with `10 20`, `2 (3+4)`; `run()` doc in lib.rs updated.
+- **Tests:** `parse_quantity_literal` asserts "10 m" is LitWithUnit (not Mul); `eval_implicit_mul` adds "10 20 + 5" == 205 (precedence); `parse_implicit_mul_rhs_not_ident` documents that "2 3 m" is parse error (RHS of implicit mul cannot be Ident). All tests and clippy pass.
 
 ## Next steps
 - Optional: add more unit modules (time: week, year; imperial: foot, pound; etc.) or .nbt loader for full Numbat module set.

@@ -21,7 +21,8 @@ pub use unit_registry::{default_si_registry, UnitRegistry};
 
 /// Parse the expression string and evaluate it, returning a Quantity (value + unit).
 ///
-/// Supports float literals, quantity literals (e.g. `100 m`, `1.5 * km`), and unit-as-factor (e.g. `hour`).
+/// Supports float literals, quantity literals (e.g. `100 m`, `1.5 * km`), unit-as-factor (e.g. `hour`),
+/// implicit multiplication when the next token is a number or parenthesized expression (e.g. `10 20` → 200, `2 (3+4)` → 14).
 /// Division can be written as `/` or `per` (e.g. `3 kilometers per hour`).
 /// Uses the default registry: all 7 SI base units (m, kg, s, A, K, mol, cd), SI derived (J, C, V, F, ohm, S, Wb, T, H, Hz, N, Pa, W, lm, lx, Bq, Gy, Sv, kat), time/length (km, hour, minute, second, seconds), plus mile, au, parsec, light_year, joule, eV, celsius.
 /// Errors on parse failure, unknown unit, dimension mismatch (add/sub), or division by zero.
@@ -104,6 +105,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_implicit_mul() {
+        assert_eq!(
+            parse("10 20").unwrap(),
+            ExprDef::Mul(Box::new(lit_scalar(10.0)), Box::new(lit_scalar(20.0)))
+        );
+    }
+
+    #[test]
     fn parse_div() {
         assert_eq!(
             parse("6 / 2").unwrap(),
@@ -178,6 +187,11 @@ mod tests {
             parse("100 m").unwrap(),
             ExprDef::LitWithUnit(OrderedFloat::from(100.0), "m".to_string())
         );
+        // "10 m" is one quantity literal, not implicit mul 10 * m
+        assert_eq!(
+            parse("10 m").unwrap(),
+            ExprDef::LitWithUnit(OrderedFloat::from(10.0), "m".to_string())
+        );
         // "1.5 * km" parses as Mul(LitScalar(1.5), LitUnit("km")) and resolves to 1.5 km
         assert_eq!(
             parse("1.5 * km").unwrap(),
@@ -209,6 +223,14 @@ mod tests {
     #[test]
     fn eval_mul() {
         assert_eq!(run_scalar("2 * 3").unwrap(), 6.0);
+    }
+
+    #[test]
+    fn eval_implicit_mul() {
+        assert_eq!(run_scalar("10 20").unwrap(), 200.0);
+        assert_eq!(run_scalar("10 20 30").unwrap(), 6000.0);
+        assert_eq!(run_scalar("2 (3 + 4)").unwrap(), 14.0);
+        assert_eq!(run_scalar("10 20 + 5").unwrap(), 205.0); // (10*20)+5, implicit mul binds tighter than +
     }
 
     #[test]
@@ -252,11 +274,24 @@ mod tests {
     }
 
     #[test]
+    fn eval_implicit_mul_with_units() {
+        let q = run("10 m 2").unwrap();
+        assert!((q.value() - 20.0).abs() < 1e-10);
+        assert_eq!(q.unit().iter().next().unwrap().unit_name, "m");
+    }
+
+    #[test]
     fn eval_compound_unit() {
         let q = run("10 m / 2 s").unwrap();
         assert!((q.value() - 5.0).abs() < 1e-10);
         let factors: Vec<_> = q.unit().iter().collect();
         assert_eq!(factors.len(), 2);
+    }
+
+    #[test]
+    fn parse_implicit_mul_rhs_not_ident() {
+        // Implicit mul RHS is only number or (expr); "2 3 m" has no operator between 3 and m, so parse error
+        assert!(parse("2 3 m").is_err());
     }
 
     #[test]
@@ -272,9 +307,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_invalid_float_is_error() {
-        assert!(parse("1.2.3").is_err());
-        // "e10" parses as identifier LitUnit("e10"), not a number; unknown unit at resolve time
+    fn parse_1_2_3_as_implicit_mul() {
+        // With implicit multiplication, "1.2.3" parses as 1.2 * .3 (two Num tokens) = 0.36
+        assert_eq!(run_scalar("1.2.3").unwrap(), 0.36);
     }
 
     #[test]

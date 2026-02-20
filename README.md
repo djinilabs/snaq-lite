@@ -11,7 +11,7 @@ A Rust-based reactive arithmetic language that runs natively or from WebAssembly
 
 **Language:** Float literals (conventional syntax), `+`, `-`, `*`, `/` or `per`, parentheses, **implicit multiplication** (e.g. `10 20` → 200, `2 (3+4)` → 14), and **quantity literals**: `100 m`, `1.5 * km`, or a bare unit like `hour`. Built-in units: **all 7 SI base units** (m, kg, s, A, K, mol, cd), **all SI derived units with special names** (J, C, V, F, ohm, S, Wb, T, H, Hz, N, Pa, W, lm, lx, Bq, Gy, Sv, kat), time/length (km, g, hour, minute, second, seconds), and Numbat-style (mile, parsec, au, light_year, eV, celsius). Multiplication and division bind tighter than addition and subtraction.
 
-**Examples:** `1 + 2` → `3`; `10 20` → `200` (implicit mul); `2 (3+4)` → `14`; `100 km / hour` → `100 km/hour`; `3 kilometers per hour` → `3 km/hour`; `1.5 km + 500 m` → `2000 m`; `1 mile`, `1 eV`, `1 second`, `1 volt`.
+**Examples:** `1 + 2` → `3`; `10 20` → `200` (implicit mul); `2 (3+4)` → `14`; `100 km / hour` → `100 km/hour`; `3 kilometers per hour` → `3 km/hour`; `1.5 km + 500 m` → `2000 m`; `1 mile`, `1 eV`, `1 second`, `1 volt`. Division by zero: nonzero/0 yields ±∞ (e.g. `1/0` → `inf`); 0/0 errors.
 
 ## Structure
 

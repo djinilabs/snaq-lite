@@ -7,6 +7,7 @@ use ordered_float::OrderedFloat;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
 /// A numeric value with associated variance (uncertainty²).
+/// Infinite values (±∞) have variance 0.
 ///
 /// Variance is propagated through arithmetic for uncorrelated operands:
 /// - **Add/Sub:** Var(A ± B) = Var(A) + Var(B)
@@ -21,10 +22,10 @@ pub struct SnaqNumber {
 
 impl SnaqNumber {
     /// Create from a literal f64; variance is derived from representable precision
-    /// (half-ulp in relative terms: (value * ε/2)² for non-zero; 0 for zero).
+    /// (half-ulp in relative terms: (value * ε/2)² for finite non-zero; 0 for zero and ±∞).
     pub fn from_literal(x: f64) -> Self {
         let value = OrderedFloat::from(x);
-        let variance = if x == 0.0 {
+        let variance = if x == 0.0 || x.is_infinite() {
             0.0
         } else {
             (x.abs() * f64::EPSILON / 2.0).powi(2)
@@ -149,10 +150,11 @@ impl Div<f64> for SnaqNumber {
     }
 }
 
-/// Result of quantity operations that can fail (dimension mismatch, division by zero).
+/// Result of quantity operations that can fail (dimension mismatch, incompatible units, or 0/0).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuantityError {
     DimensionMismatch { left: Unit, right: Unit },
+    /// Indeterminate form 0/0 (nonzero/0 yields ±∞ and does not error).
     DivisionByZero,
     IncompatibleUnits(Unit, Unit),
 }
@@ -217,6 +219,16 @@ impl Quantity {
 
     pub fn is_zero(&self) -> bool {
         self.number.value() == 0.0
+    }
+
+    /// True if the numeric value is +∞ or -∞.
+    pub fn is_infinite(&self) -> bool {
+        self.number.value().is_infinite()
+    }
+
+    /// True if the numeric value is finite (not ±∞ and not NaN).
+    pub fn is_finite(&self) -> bool {
+        self.number.value().is_finite()
     }
 
     /// Extract numeric value if dimensionless; error otherwise.
@@ -321,6 +333,9 @@ impl Quantity {
                 target.clone(),
             ));
         }
+        if self.is_infinite() {
+            return Ok(Quantity::with_number(self.number, target.clone()));
+        }
 
         let common = Unit::common_factors(&self.unit, target);
         if !common.is_scalar() {
@@ -422,9 +437,23 @@ impl Mul for Quantity {
 impl Div for Quantity {
     type Output = Result<Quantity, QuantityError>;
 
+    /// Division: nonzero/0 → ±∞ (sign of numerator), 0/0 → DivisionByZero. Infinite values have variance 0.
     fn div(self, rhs: Quantity) -> Self::Output {
-        if rhs.number.value() == 0.0 {
-            return Err(QuantityError::DivisionByZero);
+        let r = rhs.number.value();
+        let s = self.number.value();
+        if r == 0.0 {
+            if s == 0.0 {
+                return Err(QuantityError::DivisionByZero);
+            }
+            let inf = if s.is_sign_positive() {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            };
+            return Ok(Quantity::with_number(
+                SnaqNumber::from_literal(inf),
+                self.unit.clone().div(&rhs.unit),
+            ));
         }
         Ok(Quantity::with_number(
             self.number / rhs.number,
@@ -542,6 +571,53 @@ mod tests {
         assert_eq!(simplified.unit().iter().next().unwrap().unit_name, "W");
         assert!((simplified.value() - 1.0).abs() < 1e-10);
     }
+
+    #[test]
+    fn quantity_div_by_zero_nonzero_yields_infinity() {
+        let zero = Quantity::from_scalar(0.0);
+        let pos = Quantity::from_scalar(1.0);
+        let neg = Quantity::from_scalar(-3.0);
+        let pos_inf = (pos / zero.clone()).unwrap();
+        assert_eq!(pos_inf.value(), f64::INFINITY);
+        assert_eq!(pos_inf.variance(), 0.0);
+        let neg_inf = (neg / zero).unwrap();
+        assert_eq!(neg_inf.value(), f64::NEG_INFINITY);
+        assert_eq!(neg_inf.variance(), 0.0);
+    }
+
+    #[test]
+    fn quantity_div_zero_by_zero_returns_err() {
+        let zero = Quantity::from_scalar(0.0);
+        let e = zero.clone() / zero;
+        assert!(e.is_err());
+        assert!(matches!(e.unwrap_err(), QuantityError::DivisionByZero));
+    }
+
+    #[test]
+    fn quantity_div_by_zero_with_units() {
+        let reg = default_si_registry();
+        let m = Unit::from_base_unit("m");
+        let s = Unit::from_base_unit("s");
+        let q = Quantity::new(3.0, m.clone());
+        let zero_s = Quantity::new(0.0, s.clone());
+        let result = (q / zero_s).unwrap();
+        assert_eq!(result.value(), f64::INFINITY);
+        assert!(result.is_infinite());
+        assert!(!result.is_finite());
+        assert!(reg.same_dimension(result.unit(), &m.div(&s)).unwrap());
+    }
+
+    #[test]
+    fn quantity_convert_to_preserves_infinity() {
+        let reg = default_si_registry();
+        let inf_km = Quantity::with_number(
+            SnaqNumber::from_literal(f64::INFINITY),
+            Unit::from_base_unit("km"),
+        );
+        let as_m = inf_km.convert_to(&reg, &Unit::from_base_unit("m")).unwrap();
+        assert_eq!(as_m.value(), f64::INFINITY);
+        assert!(as_m.is_infinite());
+    }
 }
 
 #[cfg(test)]
@@ -561,6 +637,16 @@ mod snaq_number_tests {
         assert_eq!(n.value(), 1.0);
         assert!(n.variance() > 0.0);
         assert!(n.variance() < 1e-20); // small relative to 1
+    }
+
+    #[test]
+    fn snaq_number_from_literal_infinite_has_zero_variance() {
+        let pos = SnaqNumber::from_literal(f64::INFINITY);
+        assert_eq!(pos.value(), f64::INFINITY);
+        assert_eq!(pos.variance(), 0.0);
+        let neg = SnaqNumber::from_literal(f64::NEG_INFINITY);
+        assert_eq!(neg.value(), f64::NEG_INFINITY);
+        assert_eq!(neg.variance(), 0.0);
     }
 
     #[test]

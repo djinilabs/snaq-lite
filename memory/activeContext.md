@@ -37,5 +37,9 @@
 - **Docs:** systemPatterns.md now states implicit mul only when RHS is number or (expr); README Language + Examples mention implicit mul with `10 20`, `2 (3+4)`; `run()` doc in lib.rs updated.
 - **Tests:** `parse_quantity_literal` asserts "10 m" is LitWithUnit (not Mul); `eval_implicit_mul` adds "10 20 + 5" == 205 (precedence); `parse_implicit_mul_rhs_not_ident` documents that "2 3 m" is parse error (RHS of implicit mul cannot be Ident). All tests and clippy pass.
 
+## Just completed
+- **Review and improve (division by zero / ±∞):** Added `Quantity::is_infinite()` and `Quantity::is_finite()`; `convert_to` short-circuits when value is infinite (same dimension, unit change only). `Quantity::div` uses `is_sign_positive()` for ±∞. `QuantityError::DivisionByZero` documented as 0/0 (indeterminate). Test `quantity_convert_to_preserves_infinity`; div tests assert `is_infinite()`/`is_finite()`. README: division-by-zero note and example (`1/0` → `inf`). All tests and clippy pass.
+- **Division by zero and ±infinity (no NaN):** Nonzero/0 → ±∞ (sign of numerator); 0/0 → DivisionByZero. SnaqNumber::from_literal sets variance 0 for infinite x. Quantity::div branches: 0/0 Err, nonzero/0 Ok(±∞). Tests: run_division_by_zero_nonzero_yields_infinity, run_zero_over_zero_returns_err, run_arithmetic_with_infinity; quantity and SnaqNumber tests for inf and div-by-zero.
+
 ## Next steps
 - Optional: add more unit modules (time: week, year; imperial: foot, pound; etc.) or .nbt loader for full Numbat module set.

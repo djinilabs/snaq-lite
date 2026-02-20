@@ -25,7 +25,7 @@ pub use unit_registry::{default_si_registry, UnitRegistry};
 /// implicit multiplication when the next token is a number or parenthesized expression (e.g. `10 20` → 200, `2 (3+4)` → 14).
 /// Division can be written as `/` or `per` (e.g. `3 kilometers per hour`).
 /// Uses the default registry: all 7 SI base units (m, kg, s, A, K, mol, cd), SI derived (J, C, V, F, ohm, S, Wb, T, H, Hz, N, Pa, W, lm, lx, Bq, Gy, Sv, kat), time/length (km, hour, minute, second, seconds), plus mile, au, parsec, light_year, joule, eV, celsius.
-/// Errors on parse failure, unknown unit, dimension mismatch (add/sub), or division by zero.
+/// Errors on parse failure, unknown unit, dimension mismatch (add/sub), or 0/0 (DivisionByZero). Nonzero/0 yields ±∞.
 pub fn run(input: &str) -> Result<Quantity, RunError> {
     run_with_registry(input, &default_si_registry())
 }
@@ -325,11 +325,28 @@ mod tests {
     }
 
     #[test]
-    fn run_division_by_zero_returns_err() {
-        let e = run("1 / 0").unwrap_err();
+    fn run_division_by_zero_nonzero_yields_infinity() {
+        let q = run("1 / 0").unwrap();
+        assert_eq!(q.value(), f64::INFINITY);
+        // 0 - 1/0 = -∞ (grammar has no leading unary minus)
+        let q = run("0 - 1/0").unwrap();
+        assert_eq!(q.value(), f64::NEG_INFINITY);
+        let q = run("3 m / 0 s").unwrap();
+        assert_eq!(q.value(), f64::INFINITY);
+    }
+
+    #[test]
+    fn run_zero_over_zero_returns_err() {
+        let e = run("0 / 0").unwrap_err();
         assert!(matches!(e, RunError::DivisionByZero));
-        let e = run("3 m / 0 s").unwrap_err();
-        assert!(matches!(e, RunError::DivisionByZero));
+    }
+
+    #[test]
+    fn run_arithmetic_with_infinity() {
+        let q = run("1/0 + 1").unwrap();
+        assert_eq!(q.value(), f64::INFINITY);
+        let q = run("2 * (1/0)").unwrap();
+        assert_eq!(q.value(), f64::INFINITY);
     }
 
     #[test]

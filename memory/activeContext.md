@@ -1,7 +1,7 @@
 # Active context
 
 ## Just completed
-- **Review and improve:** Grammar `Num` rule made fallible (=>?) so integer overflow returns a parse error instead of panicking. Added `extern { type Error = String }`, test `parse_integer_overflow_is_error`, test for i64::MAX and 0 in `parse_lit`, and doc on `run()` for i64 range.
+- **Parser: floats, parentheses, and full arithmetic:** IR switched to `Lit(OrderedFloat<f64>)` and added `Mul`/`Div`. Grammar: float literals (conventional syntax), three-level precedence (Expr/Term/Factor), `*` and `/`. Queries: build and value for Mul/Div; `value` returns `f64`. `run()` returns `Result<f64, RunError>`. Unit tests verify precedence (mul/div tighter than add/sub, left-to-right for * and /, parentheses override).
 
 ## Next steps
 - None specified.

@@ -1,9 +1,10 @@
-//! Expression grammar: integer literals, +, -, parentheses.
+//! Expression grammar: float literals, +, -, *, /, parentheses.
 //! Produces crate::ir::ExprDef.
-//! Integer literals must fit in i64; overflow yields a parse error.
+//! Float literals use conventional syntax; invalid/overflow yields a parse error.
 
 use crate::ir::ExprDef;
 use lalrpop_util::ParseError;
+use ordered_float::OrderedFloat;
 use std::str::FromStr;
 
 grammar;
@@ -19,13 +20,20 @@ pub Expr: ExprDef = {
 };
 
 Term: ExprDef = {
+    <l:Term> "*" <r:Factor> => ExprDef::Mul(Box::new(l), Box::new(r)),
+    <l:Term> "/" <r:Factor> => ExprDef::Div(Box::new(l), Box::new(r)),
+    Factor,
+};
+
+Factor: ExprDef = {
     <n:Num> => ExprDef::Lit(n),
     "(" <e:Expr> ")" => e,
 };
 
-Num: i64 = {
-    <s:r"[0-9]+"> =>? i64::from_str(s)
+Num: OrderedFloat<f64> = {
+    <s:r"([0-9]+\.?[0-9]*|[0-9]*\.[0-9]+)([eE][+-]?[0-9]+)?"> =>? f64::from_str(s)
+        .map(OrderedFloat::from)
         .map_err(|_| ParseError::User {
-            error: "integer out of range (must fit i64)".to_string(),
+            error: "invalid float literal or out of range".to_string(),
         }),
 };

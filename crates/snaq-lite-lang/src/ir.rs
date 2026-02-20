@@ -1,11 +1,15 @@
 //! IR: inputs and tracked expression graph for the reactive computation.
 
+use ordered_float::OrderedFloat;
+
 /// Definition of the root expression (plain data, no Salsa).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum ExprDef {
-    Lit(i64),
+    Lit(OrderedFloat<f64>),
     Add(Box<ExprDef>, Box<ExprDef>),
     Sub(Box<ExprDef>, Box<ExprDef>),
+    Mul(Box<ExprDef>, Box<ExprDef>),
+    Div(Box<ExprDef>, Box<ExprDef>),
 }
 
 /// Input that holds the root expression definition.
@@ -25,7 +29,9 @@ pub struct Expression<'db> {
 /// Data for an expression node; can reference other expressions.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, salsa::Update)]
 pub enum ExprData<'db> {
-    Lit(i64),
+    Lit(OrderedFloat<f64>),
     Add(Expression<'db>, Expression<'db>),
     Sub(Expression<'db>, Expression<'db>),
+    Mul(Expression<'db>, Expression<'db>),
+    Div(Expression<'db>, Expression<'db>),
 }

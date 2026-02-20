@@ -26,6 +26,16 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
             let right = build_expression(db, *r);
             ExprData::Sub(left, right)
         }
+        ExprDef::Mul(l, r) => {
+            let left = build_expression(db, *l);
+            let right = build_expression(db, *r);
+            ExprData::Mul(left, right)
+        }
+        ExprDef::Div(l, r) => {
+            let left = build_expression(db, *l);
+            let right = build_expression(db, *r);
+            ExprData::Div(left, right)
+        }
     };
     Expression::new(db, data)
 }
@@ -35,11 +45,13 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
 /// Memoized per `expr`; when any child's value changes,
 /// only dependent entries are recomputed.
 #[salsa::tracked]
-pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> i64 {
+pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> f64 {
     let data = expr.data(db);
     match data {
-        ExprData::Lit(n) => *n,
+        ExprData::Lit(n) => n.0,
         ExprData::Add(l, r) => value(db, *l) + value(db, *r),
         ExprData::Sub(l, r) => value(db, *l) - value(db, *r),
+        ExprData::Mul(l, r) => value(db, *l) * value(db, *r),
+        ExprData::Div(l, r) => value(db, *l) / value(db, *r),
     }
 }

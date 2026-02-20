@@ -1,5 +1,5 @@
 # Product context
 
 - **Goal:** Reactive arithmetic language (Salsa-based); runs natively or via WASM.
-- **Language (current):** Integer literals and `+` / `-` with parentheses. No bindings or variables.
-- **API:** `run(expression: &str) -> Result<i64, RunError>`.
+- **Language (current):** Float literals (conventional syntax), `+`, `-`, `*`, `/`, and parentheses. No bindings or variables. Precedence: `*` and `/` tighter than `+` and `-`.
+- **API:** `run(expression: &str) -> Result<f64, RunError>`.

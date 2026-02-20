@@ -2,7 +2,7 @@
 
 A Rust-based reactive arithmetic language that runs natively or from WebAssembly. Expressions form a computation graph: when an argument changes, only dependent operations are recomputed (via [Salsa](https://github.com/salsa-rs/salsa)).
 
-**API:** `run(expression, a, b)` — parse the expression (e.g. `"a + b"`), evaluate with the two number arguments, return `Result<i64, RunError>`.
+**API:** `run(expression)` — parse the expression (e.g. `"1 + 2"` or `"(10 - 3) + 1"`), evaluate, return `Result<i64, RunError>`. Language: integer literals and `+` / `-` with parentheses; no bindings.
 
 ## Structure
 

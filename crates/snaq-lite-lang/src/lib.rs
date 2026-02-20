@@ -6,22 +6,22 @@ pub mod parser;
 pub mod queries;
 
 pub use error::{ParseError, RunError};
-pub use ir::{ExprDef, Expression, Numbers, ProgramDef};
+pub use ir::{ExprDef, Expression, ProgramDef};
 pub use parser::parse;
 pub use queries::{program, value};
 
-/// Parse the expression string, run it with the two number arguments, and return the result.
+/// Parse the expression string and evaluate it.
 ///
+/// Integer literals must fit in `i64`; overflow is reported as a parse error.
 /// The computation is reactive (Salsa): changing inputs would invalidate only dependent nodes.
 /// This function creates a fresh database each call; for incremental updates, construct the
 /// database and inputs yourself and use [`program`] and [`value`].
-pub fn run(input: &str, a: i64, b: i64) -> Result<i64, RunError> {
+pub fn run(input: &str) -> Result<i64, RunError> {
     let root_def = parse(input).map_err(RunError::from)?;
     let db = salsa::DatabaseImpl::new();
-    let numbers = Numbers::new(&db, a, b);
     let program_def = ProgramDef::new(&db, root_def);
     let root = program(&db, program_def);
-    let result = value(&db, numbers, root);
+    let result = value(&db, root);
     Ok(result)
 }
 
@@ -29,71 +29,67 @@ pub fn run(input: &str, a: i64, b: i64) -> Result<i64, RunError> {
 mod tests {
     use super::*;
     use crate::ir::ExprDef;
-    use salsa::Setter;
 
     #[test]
-    fn parse_lit_a() {
-        assert_eq!(parse("a").unwrap(), ExprDef::LitA);
-    }
-
-    #[test]
-    fn parse_lit_b() {
-        assert_eq!(parse("b").unwrap(), ExprDef::LitB);
+    fn parse_lit() {
+        assert_eq!(parse("1").unwrap(), ExprDef::Lit(1));
+        assert_eq!(parse("42").unwrap(), ExprDef::Lit(42));
+        assert_eq!(parse("0").unwrap(), ExprDef::Lit(0));
+        assert_eq!(
+            parse("9223372036854775807").unwrap(),
+            ExprDef::Lit(i64::MAX)
+        );
     }
 
     #[test]
     fn parse_add() {
         assert_eq!(
-            parse("a + b").unwrap(),
-            ExprDef::Add(Box::new(ExprDef::LitA), Box::new(ExprDef::LitB))
+            parse("1 + 2").unwrap(),
+            ExprDef::Add(Box::new(ExprDef::Lit(1)), Box::new(ExprDef::Lit(2)))
         );
     }
 
     #[test]
     fn parse_sub() {
         assert_eq!(
-            parse("a - b").unwrap(),
-            ExprDef::Sub(Box::new(ExprDef::LitA), Box::new(ExprDef::LitB))
+            parse("1 - 2").unwrap(),
+            ExprDef::Sub(Box::new(ExprDef::Lit(1)), Box::new(ExprDef::Lit(2)))
         );
     }
 
     #[test]
     fn parse_with_parens() {
         assert_eq!(
-            parse("(a + b) - a").unwrap(),
+            parse("(1 + 2) - 1").unwrap(),
             ExprDef::Sub(
                 Box::new(ExprDef::Add(
-                    Box::new(ExprDef::LitA),
-                    Box::new(ExprDef::LitB)
+                    Box::new(ExprDef::Lit(1)),
+                    Box::new(ExprDef::Lit(2))
                 )),
-                Box::new(ExprDef::LitA)
+                Box::new(ExprDef::Lit(1))
             )
         );
     }
 
     #[test]
-    fn eval_lit_a() {
-        assert_eq!(run("a", 1, 2).unwrap(), 1);
-    }
-
-    #[test]
-    fn eval_lit_b() {
-        assert_eq!(run("b", 1, 2).unwrap(), 2);
+    fn eval_lit() {
+        assert_eq!(run("1").unwrap(), 1);
+        assert_eq!(run("42").unwrap(), 42);
     }
 
     #[test]
     fn eval_add() {
-        assert_eq!(run("a + b", 1, 2).unwrap(), 3);
+        assert_eq!(run("1 + 2").unwrap(), 3);
     }
 
     #[test]
     fn eval_sub() {
-        assert_eq!(run("a - b", 1, 2).unwrap(), -1);
+        assert_eq!(run("1 - 2").unwrap(), -1);
     }
 
     #[test]
     fn eval_parens() {
-        assert_eq!(run("(a + b) - a", 1, 2).unwrap(), 2);
+        assert_eq!(run("(1 + 2) - 1").unwrap(), 2);
     }
 
     #[test]
@@ -105,24 +101,30 @@ mod tests {
     #[test]
     fn parse_invalid_char_is_error() {
         assert!(parse("!").is_err());
-        assert!(parse("a + *").is_err());
+        assert!(parse("1 + *").is_err());
+    }
+
+    #[test]
+    fn parse_integer_overflow_is_error() {
+        // i64::MAX + 1
+        assert!(parse("9223372036854775808").is_err());
+        assert!(parse("99999999999999999999").is_err());
     }
 
     #[test]
     fn run_parse_error_returns_err() {
-        assert!(run("a +", 1, 2).is_err());
-        assert!(run("", 1, 2).is_err());
+        assert!(run("1 +").is_err());
+        assert!(run("").is_err());
     }
 
     #[test]
-    fn reactivity_when_number_changes_value_updates() {
-        let mut db = salsa::DatabaseImpl::new();
-        let numbers = Numbers::new(&db, 1, 2);
-        let program_def = ProgramDef::new(&db, parse("a + b").unwrap());
+    fn reactivity_when_program_changes_value_updates() {
+        let db = salsa::DatabaseImpl::new();
+        let program_def = ProgramDef::new(&db, parse("1 + 2").unwrap());
         let root = program(&db, program_def);
-        assert_eq!(value(&db, numbers, root), 3);
-        numbers.set_a(&mut db).to(10);
-        let root = program(&db, program_def);
-        assert_eq!(value(&db, numbers, root), 12);
+        assert_eq!(value(&db, root), 3);
+        let program_def2 = ProgramDef::new(&db, parse("10 + 2").unwrap());
+        let root2 = program(&db, program_def2);
+        assert_eq!(value(&db, root2), 12);
     }
 }

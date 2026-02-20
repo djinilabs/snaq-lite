@@ -1,17 +1,9 @@
 //! IR: inputs and tracked expression graph for the reactive computation.
 
-/// The two numeric arguments to the computation.
-#[salsa::input]
-pub struct Numbers {
-    pub a: i64,
-    pub b: i64,
-}
-
 /// Definition of the root expression (plain data, no Salsa).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum ExprDef {
-    LitA,
-    LitB,
+    Lit(i64),
     Add(Box<ExprDef>, Box<ExprDef>),
     Sub(Box<ExprDef>, Box<ExprDef>),
 }
@@ -33,8 +25,7 @@ pub struct Expression<'db> {
 /// Data for an expression node; can reference other expressions.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, salsa::Update)]
 pub enum ExprData<'db> {
-    LitA,
-    LitB,
+    Lit(i64),
     Add(Expression<'db>, Expression<'db>),
     Sub(Expression<'db>, Expression<'db>),
 }

@@ -6,5 +6,9 @@ edition = "2021"
 [lints]
 workspace = true
 
+[build-dependencies]
+lalrpop = "0.21"
+
 [dependencies]
+lalrpop-util = { version = "0.21", features = ["lexer"] }
 salsa = { version = "0.26.0", features = ["inventory"] }

@@ -1,0 +1,31 @@
+//! Expression grammar: integer literals, +, -, parentheses.
+//! Produces crate::ir::ExprDef.
+//! Integer literals must fit in i64; overflow yields a parse error.
+
+use crate::ir::ExprDef;
+use lalrpop_util::ParseError;
+use std::str::FromStr;
+
+grammar;
+
+extern {
+    type Error = String;
+}
+
+pub Expr: ExprDef = {
+    <l:Expr> "+" <r:Term> => ExprDef::Add(Box::new(l), Box::new(r)),
+    <l:Expr> "-" <r:Term> => ExprDef::Sub(Box::new(l), Box::new(r)),
+    Term,
+};
+
+Term: ExprDef = {
+    <n:Num> => ExprDef::Lit(n),
+    "(" <e:Expr> ")" => e,
+};
+
+Num: i64 = {
+    <s:r"[0-9]+"> =>? i64::from_str(s)
+        .map_err(|_| ParseError::User {
+            error: "integer out of range (must fit i64)".to_string(),
+        }),
+};

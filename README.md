@@ -4,7 +4,14 @@
 
 A Rust-based reactive arithmetic language that runs natively or from WebAssembly. Expressions form a computation graph: when an argument changes, only dependent operations are recomputed (via [Salsa](https://github.com/salsa-rs/salsa)).
 
-**API:** `run(expression)` — parse the expression (e.g. `"1 + 2"` or `"1.5 * (10 - 3)"`), evaluate, return `Result<f64, RunError>`. Language: float literals (conventional syntax), `+`, `-`, `*`, `/`, and parentheses; no bindings. Multiplication and division bind tighter than addition and subtraction.
+**API:**
+
+- **`run(expression)`** — Parse, evaluate, and return `Result<Quantity, RunError>`. A `Quantity` has a numeric value and a unit (e.g. `2.5 m`, `100 km/hour`, or plain `3` for dimensionless).
+- **`run_scalar(expression)`** — Same as `run`, but returns `Result<f64, RunError>`; errors if the result is not dimensionless (use when you only need a number).
+
+**Language:** Float literals (conventional syntax), `+`, `-`, `*`, `/`, parentheses, and **quantity literals**: `100 m`, `1.5 * km`, or a bare unit like `hour`. Built-in units include **all 7 SI base units** (m, kg, s, A, K, mol, cd), **SI derived** (km, g, hour, minute, Hz, N, Pa, J, W), and Numbat-style (mile, parsec, au, light_year, eV). Multiplication and division bind tighter than addition and subtraction.
+
+**Examples:** `1 + 2` → `3`; `100 km / hour` → `100 km/hour`; `1.5 km + 500 m` → `2000 m`; `1 mile`, `1 eV`.
 
 ## Structure
 

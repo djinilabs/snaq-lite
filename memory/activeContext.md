@@ -1,9 +1,19 @@
 # Active context
 
 ## Just completed
-- **GitHub CI workflow:** Added `.github/workflows/ci.yml` that runs on push/PR to main/master: checkout, Rust stable + clippy (from toolchain), wasm32 target, wasm-pack, Node LTS, Swatinem/rust-cache, then `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, and `wasm-pack test --node crates/snaq-lite-wasm`.
+- **Phase 2 – Syntax and evaluation:** Grammar supports quantity literals (`Num`, `Num Ident`, `Ident`); parser produces `LitScalar`/`LitWithUnit`/`LitUnit`; two-step resolve converts to `Lit(Quantity)`. IR uses `ExprDef::Lit(Quantity)`; `value()` returns `Result<Quantity, RunError>`. `run()` returns `Result<Quantity, RunError>`; `run_scalar()` for dimensionless result. Errors: UnknownUnit, DimensionMismatch, DivisionByZero. CLI/WASM use `run()` and Display. All tests and clippy pass.
+- **Phase 1 – Core model and SI:** Dimension, Unit, Quantity, prefix, unit/dimension registries; default_si_registry (m, s, kg, km, hour, minute).
 
-- **WASM generation and runtime tests:** (1) Added `wasm-bindgen-test` dev-dependency and four `#[wasm_bindgen_test]` tests in snaq-lite-wasm (evaluate success: simple add, mul+parens, float+precedence; error: parse error message). Runtime tests run with `wasm-pack test --node crates/snaq-lite-wasm`. (2) README documents WASM test commands (generation: `cargo build -p snaq-lite-wasm --target wasm32-unknown-unknown` or `./scripts/check-wasm-build.sh`; runtime: wasm-pack test). (3) `scripts/check-wasm-build.sh` builds for wasm32 and asserts the .wasm artifact exists.
+## Just completed (Phase 3)
+- **Phase 3 – Prefixes and simplification:** Prefix symbols in `prefix.rs`; `get_unit_with_prefix` in registry (longest-match prefix + base unit); Unit Display with prefix (e.g. km, µm) and ·/solidus/⁻¹; `Quantity::full_simplify` (dimensionless → scalar); `Quantity::full_simplify_with_registry` (prefer value in [0.1, 1000]).
+
+## Just completed (Phase 4)
+- **Phase 4 – Unit/dimension parity:** Extended default registry with Numbat-style units: Length (mile, au, parsec, light_year), Energy (joule, eV). Same names and conversion factors as Numbat for expressions like `1 mile`, `1 parsec`, `1 eV`, `100 km / hour`. More modules (time, imperial, cgs, etc.) can be added to the same built-in registry.
+
+## Review and improve (done)
+- **README:** Updated API to `run()` → `Quantity`, `run_scalar()`; added unit examples (100 km/hour, 1 mile, 1.5 km + 500 m).
+- **Tests:** Added `run_division_by_zero_returns_err` (1/0, 3 m / 0 s) and `run_dimension_mismatch_returns_err` (1 m + 1 s).
+- **API:** `run_with_registry(input, &UnitRegistry)` for custom registries; `run()` delegates to it. Exported `UnitRegistry`; added `Clone` to `UnitRegistry` and `DimensionRegistry`. Doc comments clarified (default units, when to use `run_scalar`).
 
 ## Next steps
-- None specified.
+- Optional: add more unit modules (time: week, year; imperial: foot, pound; etc.) or .nbt loader for full Numbat module set.

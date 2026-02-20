@@ -1,11 +1,20 @@
 //! IR: inputs and tracked expression graph for the reactive computation.
 
+use crate::quantity::Quantity;
 use ordered_float::OrderedFloat;
 
 /// Definition of the root expression (plain data, no Salsa).
+/// Parser produces LitScalar, LitWithUnit, LitUnit; after resolve() only Lit(Quantity) | Add | Sub | Mul | Div remain.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum ExprDef {
-    Lit(OrderedFloat<f64>),
+    /// Parsed: bare number (scalar).
+    LitScalar(OrderedFloat<f64>),
+    /// Parsed: number and unit identifier (e.g. "100 m").
+    LitWithUnit(OrderedFloat<f64>, String),
+    /// Parsed: unit only (e.g. "hour" = 1 hour).
+    LitUnit(String),
+    /// Resolved: quantity (value + unit).
+    Lit(Quantity),
     Add(Box<ExprDef>, Box<ExprDef>),
     Sub(Box<ExprDef>, Box<ExprDef>),
     Mul(Box<ExprDef>, Box<ExprDef>),
@@ -29,7 +38,7 @@ pub struct Expression<'db> {
 /// Data for an expression node; can reference other expressions.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, salsa::Update)]
 pub enum ExprData<'db> {
-    Lit(OrderedFloat<f64>),
+    Lit(Quantity),
     Add(Expression<'db>, Expression<'db>),
     Sub(Expression<'db>, Expression<'db>),
     Mul(Expression<'db>, Expression<'db>),

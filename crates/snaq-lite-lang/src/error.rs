@@ -2,6 +2,12 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunError {
     Parse(ParseError),
+    UnknownUnit(String),
+    DimensionMismatch {
+        left: crate::unit::Unit,
+        right: crate::unit::Unit,
+    },
+    DivisionByZero,
 }
 
 /// Parse error for expression strings.
@@ -28,6 +34,11 @@ impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RunError::Parse(e) => write!(f, "parse error: {}", e.message),
+            RunError::UnknownUnit(name) => write!(f, "unknown unit: {name}"),
+            RunError::DimensionMismatch { left, right } => {
+                write!(f, "dimension mismatch: {left} vs {right}")
+            }
+            RunError::DivisionByZero => write!(f, "division by zero"),
         }
     }
 }

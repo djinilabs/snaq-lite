@@ -11,5 +11,7 @@ lalrpop = "0.21"
 
 [dependencies]
 lalrpop-util = { version = "0.21", features = ["lexer"] }
+num-rational = "0.4"
+num-traits = "0.2"
 ordered-float = "4"
 salsa = { version = "0.26.0", features = ["inventory"] }

@@ -1,10 +1,292 @@
 //! Built-in functions: sin, cos, tan (trig, one arg in angle dimension: rad or degree), max, min (two args, same dimension).
+//! For well-known angles, exact symbolic results (0, 1, √2/2, etc.) are returned when possible.
 
 use crate::error::RunError;
 use crate::quantity::{Quantity, SnaqNumber};
 use crate::symbolic::{SymbolicExpr, SymbolicQuantity, Value};
 use crate::unit::Unit;
 use crate::unit_registry::UnitRegistry;
+
+use std::f64::consts::FRAC_PI_2;
+
+/// Well-known angle as a fraction of π (0, 1/6, 1/4, 1/3, 1/2, 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KnownAngle {
+    Zero,
+    PiSixth,
+    PiFourth,
+    PiThird,
+    PiHalf,
+    Pi,
+}
+
+impl KnownAngle {
+    pub fn rad_value(self) -> f64 {
+        match self {
+            KnownAngle::Zero => 0.0,
+            KnownAngle::PiSixth => std::f64::consts::PI / 6.0,
+            KnownAngle::PiFourth => std::f64::consts::PI / 4.0,
+            KnownAngle::PiThird => std::f64::consts::PI / 3.0,
+            KnownAngle::PiHalf => FRAC_PI_2,
+            KnownAngle::Pi => std::f64::consts::PI,
+        }
+    }
+}
+
+const TWO_PI: f64 = std::f64::consts::TAU;
+/// Epsilon for matching a radian value to a known angle. Must be large enough to absorb
+/// rounding from unit conversion (e.g. 90 degree → π/2 rad via 90 * (π/180)).
+const TRIG_EPS: f64 = 1e-8;
+
+/// Result of matching an angle: the base known angle and whether sin/cos are negated (angle in (π, 2π)).
+#[derive(Clone, Copy, Debug)]
+pub struct KnownAngleMatch {
+    pub angle: KnownAngle,
+    /// When true, sin(π + x) = -sin(x), cos(π + x) = -cos(x), tan(π + x) = tan(x).
+    pub negate_sin_cos: bool,
+}
+
+/// If `rad` (in radians) is close to a well-known angle a or a + π (normalized to [0, 2π)), return the match.
+pub fn known_angle_from_rad(rad: f64) -> Option<KnownAngleMatch> {
+    let r = rad.rem_euclid(TWO_PI);
+    // Check [0, π] first
+    for &angle in &[
+        KnownAngle::Zero,
+        KnownAngle::PiSixth,
+        KnownAngle::PiFourth,
+        KnownAngle::PiThird,
+        KnownAngle::PiHalf,
+        KnownAngle::Pi,
+    ] {
+        if (r - angle.rad_value()).abs() < TRIG_EPS {
+            return Some(KnownAngleMatch {
+                angle,
+                negate_sin_cos: false,
+            });
+        }
+    }
+    // Check (π, 2π): r = π + base, so base = r - π
+    let base = r - std::f64::consts::PI;
+    for &angle in &[
+        KnownAngle::Zero,
+        KnownAngle::PiSixth,
+        KnownAngle::PiFourth,
+        KnownAngle::PiThird,
+        KnownAngle::PiHalf,
+    ] {
+        if (base - angle.rad_value()).abs() < TRIG_EPS {
+            return Some(KnownAngleMatch {
+                angle,
+                negate_sin_cos: true,
+            });
+        }
+    }
+    None
+}
+
+/// Try to interpret the scalar expression (angle in rad or degree) as a well-known angle.
+/// For rad: expr = k*π for any k (e.g. pi, pi/4, pi + pi/4, 2*pi - pi/4); reduced modulo 2π.
+/// For degree: expr should be a number 0, 30, 45, 60, 90, 180, 210, 225, 240, 270, 360, etc.
+pub fn known_angle_from_symbolic(
+    expr: &SymbolicExpr,
+    unit: &Unit,
+    registry: &UnitRegistry,
+) -> Option<KnownAngleMatch> {
+    let rad = Unit::from_base_unit("rad");
+    let degree = Unit::from_base_unit("degree");
+    if registry.same_dimension(unit, &rad).unwrap_or(false) {
+        let k = expr_as_pi_multiple(expr)?;
+        let r = k.rem_euclid(2.0);
+        let frac_eps = 1e-9;
+        let (base, negate) = if r > 1.0 {
+            (r - 1.0, true)
+        } else {
+            (r, false)
+        };
+        let angle = if base.abs() < frac_eps {
+            KnownAngle::Zero
+        } else if (base - 1.0 / 6.0).abs() < frac_eps {
+            KnownAngle::PiSixth
+        } else if (base - 1.0 / 4.0).abs() < frac_eps {
+            KnownAngle::PiFourth
+        } else if (base - 1.0 / 3.0).abs() < frac_eps {
+            KnownAngle::PiThird
+        } else if (base - 1.0 / 2.0).abs() < frac_eps {
+            KnownAngle::PiHalf
+        } else if (base - 1.0).abs() < frac_eps {
+            KnownAngle::Pi
+        } else {
+            return None;
+        };
+        return Some(KnownAngleMatch { angle, negate_sin_cos: negate });
+    }
+    if registry.same_dimension(unit, &degree).unwrap_or(false) {
+        let d = expr_as_number(expr)?;
+        let deg = d.rem_euclid(360.0);
+        let (angle, negate) = match (deg.round() as i32 + 360) % 360 {
+            0 => (KnownAngle::Zero, false),
+            30 => (KnownAngle::PiSixth, false),
+            45 => (KnownAngle::PiFourth, false),
+            60 => (KnownAngle::PiThird, false),
+            90 => (KnownAngle::PiHalf, false),
+            180 => (KnownAngle::Pi, false),
+            210 => (KnownAngle::PiSixth, true),
+            225 => (KnownAngle::PiFourth, true),
+            240 => (KnownAngle::PiThird, true),
+            270 => (KnownAngle::PiHalf, true),
+            _ => return None,
+        };
+        return Some(KnownAngleMatch { angle, negate_sin_cos: negate });
+    }
+    None
+}
+
+/// Extract numeric value if the expression is a constant number.
+fn expr_as_number(expr: &SymbolicExpr) -> Option<f64> {
+    match expr {
+        SymbolicExpr::Number(x) => Some(*x),
+        SymbolicExpr::Sum { constant, terms, rest } if terms.is_empty() && rest.is_empty() => {
+            Some(*constant)
+        }
+        _ => None,
+    }
+}
+
+/// If expr represents k*π for some k, return k. Handles 0, pi, pi/2, pi+pi/4, 2*pi, etc.
+fn expr_as_pi_multiple(expr: &SymbolicExpr) -> Option<f64> {
+    match expr {
+        SymbolicExpr::Number(x) => {
+            if x.abs() < TRIG_EPS {
+                Some(0.0)
+            } else {
+                None
+            }
+        }
+        SymbolicExpr::Symbol(s) if s == "pi" || s == "π" => Some(1.0),
+        SymbolicExpr::Product { coef, symbols } => {
+            if symbols.len() == 1 && (symbols[0] == "pi" || symbols[0] == "π") {
+                Some(*coef)
+            } else {
+                None
+            }
+        }
+        SymbolicExpr::Div(a, b) => {
+            let num = a.as_ref();
+            let den = b.as_ref();
+            let den_val = expr_as_number(den)?;
+            if den_val.abs() < 1e-15 {
+                return None;
+            }
+            match num {
+                SymbolicExpr::Symbol(s) if s == "pi" || s == "π" => Some(1.0 / den_val),
+                SymbolicExpr::Product { coef, symbols } if symbols.len() == 1 && (symbols[0] == "pi" || symbols[0] == "π") => {
+                    Some(*coef / den_val)
+                }
+                _ => None,
+            }
+        }
+        SymbolicExpr::Sum {
+            constant,
+            terms,
+            rest,
+        } => {
+            if constant.abs() >= 1e-15 {
+                return None;
+            }
+            let mut k = 0.0_f64;
+            for (coef, syms) in terms {
+                if syms.len() == 1 && (syms[0] == "pi" || syms[0] == "π") {
+                    k += coef;
+                } else {
+                    return None;
+                }
+            }
+            for e in rest {
+                k += expr_as_pi_multiple(e)?;
+            }
+            Some(k)
+        }
+        SymbolicExpr::Neg(inner) => expr_as_pi_multiple(inner).map(|x| -x),
+        _ => None,
+    }
+}
+
+/// Exact symbolic result for sin at a well-known angle. Variance is 0 (exact).
+pub fn exact_sin(angle: KnownAngle) -> SymbolicExpr {
+    match angle {
+        KnownAngle::Zero => SymbolicExpr::Number(0.0),
+        KnownAngle::PiSixth => SymbolicExpr::Number(0.5),
+        KnownAngle::PiFourth => SymbolicExpr::div(
+            &SymbolicExpr::symbol("sqrt_2"),
+            &SymbolicExpr::Number(2.0),
+        ),
+        KnownAngle::PiThird => SymbolicExpr::div(
+            &SymbolicExpr::symbol("sqrt_3"),
+            &SymbolicExpr::Number(2.0),
+        ),
+        KnownAngle::PiHalf => SymbolicExpr::Number(1.0),
+        KnownAngle::Pi => SymbolicExpr::Number(0.0),
+    }
+}
+
+/// Exact symbolic result for cos at a well-known angle.
+pub fn exact_cos(angle: KnownAngle) -> SymbolicExpr {
+    match angle {
+        KnownAngle::Zero => SymbolicExpr::Number(1.0),
+        KnownAngle::PiSixth => SymbolicExpr::div(
+            &SymbolicExpr::symbol("sqrt_3"),
+            &SymbolicExpr::Number(2.0),
+        ),
+        KnownAngle::PiFourth => SymbolicExpr::div(
+            &SymbolicExpr::symbol("sqrt_2"),
+            &SymbolicExpr::Number(2.0),
+        ),
+        KnownAngle::PiThird => SymbolicExpr::Number(0.5),
+        KnownAngle::PiHalf => SymbolicExpr::Number(0.0),
+        KnownAngle::Pi => SymbolicExpr::Number(-1.0),
+    }
+}
+
+/// Exact symbolic result for tan at a well-known angle. Returns None for π/2 (undefined).
+/// tan(π + x) = tan(x), so no negate flag.
+pub fn exact_tan(angle: KnownAngle) -> Option<SymbolicExpr> {
+    match angle {
+        KnownAngle::Zero => Some(SymbolicExpr::Number(0.0)),
+        KnownAngle::PiSixth => Some(SymbolicExpr::div(
+            &SymbolicExpr::Number(1.0),
+            &SymbolicExpr::symbol("sqrt_3"),
+        )),
+        KnownAngle::PiFourth => Some(SymbolicExpr::Number(1.0)),
+        KnownAngle::PiThird => Some(SymbolicExpr::symbol("sqrt_3")),
+        KnownAngle::PiHalf => None, // pole
+        KnownAngle::Pi => Some(SymbolicExpr::Number(0.0)),
+    }
+}
+
+/// Exact sin for a known-angle match (handles a + n*π via negate_sin_cos).
+pub fn exact_sin_match(m: KnownAngleMatch) -> SymbolicExpr {
+    let e = exact_sin(m.angle);
+    if m.negate_sin_cos {
+        SymbolicExpr::neg(&e)
+    } else {
+        e
+    }
+}
+
+/// Exact cos for a known-angle match (handles a + n*π via negate_sin_cos).
+pub fn exact_cos_match(m: KnownAngleMatch) -> SymbolicExpr {
+    let e = exact_cos(m.angle);
+    if m.negate_sin_cos {
+        SymbolicExpr::neg(&e)
+    } else {
+        e
+    }
+}
+
+/// Exact tan for a known-angle match. tan(π + x) = tan(x), so no negate.
+pub fn exact_tan_match(m: KnownAngleMatch) -> Option<SymbolicExpr> {
+    exact_tan(m.angle)
+}
 
 /// Parameter names for each built-in (order matters for positional binding).
 pub fn param_names(name: &str) -> Option<&'static [&'static str]> {

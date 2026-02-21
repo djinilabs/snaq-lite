@@ -5,10 +5,12 @@ use std::collections::HashMap;
 
 /// Registry mapping symbol names to numeric values for substitution.
 ///
-/// Built-in constants: "pi", "π" → π; "e" → e. Any identifier not in the unit registry
-/// is treated as a symbol; symbols not present in this registry have no numeric value
-/// (e.g. user-defined names like `x`). Use [SymbolRegistry::get] to substitute; missing
-/// symbols return `None` and cause [crate::RunError::SymbolHasNoValue] when using [crate::Value::to_quantity].
+/// Built-in constants: "pi", "π" → π; "e" → e; "sqrt_2" → √2; "sqrt_3" → √3.
+/// These are used for exact trig display (symbolic) and for numeric substitution.
+/// Any identifier not in the unit registry is treated as a symbol; symbols not
+/// present in this registry have no numeric value (e.g. user-defined names like `x`).
+/// Use [SymbolRegistry::get] to substitute; missing symbols return `None` and
+/// cause [crate::RunError::SymbolHasNoValue] when using [crate::Value::to_quantity].
 #[derive(Clone, Default)]
 pub struct SymbolRegistry {
     values: HashMap<String, f64>,
@@ -19,12 +21,14 @@ impl SymbolRegistry {
         Self::default()
     }
 
-    /// Create the default registry with built-in constants: pi, π, e.
+    /// Create the default registry with built-in constants: pi, π, e, sqrt_2, sqrt_3.
     pub fn default_registry() -> Self {
         let mut r = Self::new();
         r.insert("pi", std::f64::consts::PI);
         r.insert("π", std::f64::consts::PI);
         r.insert("e", std::f64::consts::E);
+        r.insert("sqrt_2", 2_f64.sqrt());
+        r.insert("sqrt_3", 3_f64.sqrt());
         r
     }
 
@@ -56,5 +60,12 @@ mod tests {
     fn unknown_symbol_has_no_value() {
         let r = SymbolRegistry::default_registry();
         assert_eq!(r.get("foo"), None);
+    }
+
+    #[test]
+    fn default_has_sqrt_2_and_sqrt_3() {
+        let r = SymbolRegistry::default_registry();
+        assert!((r.get("sqrt_2").unwrap() - 2_f64.sqrt()).abs() < 1e-15);
+        assert!((r.get("sqrt_3").unwrap() - 3_f64.sqrt()).abs() < 1e-15);
     }
 }

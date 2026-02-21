@@ -695,10 +695,10 @@ mod tests {
 
     #[test]
     fn run_sin_pi_returns_numeric_zero() {
+        // sin(pi * rad) returns exact symbolic 0 (or numeric 0); to_quantity yields zero.
         let v = run("sin(pi * rad)").unwrap();
-        assert!(matches!(v, Value::Numeric(_)), "sin(pi * rad) should evaluate to numeric 0");
         let q = v.to_quantity(&SymbolRegistry::default_registry()).unwrap();
-        assert!(q.value().abs() < 1e-10);
+        assert!(q.value().abs() < 1e-10, "sin(pi * rad) should evaluate to 0");
     }
 
     #[test]
@@ -743,9 +743,145 @@ mod tests {
     }
 
     #[test]
+    fn resolve_180_times_degrees_as_unit() {
+        // "degrees" must resolve as unit so 180 * degrees = 180 degree
+        use crate::ir::ExprDef;
+        let reg = default_si_registry();
+        let root = parse("180 * degrees").unwrap();
+        let resolved = resolve::resolve(root, &reg).unwrap();
+        // Should be Mul(Lit(180), Lit(1 degree)), not Mul(..., LitSymbol("degrees"))
+        let (l, r) = match &resolved {
+            ExprDef::Mul(a, b) => (a.as_ref(), b.as_ref()),
+            _ => panic!("expected Mul, got {resolved:?}"),
+        };
+        assert!(!matches!(l, ExprDef::LitSymbol(_)), "left should be Lit(180), got {l:?}");
+        assert!(!matches!(r, ExprDef::LitSymbol(_)), "\"degrees\" must resolve as unit, got {r:?}");
+    }
+
+    #[test]
+    fn simplify_sin_180_times_degrees_arg_is_180_degree() {
+        // After full pipeline the sin argument must be 180 degree (not 180 scalar)
+        let reg = default_si_registry();
+        let sym_reg = SymbolRegistry::default_registry();
+        let root = parse("sin(180 * degrees)").unwrap();
+        let resolved = resolve::resolve(root, &reg).unwrap();
+        let simplified = cas::simplify_numeric(resolved, &reg, &sym_reg).unwrap();
+        let arg = match &simplified {
+            ExprDef::Call(_, args) => match args.first() {
+                Some(CallArg::Positional(e)) => e.as_ref(),
+                _ => panic!("expected one positional arg"),
+            },
+            _ => panic!("expected Call, got {simplified:?}"),
+        };
+        if let ExprDef::Lit(q) = arg {
+            let rad = Unit::from_base_unit("rad");
+            assert!(
+                reg.same_dimension(q.unit(), &rad).unwrap_or(false),
+                "sin argument must have angle dimension, got unit {:?}",
+                q.unit()
+            );
+            let as_rad = q.clone().convert_to(&reg, &rad).unwrap();
+            assert!(
+                (as_rad.value() - std::f64::consts::PI).abs() < 1e-6,
+                "sin argument should be 180° = π rad, got {} rad",
+                as_rad.value()
+            );
+        } else {
+            panic!("expected sin argument to be folded to Lit(180 degree), got {arg:?}");
+        }
+    }
+
+    #[test]
+    fn run_sin_180_times_degrees_equals_zero() {
+        // "180 * degrees" must resolve to 180 degree (same as "180 degree")
+        let q = run_numeric("sin(180 * degrees)").unwrap();
+        assert!(q.value().abs() < 1e-10, "sin(180 * degrees) = sin(180°) = 0, got {}", q.value());
+    }
+
+    #[test]
     fn run_sin_90_degree_equals_one() {
         let q = run_numeric("sin(90 degree)").unwrap();
         assert!((q.value() - 1.0).abs() < 1e-10, "sin(90 degree) ≈ 1");
+    }
+
+    #[test]
+    fn run_sin_90_degree_symbolic_exact() {
+        // 90 degree → π/2 rad should match known angle and return symbolic 1
+        let v = run("sin(90 degree)").unwrap();
+        let q = v.to_quantity(&SymbolRegistry::default_registry()).unwrap();
+        assert!((q.value() - 1.0).abs() < 1e-10, "sin(90 degree) = 1");
+    }
+
+    #[test]
+    fn run_sin_pi_fourth_symbolic_sqrt2_over_2() {
+        let v = run("sin(pi/4 * rad)").unwrap();
+        let s = format!("{v}");
+        assert!(
+            s.contains("√2") && (s.contains("2") || s.contains("/")),
+            "sin(π/4) should display with √2, got {s}"
+        );
+        // Substitution yields numeric √2/2
+        let q = v.to_quantity(&SymbolRegistry::default_registry()).unwrap();
+        assert!(
+            (q.value() - 2_f64.sqrt() / 2.0).abs() < 1e-10,
+            "sin(π/4) ≈ √2/2"
+        );
+    }
+
+    #[test]
+    fn run_numeric_sin_pi_fourth_is_number() {
+        let q = run_numeric("sin(pi/4 * rad)").unwrap();
+        assert!(
+            (q.value() - 2_f64.sqrt() / 2.0).abs() < 1e-10,
+            "run_numeric sin(π/4) should be a number ≈ √2/2"
+        );
+    }
+
+    #[test]
+    fn run_numeric_trig_result_is_number() {
+        // When numeric is required, result must be a number (no leftover symbols).
+        let q = run_numeric("cos(pi/3 * rad)").unwrap();
+        assert!((q.value() - 0.5).abs() < 1e-10, "cos(π/3) = 1/2");
+        let q2 = run_numeric("tan(pi/4 * rad)").unwrap();
+        assert!((q2.value() - 1.0).abs() < 1e-10, "tan(π/4) = 1");
+    }
+
+    #[test]
+    fn run_symbolic_trig_well_known_angles() {
+        // Symbolic run keeps constants like √2, π in display.
+        let v_cos = run("cos(pi/4 * rad)").unwrap();
+        let s = format!("{v_cos}");
+        assert!(s.contains("√2"), "cos(π/4) should show √2, got {s}");
+        let v_sin = run("sin(pi/3 * rad)").unwrap();
+        let s2 = format!("{v_sin}");
+        assert!(s2.contains("√3"), "sin(π/3) should show √3, got {s2}");
+    }
+
+    #[test]
+    fn run_trig_angle_plus_pi_numeric() {
+        // sin(5π/4) = -√2/2, cos(3π/2) = 0, sin(270 degree) = -1
+        let q = run_numeric("sin(5 * pi / 4 * rad)").unwrap();
+        assert!(
+            (q.value() - (-2_f64.sqrt() / 2.0)).abs() < 1e-10,
+            "sin(5π/4) = -√2/2"
+        );
+        let q2 = run_numeric("cos(3 * pi / 2 * rad)").unwrap();
+        assert!(q2.value().abs() < 1e-10, "cos(3π/2) = 0");
+        let q3 = run_numeric("sin(270 degree)").unwrap();
+        assert!((q3.value() - (-1.0)).abs() < 1e-10, "sin(270°) = -1");
+    }
+
+    #[test]
+    fn run_trig_angle_plus_pi_symbolic() {
+        // sin((pi + pi/4) * rad) = sin(5π/4) = -√2/2: symbolic result shows negated √2/2
+        let v = run("sin((pi + pi/4) * rad)").unwrap();
+        let s = format!("{v}");
+        assert!(s.contains("√2"), "sin((π+π/4) rad) should show √2, got {s}");
+        let q = v.to_quantity(&SymbolRegistry::default_registry()).unwrap();
+        assert!(
+            (q.value() - (-2_f64.sqrt() / 2.0)).abs() < 1e-10,
+            "sin((π+π/4) rad) = -√2/2"
+        );
     }
 
     #[test]

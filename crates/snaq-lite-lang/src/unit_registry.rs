@@ -120,10 +120,11 @@ impl UnitRegistry {
                     defining_unit,
                     ..
                 } => {
-                    let (base_u, _def_base_factor) =
+                    let (base_u, def_base_factor) =
                         self.to_base_unit_representation(defining_unit)?;
                     result_unit = result_unit.mul(&base_u.power(f.exponent));
-                    result_factor *= (prefix_factor * factor).powf(exp_f64);
+                    // Include defining unit's factor so e.g. degrees -> degree -> π/180 rad
+                    result_factor *= (prefix_factor * factor * def_base_factor).powf(exp_f64);
                 }
             }
         }
@@ -560,6 +561,16 @@ mod tests {
     }
 
     #[test]
+    fn degrees_unit_is_registered() {
+        let reg = default_si_registry();
+        assert!(
+            reg.get_unit_with_prefix("degrees").is_some(),
+            "\"degrees\" must resolve as a unit so that 180 * degrees = 180 degree"
+        );
+    }
+
+    /// 180 degree (singular) converts to π rad; same_dimension(rad, degree).
+    #[test]
     fn angle_rad_degree_same_dimension_and_convert() {
         let reg = default_si_registry();
         let rad = Unit::from_base_unit("rad");
@@ -568,6 +579,22 @@ mod tests {
         let q_180_deg = Quantity::new(180.0, degree);
         let as_rad = q_180_deg.convert_to(&reg, &rad).unwrap();
         assert!((as_rad.value() - std::f64::consts::PI).abs() < 1e-10, "180 degree = π rad");
+    }
+
+    /// Regression: "degrees" is a derived alias of "degree"; 180 degrees must convert to π rad
+    /// (to_base_unit_representation must include defining unit's factor for aliases).
+    #[test]
+    fn degrees_alias_converts_180_to_pi_rad() {
+        let reg = default_si_registry();
+        let degrees = reg.get_unit_with_prefix("degrees").unwrap();
+        let rad = Unit::from_base_unit("rad");
+        let q_180 = Quantity::new(180.0, degrees);
+        let as_rad = q_180.convert_to(&reg, &rad).unwrap();
+        assert!(
+            (as_rad.value() - std::f64::consts::PI).abs() < 1e-10,
+            "180 degrees = π rad (got {}); alias conversion must use degree factor",
+            as_rad.value()
+        );
     }
 
     #[test]

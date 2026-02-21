@@ -185,8 +185,55 @@ fn eval_call(
         })
         .collect();
     match param_values {
-        Ok(qs) => functions::call_builtin(name, &qs, registry),
+        Ok(qs) => {
+            // For trig at well-known angles, return symbolic exact result when possible.
+            if matches!(name, "sin" | "cos" | "tan") && qs.len() == 1 {
+                let rad_unit = Unit::from_base_unit("rad");
+                if let Ok(in_rad) = qs[0].clone().convert_to(registry, &rad_unit) {
+                    let angle_rad = in_rad.value();
+                    if let Some(m) = functions::known_angle_from_rad(angle_rad) {
+                        let exact = match name {
+                            "sin" => Some(functions::exact_sin_match(m)),
+                            "cos" => Some(functions::exact_cos_match(m)),
+                            "tan" => functions::exact_tan_match(m),
+                            _ => unreachable!(),
+                        };
+                        if let Some(expr) = exact {
+                            return Ok(Value::Symbolic(SymbolicQuantity::new(
+                                expr,
+                                Unit::scalar(),
+                            )));
+                        }
+                        // tan(π/2): fall through to call_builtin
+                    }
+                }
+            }
+            functions::call_builtin(name, &qs, registry)
+        }
         Err(_) => {
+            // Symbolic argument: try exact trig for well-known angle.
+            if matches!(name, "sin" | "cos" | "tan") && param_names.len() == 1 {
+                let v = bound.get(param_names[0]).unwrap();
+                if let Value::Symbolic(sq) = v {
+                    if let Some(m) =
+                        functions::known_angle_from_symbolic(&sq.expr, &sq.unit, registry)
+                    {
+                        let exact = match name {
+                            "sin" => Some(functions::exact_sin_match(m)),
+                            "cos" => Some(functions::exact_cos_match(m)),
+                            "tan" => functions::exact_tan_match(m),
+                            _ => unreachable!(),
+                        };
+                        if let Some(expr) = exact {
+                            return Ok(Value::Symbolic(SymbolicQuantity::new(
+                                expr,
+                                Unit::scalar(),
+                            )));
+                        }
+                        // tan(π/2): fall through to symbolic_call
+                    }
+                }
+            }
             let sym_args: Vec<SymbolicExpr> = param_names
                 .iter()
                 .map(|p| {

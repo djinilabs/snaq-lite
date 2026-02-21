@@ -352,13 +352,7 @@ impl fmt::Display for SymbolicExpr {
                     write!(f, "{x}")
                 }
             }
-            SymbolicExpr::Symbol(s) => {
-                if s == "pi" {
-                    write!(f, "π")
-                } else {
-                    write!(f, "{s}")
-                }
-            }
+            SymbolicExpr::Symbol(s) => format_symbol_name(f, s),
             SymbolicExpr::Sum {
                 constant,
                 terms,
@@ -419,17 +413,26 @@ impl fmt::Display for SymbolicExpr {
     }
 }
 
+/// Pretty display for known constants (π, √2, √3). Unknown symbols shown as-is.
+fn format_symbol_name(f: &mut fmt::Formatter<'_>, s: &str) -> fmt::Result {
+    match s {
+        "pi" | "π" => write!(f, "π"),
+        "sqrt_2" => write!(f, "√2"),
+        "sqrt_3" => write!(f, "√3"),
+        _ => write!(f, "{s}"),
+    }
+}
+
 fn format_symbols(f: &mut fmt::Formatter<'_>, symbols: &[String]) -> fmt::Result {
     for (i, s) in symbols.iter().enumerate() {
         if i > 0 {
             write!(f, "*")?;
         }
         if s.ends_with("⁻¹") {
-            write!(f, "1/{}", s.trim_end_matches("⁻¹"))?;
-        } else if s == "pi" {
-            write!(f, "π")?;
+            write!(f, "1/")?;
+            format_symbol_name(f, s.trim_end_matches("⁻¹"))?;
         } else {
-            write!(f, "{s}")?;
+            format_symbol_name(f, s)?;
         }
     }
     Ok(())
@@ -587,5 +590,15 @@ mod tests {
         let s = result.to_string();
         assert!(s.contains("abc") && (s.contains('-') || s.starts_with('-')), "expected -abc, got {s}");
         assert!(!s.contains("1*"), "should not show -1*abc");
+    }
+
+    #[test]
+    fn sqrt_2_display_and_substitute() {
+        let e = SymbolicExpr::symbol("sqrt_2");
+        let s = e.to_string();
+        assert!(s.contains("√2"), "display should show √2, got {s}");
+        let r = SymbolRegistry::default_registry();
+        let v = e.substitute(&r).unwrap();
+        assert!((v - 2_f64.sqrt()).abs() < 1e-15);
     }
 }

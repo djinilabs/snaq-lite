@@ -175,7 +175,10 @@ mod tests {
         // "per" is reserved as operator; identifiers like "percent" are still parsed as Ident
         assert_eq!(
             parse("1 percent").unwrap(),
-            ExprDef::LitWithUnit(OrderedFloat::from(1.0), "percent".to_string())
+            ExprDef::Mul(
+                Box::new(ExprDef::LitScalar(OrderedFloat::from(1.0))),
+                Box::new(ExprDef::LitUnit("percent".to_string()))
+            )
         );
     }
 
@@ -225,14 +228,20 @@ mod tests {
 
     #[test]
     fn parse_quantity_literal() {
+        // "100 m" and "10 m" parse as implicit mul (number * unit) and resolve to same quantity
         assert_eq!(
             parse("100 m").unwrap(),
-            ExprDef::LitWithUnit(OrderedFloat::from(100.0), "m".to_string())
+            ExprDef::Mul(
+                Box::new(ExprDef::LitScalar(OrderedFloat::from(100.0))),
+                Box::new(ExprDef::LitUnit("m".to_string()))
+            )
         );
-        // "10 m" is one quantity literal, not implicit mul 10 * m
         assert_eq!(
             parse("10 m").unwrap(),
-            ExprDef::LitWithUnit(OrderedFloat::from(10.0), "m".to_string())
+            ExprDef::Mul(
+                Box::new(ExprDef::LitScalar(OrderedFloat::from(10.0))),
+                Box::new(ExprDef::LitUnit("m".to_string()))
+            )
         );
         // "1.5 * km" parses as Mul(LitScalar(1.5), LitUnit("km")) and resolves to 1.5 km
         assert_eq!(
@@ -243,6 +252,23 @@ mod tests {
             )
         );
         assert_eq!(parse("hour").unwrap(), ExprDef::LitUnit("hour".to_string()));
+    }
+
+    #[test]
+    fn parse_2_pi_rad_implicit_mul() {
+        // "2 pi rad" parses as implicit mul chain (2 * pi * rad); pi → symbol, rad → unit
+        let parsed = parse("2 pi rad").unwrap();
+        let expected = ExprDef::Mul(
+            Box::new(ExprDef::Mul(
+                Box::new(ExprDef::LitScalar(OrderedFloat::from(2.0))),
+                Box::new(ExprDef::LitUnit("pi".to_string())),
+            )),
+            Box::new(ExprDef::LitUnit("rad".to_string())),
+        );
+        assert_eq!(parsed, expected);
+        let q = run_numeric("2 pi rad").unwrap();
+        assert!((q.value() - 2.0 * std::f64::consts::PI).abs() < 1e-10);
+        assert_eq!(q.unit().iter().next().map(|f| f.unit_name.as_str()), Some("rad"));
     }
 
     #[test]
@@ -339,8 +365,32 @@ mod tests {
 
     #[test]
     fn parse_implicit_mul_rhs_not_ident() {
-        // Implicit mul RHS is only number or (expr); "2 3 m" has no operator between 3 and m, so parse error
+        // Implicit mul RHS is only number or (expr). "2 3 m" has no op between 3 and m, so parse error.
         assert!(parse("2 3 m").is_err());
+    }
+
+    #[test]
+    fn parse_pi_rad_implicit_mul() {
+        // "pi rad" parses as implicit mul (no number); pi → symbol, rad → unit
+        let parsed = parse("pi rad").unwrap();
+        let expected = ExprDef::Mul(
+            Box::new(ExprDef::LitUnit("pi".to_string())),
+            Box::new(ExprDef::LitUnit("rad".to_string())),
+        );
+        assert_eq!(parsed, expected);
+        let q = run_numeric("pi rad").unwrap();
+        assert!((q.value() - std::f64::consts::PI).abs() < 1e-10);
+        assert_eq!(q.unit().iter().next().map(|f| f.unit_name.as_str()), Some("rad"));
+    }
+
+    #[test]
+    fn parse_unicode_pi_rad_implicit_mul() {
+        // "π rad" (unicode) parses like "pi rad" via PiIdents
+        let q = run_numeric("π rad").unwrap();
+        assert!((q.value() - std::f64::consts::PI).abs() < 1e-10);
+        assert_eq!(q.unit().iter().next().map(|f| f.unit_name.as_str()), Some("rad"));
+        let q_sin = run_numeric("sin(π rad)").unwrap();
+        assert!(q_sin.value().abs() < 1e-10, "sin(π rad) ≈ 0");
     }
 
     #[test]

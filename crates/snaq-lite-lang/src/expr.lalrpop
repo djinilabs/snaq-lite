@@ -1,6 +1,8 @@
 //! Expression grammar: float literals, +, -, *, / (or "per"), parentheses, implicit multiplication, function calls.
 //! Produces crate::ir::ExprDef.
 //! Uses custom lexer so "ident (" is tokenized as FuncIdent; "sin(1)" is a call, "sin" alone is Ident.
+//! NumIdents (number + one or more idents) and IdentIdents (one or more idents) form single factors
+//! so "2 pi rad", "pi rad", and "1 s" parse correctly; PiIdents allows "π rad" like "pi rad".
 
 use crate::ir::{CallArg, ExprDef};
 use crate::lexer::Tok;
@@ -39,6 +41,43 @@ ImplicitMulRight: ExprDef = {
     "(" <e:Expr> ")" => e,
 };
 
+// Number followed by one or more idents: "1 s" or "2 pi rad" as a single factor (so "/ 1 s" divides by 1 s).
+NumIdents: ExprDef = {
+    <n:Num> <id:Ident> => ExprDef::Mul(
+        Box::new(ExprDef::LitScalar(n)),
+        Box::new(ExprDef::LitUnit(id)),
+    ),
+    <prev:NumIdents> <id:Ident> => ExprDef::Mul(Box::new(prev), Box::new(ExprDef::LitUnit(id))),
+};
+
+// One or more idents (no number): "pi" or "pi rad" as a single factor.
+IdentIdents: ExprDef = {
+    <id:Ident> => ExprDef::LitUnit(id),
+    <prev:IdentIdents> <id:Ident> => ExprDef::Mul(Box::new(prev), Box::new(ExprDef::LitUnit(id))),
+};
+
+// One or more idents following "π" (so "π rad" and "π rad degree" work like "pi rad").
+IdentsRest: ExprDef = {
+    <id:Ident> => ExprDef::LitUnit(id),
+    <prev:IdentsRest> <id:Ident> => ExprDef::Mul(Box::new(prev), Box::new(ExprDef::LitUnit(id))),
+};
+
+// "π" alone or "π" followed by one or more idents (e.g. "π rad").
+PiIdents: ExprDef = {
+    "π" => ExprDef::LitSymbol("pi".to_string()),
+    "π" <id:Ident> => ExprDef::Mul(
+        Box::new(ExprDef::LitSymbol("pi".to_string())),
+        Box::new(ExprDef::LitUnit(id)),
+    ),
+    "π" <id:Ident> <rest:IdentsRest> => ExprDef::Mul(
+        Box::new(ExprDef::Mul(
+            Box::new(ExprDef::LitSymbol("pi".to_string())),
+            Box::new(ExprDef::LitUnit(id)),
+        )),
+        Box::new(rest),
+    ),
+};
+
 Term: ExprDef = {
     <l:Term> "*" <r:Factor> => ExprDef::Mul(Box::new(l), Box::new(r)),
     <l:Term> "/" <r:Factor> => ExprDef::Div(Box::new(l), Box::new(r)),
@@ -49,11 +88,11 @@ Term: ExprDef = {
 
 Factor: ExprDef = {
     "-" <e:Factor> => ExprDef::Neg(Box::new(e)),
-    <n:Num> <id:Ident> => ExprDef::LitWithUnit(n, id),
+    <ni:NumIdents> => ni,
     <n:Num> => ExprDef::LitScalar(n),
-    "π" => ExprDef::LitSymbol("pi".to_string()),
+    <pi:PiIdents> => pi,
     <id:FuncIdent> "(" <args:ArgList> ")" => ExprDef::Call(id, args),
-    <id:Ident> => ExprDef::LitUnit(id),
+    <ii:IdentIdents> => ii,
     "(" <e:Expr> ")" => e,
 };
 

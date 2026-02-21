@@ -1,9 +1,11 @@
 //! Unit registry: base and derived units, resolution to base representation.
 //! Supports prefix parsing (e.g. "km" → kilo × meter).
+//! Plural unit names (e.g. "meters") are normalized to singular before lookup.
 
 use crate::dimension::{BaseRepresentation, DimensionRegistry};
 use crate::prefix::{self, Prefix};
 use crate::unit::{Unit, UnitFactor};
+use singularize::singularize;
 use std::collections::HashMap;
 
 /// Definition of a unit: either base (fundamental) or derived from another unit.
@@ -75,22 +77,43 @@ impl UnitRegistry {
         self.units.get(name).map(|_| Unit::from_base_unit(name))
     }
 
-    /// Resolve identifier to Unit: exact name first, then prefix + base unit (e.g. "km" → kilo×m).
-    /// Prefixes tried longest-first so "Mm" → mega×m not milli×"m" (invalid).
-    pub fn get_unit_with_prefix(&self, ident: &str) -> Option<Unit> {
+    /// Try to resolve an identifier to a Unit: exact match first, then prefix + base (e.g. "km" → kilo×m).
+    /// Prefix list must be sorted longest-first (so "Mm" → mega×m, not milli×"m").
+    fn try_lookup(
+        &self,
+        ident: &str,
+        prefixes_by_len: &[&(&str, Prefix)],
+    ) -> Option<Unit> {
         if self.units.contains_key(ident) {
             return self.get_unit(ident);
         }
-        let prefixes = prefix::metric_short_prefixes();
-        let mut by_len: Vec<_> = prefixes.iter().collect();
-        by_len.sort_by_key(|(s, _)| std::cmp::Reverse(s.len()));
-        for (symbol, p) in by_len {
-            if ident.len() > symbol.len() && ident.starts_with(symbol) {
+        for (symbol, p) in prefixes_by_len {
+            if ident.len() > symbol.len() && ident.starts_with(*symbol) {
                 let base = &ident[symbol.len()..];
                 if self.units.contains_key(base) {
                     let u = self.get_unit(base).unwrap();
                     return Some(u.with_prefix(*p));
                 }
+            }
+        }
+        None
+    }
+
+    /// Resolve identifier to Unit: exact name first, then prefix + base unit (e.g. "km" → kilo×m).
+    /// If not found, singularize the identifier and try again (e.g. "meters" → "meter").
+    /// The returned Unit always uses the canonical (singular) registry key for display/storage.
+    /// Prefixes tried longest-first so "Mm" → mega×m not milli×"m" (invalid).
+    pub fn get_unit_with_prefix(&self, ident: &str) -> Option<Unit> {
+        let prefixes = prefix::metric_short_prefixes();
+        let mut by_len: Vec<_> = prefixes.iter().collect();
+        by_len.sort_by_key(|(s, _)| std::cmp::Reverse(s.len()));
+        if let Some(u) = self.try_lookup(ident, &by_len) {
+            return Some(u);
+        }
+        let canonical = singularize(ident);
+        if canonical != ident {
+            if let Some(u) = self.try_lookup(&canonical, &by_len) {
+                return Some(u);
             }
         }
         None
@@ -177,7 +200,7 @@ fn add_derived_alias(
 /// Build default registry with full SI base units, key SI derived units, and Numbat-parity units.
 ///
 /// **SI base (7):** m (length), kg (mass), s (time), A (current), K (temperature), mol (amount), cd (luminous intensity).
-/// **SI derived (with special names):** J, C, V, F, ohm, S, Wb, T, H, Hz, N, Pa, W, lm, lx, Bq, Gy, Sv, kat; km, g, hour, minute, second, seconds; plus mile, au, parsec, light_year, eV, celsius.
+/// **SI derived (with special names):** J, C, V, F, ohm, S, Wb, T, H, Hz, N, Pa, W, lm, lx, Bq, Gy, Sv, kat; km, g, hour, minute, second; plus mile, au, parsec, light_year, eV, celsius. Plural input (e.g. "meters") is normalized to singular before lookup.
 pub fn default_si_registry() -> UnitRegistry {
     let mut reg = UnitRegistry::new();
 
@@ -201,13 +224,9 @@ pub fn default_si_registry() -> UnitRegistry {
     reg.add_base_unit("cd", BaseRepresentation::from_base("LuminousIntensity"));
     reg.add_base_unit("rad", BaseRepresentation::from_base("Angle")); // Angle base unit (SI coherent)
     add_derived_alias(&mut reg, "ampere", "Current", Unit::from_base_unit("A"));
-    add_derived_alias(&mut reg, "amperes", "Current", Unit::from_base_unit("A"));
     add_derived_alias(&mut reg, "kelvin", "Temperature", Unit::from_base_unit("K"));
-    add_derived_alias(&mut reg, "kelvins", "Temperature", Unit::from_base_unit("K"));
     add_derived_alias(&mut reg, "mole", "AmountOfSubstance", Unit::from_base_unit("mol"));
-    add_derived_alias(&mut reg, "moles", "AmountOfSubstance", Unit::from_base_unit("mol"));
     add_derived_alias(&mut reg, "candela", "LuminousIntensity", Unit::from_base_unit("cd"));
-    add_derived_alias(&mut reg, "candelas", "LuminousIntensity", Unit::from_base_unit("cd"));
 
     // Angle: rad (base), degree = π/180 rad
     reg.add_derived_unit(
@@ -216,17 +235,9 @@ pub fn default_si_registry() -> UnitRegistry {
         std::f64::consts::PI / 180.0,
         Unit::from_base_unit("rad"),
     );
-    add_derived_alias(&mut reg, "degrees", "Angle", Unit::from_base_unit("degree"));
-
     // Length: SI derived + Numbat parity (with long-form aliases)
     reg.add_derived_unit(
         "meter",
-        BaseRepresentation::from_base("Length"),
-        1.0,
-        Unit::from_base_unit("m"),
-    );
-    reg.add_derived_unit(
-        "meters",
         BaseRepresentation::from_base("Length"),
         1.0,
         Unit::from_base_unit("m"),
@@ -239,12 +250,6 @@ pub fn default_si_registry() -> UnitRegistry {
     );
     reg.add_derived_unit(
         "kilometer",
-        BaseRepresentation::from_base("Length"),
-        1000.0,
-        Unit::from_base_unit("m"),
-    );
-    reg.add_derived_unit(
-        "kilometers",
         BaseRepresentation::from_base("Length"),
         1000.0,
         Unit::from_base_unit("m"),
@@ -293,12 +298,6 @@ pub fn default_si_registry() -> UnitRegistry {
         1.0,
         Unit::from_base_unit("s"),
     );
-    reg.add_derived_unit(
-        "seconds",
-        BaseRepresentation::from_base("Time"),
-        1.0,
-        Unit::from_base_unit("s"),
-    );
     reg.dimensions.add_base_dimension("Frequency");
     reg.add_derived_unit(
         "Hz",
@@ -315,7 +314,6 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("kg"),
     );
     add_derived_alias(&mut reg, "gram", "Mass", Unit::from_base_unit("g"));
-    add_derived_alias(&mut reg, "grams", "Mass", Unit::from_base_unit("g"));
 
     // Energy: joule = kg·m²/s², eV = 1.602176634e-19 J
     let joule_unit = Unit::from_base_unit("kg")
@@ -379,7 +377,6 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("A").mul(&Unit::from_base_unit("s")),
     );
     add_derived_alias(&mut reg, "coulomb", "ElectricCharge", Unit::from_base_unit("C"));
-    add_derived_alias(&mut reg, "coulombs", "ElectricCharge", Unit::from_base_unit("C"));
 
     // Voltage: V = J/C = W/A
     reg.dimensions.add_base_dimension("Voltage");
@@ -390,7 +387,6 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("joule").div(&Unit::from_base_unit("C")),
     );
     add_derived_alias(&mut reg, "volt", "Voltage", Unit::from_base_unit("V"));
-    add_derived_alias(&mut reg, "volts", "Voltage", Unit::from_base_unit("V"));
 
     // Capacitance: F = C/V
     reg.dimensions.add_base_dimension("Capacitance");
@@ -401,7 +397,6 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("C").div(&Unit::from_base_unit("V")),
     );
     add_derived_alias(&mut reg, "farad", "Capacitance", Unit::from_base_unit("F"));
-    add_derived_alias(&mut reg, "farads", "Capacitance", Unit::from_base_unit("F"));
 
     // Resistance: ohm = V/A (symbol Ω not in Ident, use "ohm")
     reg.dimensions.add_base_dimension("Resistance");
@@ -411,7 +406,6 @@ pub fn default_si_registry() -> UnitRegistry {
         1.0,
         Unit::from_base_unit("V").div(&Unit::from_base_unit("A")),
     );
-    add_derived_alias(&mut reg, "ohms", "Resistance", Unit::from_base_unit("ohm"));
 
     // Conductance: S = A/V (siemens)
     reg.dimensions.add_base_dimension("Conductance");
@@ -432,7 +426,6 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("V").mul(&Unit::from_base_unit("s")),
     );
     add_derived_alias(&mut reg, "weber", "MagneticFlux", Unit::from_base_unit("Wb"));
-    add_derived_alias(&mut reg, "webers", "MagneticFlux", Unit::from_base_unit("Wb"));
 
     // Magnetic flux density: T = Wb/m²
     reg.dimensions.add_base_dimension("MagneticFluxDensity");
@@ -443,7 +436,6 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("Wb").div(&Unit::from_base_unit("m").powi(2)),
     );
     add_derived_alias(&mut reg, "tesla", "MagneticFluxDensity", Unit::from_base_unit("T"));
-    add_derived_alias(&mut reg, "teslas", "MagneticFluxDensity", Unit::from_base_unit("T"));
 
     // Inductance: H = Wb/A
     reg.dimensions.add_base_dimension("Inductance");
@@ -454,7 +446,6 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("Wb").div(&Unit::from_base_unit("A")),
     );
     add_derived_alias(&mut reg, "henry", "Inductance", Unit::from_base_unit("H"));
-    add_derived_alias(&mut reg, "henrys", "Inductance", Unit::from_base_unit("H"));
 
     // Luminous flux: lm = cd (steradian is dimensionless)
     reg.dimensions.add_base_dimension("LuminousFlux");
@@ -465,7 +456,6 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("cd"),
     );
     add_derived_alias(&mut reg, "lumen", "LuminousFlux", Unit::from_base_unit("lm"));
-    add_derived_alias(&mut reg, "lumens", "LuminousFlux", Unit::from_base_unit("lm"));
 
     // Illuminance: lx = lm/m²
     reg.dimensions.add_base_dimension("Illuminance");
@@ -486,7 +476,6 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("s").powi(-1),
     );
     add_derived_alias(&mut reg, "becquerel", "Activity", Unit::from_base_unit("Bq"));
-    add_derived_alias(&mut reg, "becquerels", "Activity", Unit::from_base_unit("Bq"));
 
     // Absorbed dose: Gy = J/kg
     reg.dimensions.add_base_dimension("AbsorbedDose");
@@ -497,7 +486,6 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("joule").div(&Unit::from_base_unit("kg")),
     );
     add_derived_alias(&mut reg, "gray", "AbsorbedDose", Unit::from_base_unit("Gy"));
-    add_derived_alias(&mut reg, "grays", "AbsorbedDose", Unit::from_base_unit("Gy"));
 
     // Equivalent dose: Sv = J/kg (same dimension as Gy, different quantity type)
     reg.dimensions.add_base_dimension("EquivalentDose");
@@ -508,7 +496,6 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("joule").div(&Unit::from_base_unit("kg")),
     );
     add_derived_alias(&mut reg, "sievert", "EquivalentDose", Unit::from_base_unit("Sv"));
-    add_derived_alias(&mut reg, "sieverts", "EquivalentDose", Unit::from_base_unit("Sv"));
 
     // Catalytic activity: kat = mol/s
     reg.dimensions.add_base_dimension("CatalyticActivity");
@@ -519,7 +506,6 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("mol").div(&Unit::from_base_unit("s")),
     );
     add_derived_alias(&mut reg, "katal", "CatalyticActivity", Unit::from_base_unit("kat"));
-    add_derived_alias(&mut reg, "katals", "CatalyticActivity", Unit::from_base_unit("kat"));
 
     // Degree Celsius: same dimension as K, factor 1 (offset 273.15 not modeled)
     add_derived_alias(&mut reg, "celsius", "Temperature", Unit::from_base_unit("K"));

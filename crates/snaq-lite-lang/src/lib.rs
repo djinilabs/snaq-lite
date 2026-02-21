@@ -449,11 +449,11 @@ mod tests {
 
         let q2 = run_numeric("5 seconds").unwrap();
         assert!((q2.value() - 5.0).abs() < 1e-10);
-        assert_eq!(q2.unit().iter().next().unwrap().unit_name, "seconds");
+        assert_eq!(q2.unit().iter().next().unwrap().unit_name, "second");
 
         let q3 = run_numeric("1 minute + 30 seconds").unwrap();
         assert!((q3.value() - 90.0).abs() < 1e-6);
-        assert_eq!(q3.unit().iter().next().unwrap().unit_name, "seconds");
+        assert_eq!(q3.unit().iter().next().unwrap().unit_name, "second");
     }
 
     #[test]
@@ -511,7 +511,18 @@ mod tests {
     fn run_long_form_units_kilometers() {
         let q = run_numeric("32 kilometers").unwrap();
         assert!((q.value() - 32.0).abs() < 1e-10);
-        assert_eq!(q.unit().iter().next().unwrap().unit_name, "kilometers");
+        assert_eq!(q.unit().iter().next().unwrap().unit_name, "kilometer");
+    }
+
+    #[test]
+    fn plural_unit_input_resolves_to_canonical_singular() {
+        let q_meters = run_numeric("2 meters").unwrap();
+        assert!((q_meters.value() - 2.0).abs() < 1e-10);
+        assert_eq!(q_meters.unit().iter().next().unwrap().unit_name, "meter");
+
+        let q_seconds = run_numeric("1 seconds").unwrap();
+        assert!((q_seconds.value() - 1.0).abs() < 1e-10);
+        assert_eq!(q_seconds.unit().iter().next().unwrap().unit_name, "second");
     }
 
     #[test]
@@ -529,6 +540,9 @@ mod tests {
         assert!((q_slash.value() - q_per.value()).abs() < 1e-10);
         assert_eq!(q_slash.unit(), q_per.unit());
         assert!((q_per.value() - 3.0).abs() < 1e-10);
+        // Plural "kilometers" resolves to canonical singular in compound units
+        let factors: Vec<_> = q_slash.unit().iter().map(|f| f.unit_name.as_str()).collect();
+        assert!(factors.contains(&"kilometer"), "compound with plural should use canonical singular: {:?}", factors);
     }
 
     #[test]

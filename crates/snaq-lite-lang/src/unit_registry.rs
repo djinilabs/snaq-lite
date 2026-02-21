@@ -188,8 +188,9 @@ pub fn default_si_registry() -> UnitRegistry {
     reg.dimensions.add_base_dimension("AmountOfSubstance");
     reg.dimensions.add_base_dimension("LuminousIntensity");
     reg.dimensions.add_base_dimension("Energy");
+    reg.dimensions.add_base_dimension("Angle");
 
-    // SI base units (7)
+    // SI base units (7) + rad (Angle)
     reg.add_base_unit("m", BaseRepresentation::from_base("Length"));
     reg.add_base_unit("kg", BaseRepresentation::from_base("Mass"));
     reg.add_base_unit("s", BaseRepresentation::from_base("Time"));
@@ -197,6 +198,7 @@ pub fn default_si_registry() -> UnitRegistry {
     reg.add_base_unit("K", BaseRepresentation::from_base("Temperature"));
     reg.add_base_unit("mol", BaseRepresentation::from_base("AmountOfSubstance"));
     reg.add_base_unit("cd", BaseRepresentation::from_base("LuminousIntensity"));
+    reg.add_base_unit("rad", BaseRepresentation::from_base("Angle")); // Angle base unit (SI coherent)
     add_derived_alias(&mut reg, "ampere", "Current", Unit::from_base_unit("A"));
     add_derived_alias(&mut reg, "amperes", "Current", Unit::from_base_unit("A"));
     add_derived_alias(&mut reg, "kelvin", "Temperature", Unit::from_base_unit("K"));
@@ -205,6 +207,15 @@ pub fn default_si_registry() -> UnitRegistry {
     add_derived_alias(&mut reg, "moles", "AmountOfSubstance", Unit::from_base_unit("mol"));
     add_derived_alias(&mut reg, "candela", "LuminousIntensity", Unit::from_base_unit("cd"));
     add_derived_alias(&mut reg, "candelas", "LuminousIntensity", Unit::from_base_unit("cd"));
+
+    // Angle: rad (base), degree = π/180 rad
+    reg.add_derived_unit(
+        "degree",
+        BaseRepresentation::from_base("Angle"),
+        std::f64::consts::PI / 180.0,
+        Unit::from_base_unit("rad"),
+    );
+    add_derived_alias(&mut reg, "degrees", "Angle", Unit::from_base_unit("degree"));
 
     // Length: SI derived + Numbat parity (with long-form aliases)
     reg.add_derived_unit(
@@ -518,6 +529,7 @@ pub fn default_si_registry() -> UnitRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::quantity::Quantity;
 
     #[test]
     fn to_base_base_unit() {
@@ -545,6 +557,17 @@ mod tests {
         assert!(reg.same_dimension(&m, &km).unwrap());
         let s = Unit::from_base_unit("s");
         assert!(!reg.same_dimension(&m, &s).unwrap());
+    }
+
+    #[test]
+    fn angle_rad_degree_same_dimension_and_convert() {
+        let reg = default_si_registry();
+        let rad = Unit::from_base_unit("rad");
+        let degree = Unit::from_base_unit("degree");
+        assert!(reg.same_dimension(&rad, &degree).unwrap());
+        let q_180_deg = Quantity::new(180.0, degree);
+        let as_rad = q_180_deg.convert_to(&reg, &rad).unwrap();
+        assert!((as_rad.value() - std::f64::consts::PI).abs() < 1e-10, "180 degree = π rad");
     }
 
     #[test]

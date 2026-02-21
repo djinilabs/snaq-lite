@@ -1,4 +1,4 @@
-//! Built-in functions: sin, cos, tan (trig, one arg radians), max, min (two args, same dimension).
+//! Built-in functions: sin, cos, tan (trig, one arg in angle dimension: rad or degree), max, min (two args, same dimension).
 
 use crate::error::RunError;
 use crate::quantity::{Quantity, SnaqNumber};
@@ -24,32 +24,13 @@ pub fn call_builtin(
     registry: &UnitRegistry,
 ) -> Result<Value, RunError> {
     match name {
-        "sin" => {
-            let x = exactly_one(param_values, "sin")?;
-            let (v, u) = require_dimensionless(x.clone(), "sin")?;
-            let var_x = x.variance();
-            let result_value = v.sin();
-            let result_variance = v.cos().powi(2) * var_x;
-            Ok(Value::Numeric(Quantity::with_number(
-                SnaqNumber::new(result_value, result_variance),
-                u,
-            )))
-        }
-        "cos" => {
-            let x = exactly_one(param_values, "cos")?;
-            let (v, u) = require_dimensionless(x.clone(), "cos")?;
-            let var_x = x.variance();
-            let result_value = v.cos();
-            let result_variance = v.sin().powi(2) * var_x;
-            Ok(Value::Numeric(Quantity::with_number(
-                SnaqNumber::new(result_value, result_variance),
-                u,
-            )))
-        }
-        "tan" => {
-            let x = exactly_one(param_values, "tan")?;
-            let (v, u) = require_dimensionless(x.clone(), "tan")?;
-            let var_x = x.variance();
+        "sin" => eval_trig(param_values, registry, "sin", |v, var_x| {
+            (v.sin(), v.cos().powi(2) * var_x)
+        }),
+        "cos" => eval_trig(param_values, registry, "cos", |v, var_x| {
+            (v.cos(), v.sin().powi(2) * var_x)
+        }),
+        "tan" => eval_trig(param_values, registry, "tan", |v, var_x| {
             let result_value = v.tan();
             let result_variance = if result_value.is_finite() {
                 let cos_v = v.cos();
@@ -61,11 +42,8 @@ pub fn call_builtin(
             } else {
                 0.0
             };
-            Ok(Value::Numeric(Quantity::with_number(
-                SnaqNumber::new(result_value, result_variance),
-                u,
-            )))
-        }
+            (result_value, result_variance)
+        }),
         "max" => {
             let (a, b) = exactly_two(param_values, "max")?;
             same_dimension_max_min(a, b, registry, |x, y| x.max(y))
@@ -76,6 +54,27 @@ pub fn call_builtin(
         }
         _ => Err(RunError::UnknownFunction(name.to_string())),
     }
+}
+
+/// Shared path for sin, cos, tan: one angle arg, convert to rad, then apply op to get (value, variance).
+fn eval_trig<F>(
+    param_values: &[Quantity],
+    registry: &UnitRegistry,
+    name: &str,
+    op: F,
+) -> Result<Value, RunError>
+where
+    F: FnOnce(f64, f64) -> (f64, f64),
+{
+    let x = exactly_one(param_values, name)?;
+    let in_rad = require_angle(x, registry, name)?;
+    let v = in_rad.value();
+    let var_x = in_rad.variance();
+    let (result_value, result_variance) = op(v, var_x);
+    Ok(Value::Numeric(Quantity::with_number(
+        SnaqNumber::new(result_value, result_variance),
+        Unit::scalar(),
+    )))
 }
 
 fn exactly_one(qs: &[Quantity], name: &str) -> Result<Quantity, RunError> {
@@ -98,14 +97,21 @@ fn exactly_two(qs: &[Quantity], name: &str) -> Result<(Quantity, Quantity), RunE
     }
 }
 
-fn require_dimensionless(q: Quantity, _name: &str) -> Result<(f64, Unit), RunError> {
-    if !q.unit().is_scalar() {
-        return Err(RunError::DimensionMismatch {
-            left: q.unit().clone(),
-            right: Unit::scalar(),
+/// Require the quantity to have Angle dimension (rad or degree); convert to radians and return.
+fn require_angle(
+    q: Quantity,
+    registry: &UnitRegistry,
+    _name: &str,
+) -> Result<Quantity, RunError> {
+    let rad = Unit::from_base_unit("rad");
+    if !registry.same_dimension(q.unit(), &rad).unwrap_or(false) {
+        return Err(RunError::ExpectedAngle {
+            actual: q.unit().clone(),
         });
     }
-    Ok((q.value(), q.unit().clone()))
+    q.convert_to(registry, &rad).map_err(|_| RunError::ExpectedAngle {
+        actual: q.unit().clone(),
+    })
 }
 
 fn same_dimension_max_min<F>(
@@ -150,7 +156,7 @@ pub fn symbolic_call(name: &str, args: &[SymbolicExpr], unit: Unit) -> Value {
     ))
 }
 
-/// Try to evaluate a built-in when the call is represented as symbolic args (e.g. sin(pi) -> 0).
+/// Try to evaluate a built-in when the call is represented as symbolic args (e.g. sin(pi * rad) -> 0).
 /// Substitute each arg with the symbol registry; if all substitute to numbers, call the built-in and return the result.
 /// Used when folding symbolic calls during substitution (e.g. in [SymbolicExpr::substitute] for `Call` once unit registry is available).
 pub fn try_eval_symbolic_call(
@@ -178,7 +184,7 @@ mod tests {
         let var_x = 0.01;
         let q = Quantity::with_number(
             SnaqNumber::new(x, var_x),
-            Unit::scalar(),
+            Unit::from_base_unit("rad"),
         );
         let registry = default_si_registry();
         let v = call_builtin("sin", &[q], &registry).unwrap();
@@ -201,7 +207,7 @@ mod tests {
         let var_x = 0.01;
         let q = Quantity::with_number(
             SnaqNumber::new(x, var_x),
-            Unit::scalar(),
+            Unit::from_base_unit("rad"),
         );
         let registry = default_si_registry();
         let v = call_builtin("cos", &[q], &registry).unwrap();
@@ -224,7 +230,7 @@ mod tests {
         let var_x = 0.01;
         let q = Quantity::with_number(
             SnaqNumber::new(x, var_x),
-            Unit::scalar(),
+            Unit::from_base_unit("rad"),
         );
         let registry = default_si_registry();
         let v = call_builtin("tan", &[q], &registry).unwrap();
@@ -248,7 +254,7 @@ mod tests {
         let x = std::f64::consts::FRAC_PI_2;
         let q = Quantity::with_number(
             SnaqNumber::new(x, 1.0),
-            Unit::scalar(),
+            Unit::from_base_unit("rad"),
         );
         let registry = default_si_registry();
         let v = call_builtin("tan", &[q], &registry).unwrap();

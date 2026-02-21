@@ -12,6 +12,8 @@ pub enum RunError {
     SymbolHasNoValue(String),
     /// Unknown function name at call site.
     UnknownFunction(String),
+    /// Trig function (sin, cos, tan) received an argument that is not an angle (rad or degree).
+    ExpectedAngle { actual: crate::unit::Unit },
 }
 
 /// Parse error for expression strings.
@@ -47,6 +49,19 @@ impl std::fmt::Display for RunError {
                 write!(f, "symbol '{name}' has no numeric value")
             }
             RunError::UnknownFunction(name) => write!(f, "unknown function: {name}"),
+            RunError::ExpectedAngle { actual } => {
+                write!(f, "expected angle (rad or degree), got ")?;
+                if actual.is_scalar() {
+                    write!(f, "(dimensionless)")?;
+                    write!(
+                        f,
+                        " — if your value is in radians, add the rad unit (e.g. sin(pi * rad))"
+                    )?;
+                } else {
+                    write!(f, "{actual}")?;
+                }
+                Ok(())
+            }
         }
     }
 }

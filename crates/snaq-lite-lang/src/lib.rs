@@ -656,7 +656,7 @@ mod tests {
 
     #[test]
     fn eval_sin_zero() {
-        let v = run("sin(0)").unwrap();
+        let v = run("sin(0 rad)").unwrap();
         let q = v.to_quantity(&SymbolRegistry::default_registry()).unwrap();
         assert!((q.value() - 0.0).abs() < 1e-10);
     }
@@ -689,14 +689,14 @@ mod tests {
 
     #[test]
     fn run_numeric_sin_pi() {
-        let q = run_numeric("sin(pi)").unwrap();
+        let q = run_numeric("sin(pi * rad)").unwrap();
         assert!(q.value().abs() < 1e-10);
     }
 
     #[test]
     fn run_sin_pi_returns_numeric_zero() {
-        let v = run("sin(pi)").unwrap();
-        assert!(matches!(v, Value::Numeric(_)), "sin(pi) should evaluate to numeric 0");
+        let v = run("sin(pi * rad)").unwrap();
+        assert!(matches!(v, Value::Numeric(_)), "sin(pi * rad) should evaluate to numeric 0");
         let q = v.to_quantity(&SymbolRegistry::default_registry()).unwrap();
         assert!(q.value().abs() < 1e-10);
     }
@@ -727,9 +727,25 @@ mod tests {
     #[test]
     fn run_function_dimension_mismatch_errors() {
         let e = run_numeric("sin(1 m)");
-        assert!(matches!(e, Err(RunError::DimensionMismatch { .. })));
+        assert!(matches!(e, Err(RunError::ExpectedAngle { .. })));
+        let e = run_numeric("sin(pi)").unwrap_err();
+        assert!(matches!(e, RunError::ExpectedAngle { .. }));
+        let err_msg = format!("{e}");
+        assert!(err_msg.contains("rad unit"), "dimensionless argument should suggest adding rad unit: {err_msg}");
         let e = run_numeric("max(1 m, 2 s)");
         assert!(matches!(e, Err(RunError::DimensionMismatch { .. })));
+    }
+
+    #[test]
+    fn run_sin_180_degree_equals_zero() {
+        let q = run_numeric("sin(180 degree)").unwrap();
+        assert!(q.value().abs() < 1e-10, "sin(180 degree) ≈ 0");
+    }
+
+    #[test]
+    fn run_sin_90_degree_equals_one() {
+        let q = run_numeric("sin(90 degree)").unwrap();
+        assert!((q.value() - 1.0).abs() < 1e-10, "sin(90 degree) ≈ 1");
     }
 
     #[test]

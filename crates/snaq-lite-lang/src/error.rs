@@ -10,6 +10,8 @@ pub enum RunError {
     DivisionByZero,
     /// A symbol in the expression has no numeric value in the symbol registry (cannot substitute).
     SymbolHasNoValue(String),
+    /// Unknown function name at call site.
+    UnknownFunction(String),
 }
 
 /// Parse error for expression strings.
@@ -44,6 +46,7 @@ impl std::fmt::Display for RunError {
             RunError::SymbolHasNoValue(name) => {
                 write!(f, "symbol '{name}' has no numeric value")
             }
+            RunError::UnknownFunction(name) => write!(f, "unknown function: {name}"),
         }
     }
 }

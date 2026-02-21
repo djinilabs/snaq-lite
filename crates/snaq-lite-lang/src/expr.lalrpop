@@ -1,16 +1,31 @@
-//! Expression grammar: float literals, +, -, *, / (or "per"), parentheses, implicit multiplication.
+//! Expression grammar: float literals, +, -, *, / (or "per"), parentheses, implicit multiplication, function calls.
 //! Produces crate::ir::ExprDef.
-//! Float literals use conventional syntax; invalid/overflow yields a parse error.
+//! Uses custom lexer so "ident (" is tokenized as FuncIdent; "sin(1)" is a call, "sin" alone is Ident.
 
-use crate::ir::ExprDef;
-use lalrpop_util::ParseError;
-use ordered_float::OrderedFloat;
-use std::str::FromStr;
+use crate::ir::{CallArg, ExprDef};
+use crate::lexer::Tok;
 
 grammar;
 
 extern {
-    type Error = String;
+    type Location = usize;
+    type Error = crate::lexer::LexicalError;
+
+    enum crate::lexer::Tok {
+        "(" => Tok::LParen,
+        ")" => Tok::RParen,
+        "+" => Tok::Plus,
+        "-" => Tok::Minus,
+        "*" => Tok::Star,
+        "/" => Tok::Slash,
+        "per" => Tok::Per,
+        "π" => Tok::Pi,
+        "," => Tok::Comma,
+        ":" => Tok::Colon,
+        Num => Tok::Num(<ordered_float::OrderedFloat<f64>>),
+        Ident => Tok::Ident(<String>),
+        FuncIdent => Tok::FuncIdent(<String>),
+    }
 }
 
 pub Expr: ExprDef = {
@@ -19,8 +34,6 @@ pub Expr: ExprDef = {
     Term,
 };
 
-// Right-hand side of implicit multiplication only: number or parenthesized expr.
-// Excludes Ident so that "10 m" stays one quantity literal (Num Ident), not 10 * m.
 ImplicitMulRight: ExprDef = {
     <n:Num> => ExprDef::LitScalar(n),
     "(" <e:Expr> ")" => e,
@@ -29,9 +42,7 @@ ImplicitMulRight: ExprDef = {
 Term: ExprDef = {
     <l:Term> "*" <r:Factor> => ExprDef::Mul(Box::new(l), Box::new(r)),
     <l:Term> "/" <r:Factor> => ExprDef::Div(Box::new(l), Box::new(r)),
-    // "per" is division alias; LALRPOP gives string literals higher lexer priority than Ident, so "per" is not parsed as identifier
     <l:Term> "per" <r:Factor> => ExprDef::Div(Box::new(l), Box::new(r)),
-    // Implicit multiplication: only when RHS is number or (expr), e.g. "10 20" → 10*20, "2 (3+4)" → 14
     <l:Term> <r:ImplicitMulRight> => ExprDef::Mul(Box::new(l), Box::new(r)),
     Factor,
 };
@@ -41,18 +52,23 @@ Factor: ExprDef = {
     <n:Num> <id:Ident> => ExprDef::LitWithUnit(n, id),
     <n:Num> => ExprDef::LitScalar(n),
     "π" => ExprDef::LitSymbol("pi".to_string()),
+    <id:FuncIdent> "(" <args:ArgList> ")" => ExprDef::Call(id, args),
     <id:Ident> => ExprDef::LitUnit(id),
     "(" <e:Expr> ")" => e,
 };
 
-Ident: String = {
-    <s:r"[a-zA-Z_][a-zA-Z0-9_]*"> => s.to_string(),
+// One argument: named (Ident : Expr) or positional (Expr). Named first so "a: 1" is not parsed as positional "a".
+CallArg: CallArg = {
+    <id:Ident> ":" <e:Expr> => CallArg::Named(id, Box::new(e)),
+    <e:Expr> => CallArg::Positional(Box::new(e)),
 };
 
-Num: OrderedFloat<f64> = {
-    <s:r"([0-9]+\.?[0-9]*|[0-9]*\.[0-9]+)([eE][+-]?[0-9]+)?"> =>? f64::from_str(s)
-        .map(OrderedFloat::from)
-        .map_err(|_| ParseError::User {
-            error: "invalid float literal or out of range".to_string(),
-        }),
+// Left-recursive list to avoid reduce/shift conflict on ",".
+ArgList: Vec<CallArg> = {
+    <single:CallArg> => vec![single],
+    <rest:ArgList> "," <last:CallArg> => {
+        let mut rest = rest;
+        rest.push(last);
+        rest
+    },
 };

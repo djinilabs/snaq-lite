@@ -85,6 +85,16 @@ fn rewrite_rec(
             }
             Ok(out.intern(ExprNode::Div(new_l, new_r)))
         }
+        ExprNode::Call(name, args) => {
+            let new_args: Vec<(Option<String>, ExprId)> = args
+                .iter()
+                .map(|(n, id)| {
+                    let new_id = rewrite_rec(pool, out, *id, registry)?;
+                    Ok((n.clone(), new_id))
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            Ok(out.intern(ExprNode::Call(name.clone(), new_args)))
+        }
     }
 }
 

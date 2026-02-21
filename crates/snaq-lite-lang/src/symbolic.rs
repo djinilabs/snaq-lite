@@ -25,6 +25,8 @@ pub enum SymbolicExpr {
     Product { coef: f64, symbols: Vec<String> },
     Neg(Box<SymbolicExpr>),
     Div(Box<SymbolicExpr>, Box<SymbolicExpr>),
+    /// Function call (e.g. sin(x)); displayed as "name(args...)", substitute may evaluate when all args numeric.
+    Call(String, Vec<SymbolicExpr>),
 }
 
 impl SymbolicExpr {
@@ -57,6 +59,11 @@ impl SymbolicExpr {
                 (-c, terms, rest)
             }
             SymbolicExpr::Div(a, b) => (0.0, Vec::new(), vec![SymbolicExpr::Div(a.clone(), b.clone())]),
+            SymbolicExpr::Call(name, args) => (
+                0.0,
+                Vec::new(),
+                vec![SymbolicExpr::Call(name.clone(), args.clone())],
+            ),
         }
     }
 
@@ -128,7 +135,7 @@ impl SymbolicExpr {
             SymbolicExpr::Number(x) => Some((*x, Vec::new())),
             SymbolicExpr::Symbol(s) => Some((1.0, vec![s.clone()])),
             SymbolicExpr::Product { coef, symbols } => Some((*coef, symbols.clone())),
-            SymbolicExpr::Sum { .. } | SymbolicExpr::Neg(..) | SymbolicExpr::Div(..) => None,
+            SymbolicExpr::Sum { .. } | SymbolicExpr::Neg(..) | SymbolicExpr::Div(..) | SymbolicExpr::Call(..) => None,
         }
     }
 
@@ -274,6 +281,7 @@ impl SymbolicExpr {
                     Some(av / bv)
                 }
             }
+            SymbolicExpr::Call(..) => None,
         }
     }
 
@@ -327,6 +335,7 @@ impl SymbolicExpr {
                     Ok(av / bv)
                 }
             }
+            SymbolicExpr::Call(name, _) => Err(format!("cannot substitute symbolic call {name}(...)")),
         }
     }
 }
@@ -396,6 +405,16 @@ impl fmt::Display for SymbolicExpr {
             }
             SymbolicExpr::Neg(inner) => write!(f, "-({inner})"),
             SymbolicExpr::Div(a, b) => write!(f, "({a}) / ({b})"),
+            SymbolicExpr::Call(name, args) => {
+                write!(f, "{name}(")?;
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{a}")?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }

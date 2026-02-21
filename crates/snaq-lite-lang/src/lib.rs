@@ -3,7 +3,9 @@
 pub mod cas;
 pub mod dimension;
 pub mod error;
+pub mod functions;
 pub mod ir;
+pub mod lexer;
 pub mod parser;
 pub mod prefix;
 pub mod quantity;
@@ -84,7 +86,7 @@ pub fn run_scalar(input: &str) -> Result<f64, RunError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::ExprDef;
+    use crate::ir::{CallArg, ExprDef};
     use ordered_float::OrderedFloat;
 
     fn lit_scalar(n: f64) -> ExprDef {
@@ -602,6 +604,132 @@ mod tests {
         let expected = 5.0 * std::f64::consts::PI;
         assert!((q.value() - expected).abs() < 1e-10);
         assert!(q.unit().is_scalar());
+    }
+
+    #[test]
+    fn parse_sin_call() {
+        let e = parse("sin(1)").unwrap();
+        match &e {
+            ExprDef::Call(name, args) => {
+                assert_eq!(name, "sin");
+                assert_eq!(args.len(), 1);
+                match &args[0] {
+                    CallArg::Positional(inner) => assert!(matches!(inner.as_ref(), ExprDef::LitScalar(_))),
+                    _ => panic!("expected positional arg"),
+                }
+            }
+            _ => panic!("expected Call, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn parse_max_two_args() {
+        let e = parse("max(1, 2)").unwrap();
+        match &e {
+            ExprDef::Call(name, args) => {
+                assert_eq!(name, "max");
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("expected Call"),
+        }
+    }
+
+    #[test]
+    fn parse_max_named_args() {
+        let e = parse("max(a: 1, b: 2)").unwrap();
+        match &e {
+            ExprDef::Call(name, args) => {
+                assert_eq!(name, "max");
+                assert_eq!(args.len(), 2);
+                match &args[0] {
+                    CallArg::Named(n, _) => assert_eq!(n, "a"),
+                    _ => panic!("expected named"),
+                }
+                match &args[1] {
+                    CallArg::Named(n, _) => assert_eq!(n, "b"),
+                    _ => panic!("expected named"),
+                }
+            }
+            _ => panic!("expected Call"),
+        }
+    }
+
+    #[test]
+    fn eval_sin_zero() {
+        let v = run("sin(0)").unwrap();
+        let q = v.to_quantity(&SymbolRegistry::default_registry()).unwrap();
+        assert!((q.value() - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn eval_max() {
+        let v = run_numeric("max(3, 2)").unwrap();
+        assert!((v.value() - 3.0).abs() < 1e-10);
+        let v = run_numeric("min(3, 2)").unwrap();
+        assert!((v.value() - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn eval_max_min_named_args_only() {
+        let v = run_numeric("max(a: 1, b: 2)").unwrap();
+        assert!((v.value() - 2.0).abs() < 1e-10, "max(a: 1, b: 2) = 2");
+        let v = run_numeric("min(a: 1, b: 2)").unwrap();
+        assert!((v.value() - 1.0).abs() < 1e-10, "min(a: 1, b: 2) = 1");
+    }
+
+    #[test]
+    fn eval_max_min_mixed_positional_and_named_args() {
+        let v = run_numeric("max(1, b: 2)").unwrap();
+        assert!((v.value() - 2.0).abs() < 1e-10, "max(1, b: 2) = 2");
+        let v = run_numeric("max(a: 1, 2)").unwrap();
+        assert!((v.value() - 2.0).abs() < 1e-10, "max(a: 1, 2) = 2");
+        let v = run_numeric("min(10, b: 3)").unwrap();
+        assert!((v.value() - 3.0).abs() < 1e-10, "min(10, b: 3) = 3");
+    }
+
+    #[test]
+    fn run_numeric_sin_pi() {
+        let q = run_numeric("sin(pi)").unwrap();
+        assert!(q.value().abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_sin_pi_returns_numeric_zero() {
+        let v = run("sin(pi)").unwrap();
+        assert!(matches!(v, Value::Numeric(_)), "sin(pi) should evaluate to numeric 0");
+        let q = v.to_quantity(&SymbolRegistry::default_registry()).unwrap();
+        assert!(q.value().abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_symbolic_sin_pi() {
+        // sin(x) with unknown x stays symbolic
+        let v = run("sin(x)").unwrap();
+        let s = format!("{}", v);
+        assert!(s.contains("sin"));
+        assert!(s.contains("x"));
+    }
+
+    #[test]
+    fn run_unknown_function_errors() {
+        let e = run("foo(1)");
+        assert!(matches!(e, Err(RunError::UnknownFunction(_))));
+    }
+
+    #[test]
+    fn run_function_wrong_arity_errors() {
+        let e = run("sin(1, 2)");
+        assert!(matches!(e, Err(RunError::UnknownFunction(s)) if s.contains("sin") && s.contains("argument")));
+        let e = run("max(1)");
+        assert!(matches!(e, Err(RunError::UnknownFunction(s)) if s.contains("max") && s.contains("argument")));
+    }
+
+    #[test]
+    fn run_function_dimension_mismatch_errors() {
+        let e = run_numeric("sin(1 m)");
+        assert!(matches!(e, Err(RunError::DimensionMismatch { .. })));
+        let e = run_numeric("max(1 m, 2 s)");
+        assert!(matches!(e, Err(RunError::DimensionMismatch { .. })));
     }
 
     #[test]

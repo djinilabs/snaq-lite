@@ -13,6 +13,7 @@ pub enum Rank {
     Mul(Vec<Rank>),
     Sub(Box<Rank>, Box<Rank>),
     Div(Box<Rank>, Box<Rank>),
+    Call(String, Vec<Rank>),
 }
 
 fn tag_order(r: &Rank) -> u8 {
@@ -24,6 +25,7 @@ fn tag_order(r: &Rank) -> u8 {
         Rank::Mul(_) => 4,
         Rank::Sub(_, _) => 5,
         Rank::Div(_, _) => 6,
+        Rank::Call(..) => 7,
     }
 }
 
@@ -47,6 +49,7 @@ impl Ord for Rank {
             (Rank::Mul(a), Rank::Mul(b)) => a.cmp(b),
             (Rank::Sub(a1, a2), Rank::Sub(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::Div(a1, a2), Rank::Div(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
+            (Rank::Call(a, aargs), Rank::Call(b, bargs)) => a.cmp(b).then(aargs.cmp(bargs)),
             _ => Ordering::Equal,
         }
     }
@@ -62,6 +65,9 @@ pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
         ExprNode::Mul(ids) => Rank::Mul(ids.iter().map(|&i| rank(pool, i)).collect()),
         ExprNode::Sub(l, r) => Rank::Sub(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
         ExprNode::Div(l, r) => Rank::Div(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
+        ExprNode::Call(name, args) => {
+            Rank::Call(name.clone(), args.iter().map(|(_, id)| rank(pool, *id)).collect())
+        }
     }
 }
 
@@ -140,6 +146,13 @@ fn canonicalize_rec(
             let new_l = canonicalize_rec(pool, out, *l);
             let new_r = canonicalize_rec(pool, out, *r);
             out.intern(ExprNode::Div(new_l, new_r))
+        }
+        ExprNode::Call(name, args) => {
+            let new_args: Vec<(Option<String>, ExprId)> = args
+                .iter()
+                .map(|(n, id)| (n.clone(), canonicalize_rec(pool, out, *id)))
+                .collect();
+            out.intern(ExprNode::Call(name.clone(), new_args))
         }
     }
 }

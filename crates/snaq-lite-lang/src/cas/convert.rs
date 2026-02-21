@@ -1,7 +1,7 @@
 //! Conversion between ExprDef (binary tree) and interned CAS representation.
 
 use crate::cas::{ExprId, ExprInterner, ExprNode};
-use crate::ir::ExprDef;
+use crate::ir::{CallArg, ExprDef};
 
 /// Build interned nodes from a resolved ExprDef. Only resolved variants are supported.
 /// Binary Add/Mul become two-child nodes (flattened in canonicalization).
@@ -33,6 +33,19 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
             let id = expr_def_to_interned(inner, pool);
             pool.intern(ExprNode::Neg(id))
         }
+        ExprDef::Call(name, args) => {
+            let arg_ids: Vec<(Option<String>, ExprId)> = args
+                .iter()
+                .map(|arg| {
+                    let (name_opt, def) = match arg {
+                        CallArg::Positional(e) => (None, e.as_ref()),
+                        CallArg::Named(n, e) => (Some(n.clone()), e.as_ref()),
+                    };
+                    (name_opt, expr_def_to_interned(def, pool))
+                })
+                .collect();
+            pool.intern(ExprNode::Call(name.clone(), arg_ids))
+        }
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved ExprDef: resolve() must be called before CAS")
         }
@@ -55,6 +68,19 @@ pub fn interned_to_expr_def(pool: &ExprInterner, id: ExprId) -> ExprDef {
             Box::new(interned_to_expr_def(pool, *r)),
         ),
         ExprNode::Neg(inner) => ExprDef::Neg(Box::new(interned_to_expr_def(pool, *inner))),
+        ExprNode::Call(name, args) => {
+            let args: Vec<CallArg> = args
+                .iter()
+                .map(|(name_opt, id)| {
+                    let e = interned_to_expr_def(pool, *id);
+                    match name_opt {
+                        None => CallArg::Positional(Box::new(e)),
+                        Some(n) => CallArg::Named(n.clone(), Box::new(e)),
+                    }
+                })
+                .collect();
+            ExprDef::Call(name.clone(), args)
+        }
     }
 }
 
@@ -89,6 +115,7 @@ fn binaryize_mul(pool: &ExprInterner, ids: &[ExprId]) -> ExprDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::CallArg;
     use crate::quantity::Quantity;
 
     fn lit(v: f64) -> ExprDef {
@@ -137,6 +164,18 @@ mod tests {
     #[test]
     fn round_trip_lit_symbol() {
         let def = ExprDef::LitSymbol("pi".to_string());
+        let mut pool = ExprInterner::new();
+        let id = expr_def_to_interned(&def, &mut pool);
+        let back = interned_to_expr_def(&pool, id);
+        assert_eq!(back, def);
+    }
+
+    #[test]
+    fn round_trip_call() {
+        let def = ExprDef::Call(
+            "sin".to_string(),
+            vec![CallArg::Positional(Box::new(lit(1.0)))],
+        );
         let mut pool = ExprInterner::new();
         let id = expr_def_to_interned(&def, &mut pool);
         let back = interned_to_expr_def(&pool, id);

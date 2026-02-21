@@ -2,7 +2,7 @@
 //! Identifiers that are units resolve to quantities; others resolve to symbols.
 
 use crate::error::RunError;
-use crate::ir::ExprDef;
+use crate::ir::{CallArg, ExprDef};
 use crate::quantity::Quantity;
 use crate::unit_registry::UnitRegistry;
 
@@ -51,6 +51,18 @@ pub fn resolve(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, RunErro
         ExprDef::Neg(inner) => {
             let inner = resolve(*inner, registry)?;
             Ok(ExprDef::Neg(Box::new(inner)))
+        }
+        ExprDef::Call(name, args) => {
+            let args = args
+                .into_iter()
+                .map(|arg| {
+                    Ok::<CallArg, RunError>(match arg {
+                        CallArg::Positional(e) => CallArg::Positional(Box::new(resolve(*e, registry)?)),
+                        CallArg::Named(n, e) => CallArg::Named(n, Box::new(resolve(*e, registry)?)),
+                    })
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            Ok(ExprDef::Call(name, args))
         }
     }
 }

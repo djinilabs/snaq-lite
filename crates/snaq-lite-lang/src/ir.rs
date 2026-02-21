@@ -3,8 +3,17 @@
 use crate::quantity::Quantity;
 use ordered_float::OrderedFloat;
 
+/// A single argument in a function call: either positional or named.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum CallArg {
+    /// Positional argument (e.g. `1` in `max(1, 2)`).
+    Positional(Box<ExprDef>),
+    /// Named argument (e.g. `b: 2` in `max(a: 1, b: 2)`).
+    Named(String, Box<ExprDef>),
+}
+
 /// Definition of the root expression (plain data, no Salsa).
-/// Parser produces LitScalar, LitWithUnit, LitUnit; after resolve() only Lit(Quantity) | LitSymbol | Add | Sub | Mul | Div remain.
+/// Parser produces LitScalar, LitWithUnit, LitUnit, Call; after resolve() only Lit(Quantity) | LitSymbol | Add | Sub | Mul | Div | Call remain.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum ExprDef {
     /// Parsed: bare number (scalar).
@@ -23,6 +32,8 @@ pub enum ExprDef {
     Div(Box<ExprDef>, Box<ExprDef>),
     /// Unary minus (e.g. "-1", "-(2 * 3)").
     Neg(Box<ExprDef>),
+    /// Function call (e.g. sin(x), max(1, 2)). Name and args; args are positional or named.
+    Call(String, Vec<CallArg>),
 }
 
 /// Input that holds the root expression definition.
@@ -49,4 +60,6 @@ pub enum ExprData<'db> {
     Mul(Expression<'db>, Expression<'db>),
     Div(Expression<'db>, Expression<'db>),
     Neg(Expression<'db>),
+    /// Function call: name and args as (param name if named, expression).
+    Call(String, Vec<(Option<String>, Expression<'db>)>),
 }

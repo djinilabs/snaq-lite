@@ -9,6 +9,7 @@ pub struct ExprId(pub u32);
 
 /// A single node in the interned CAS AST. Children are ExprIds.
 /// Add and Mul are n-ary for canonicalization; Sub and Div stay binary.
+/// Call is opaque (name + args as (param name if named, child id)).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum ExprNode {
     Lit(Quantity),
@@ -18,6 +19,7 @@ pub enum ExprNode {
     Sub(ExprId, ExprId),
     Div(ExprId, ExprId),
     Neg(ExprId),
+    Call(String, Vec<(Option<String>, ExprId)>),
 }
 
 /// Central cache: same structure => same ExprId. New nodes are interned on construction.

@@ -5,12 +5,14 @@
 //! Evaluation returns Value (Numeric or Symbolic).
 
 use crate::error::RunError;
-use crate::ir::{ExprData, ExprDef, Expression, ProgramDef};
+use crate::functions;
+use crate::ir::{CallArg, ExprData, ExprDef, Expression, ProgramDef};
 use crate::quantity::Quantity;
 use crate::symbolic::{SymbolicExpr, SymbolicQuantity, Value};
 use crate::unit::Unit;
 use crate::unit_registry::UnitRegistry;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Neg;
 
 thread_local! {
@@ -71,6 +73,16 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
             let inner_expr = build_expression(db, *inner);
             ExprData::Neg(inner_expr)
         }
+        ExprDef::Call(name, args) => {
+            let arg_exprs: Vec<(Option<String>, Expression<'_>)> = args
+                .into_iter()
+                .map(|arg| match arg {
+                    CallArg::Positional(e) => (None, build_expression(db, *e)),
+                    CallArg::Named(n, e) => (Some(n), build_expression(db, *e)),
+                })
+                .collect();
+            ExprData::Call(name, arg_exprs)
+        }
     };
     Expression::new(db, data)
 }
@@ -112,7 +124,86 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
             let v = value(db, *inner)?;
             neg_value(&v)
         }
+        ExprData::Call(name, args) => eval_call(db, name, args, registry),
     })
+}
+
+/// Bind call args (positional + named) to param names and evaluate.
+fn eval_call(
+    db: &dyn salsa::Database,
+    name: &str,
+    args: &[(Option<String>, Expression<'_>)],
+    registry: &UnitRegistry,
+) -> Result<Value, RunError> {
+    let param_names = functions::param_names(name)
+        .ok_or_else(|| RunError::UnknownFunction(name.to_string()))?;
+    let mut bound: HashMap<String, Value> = HashMap::new();
+    for (i, (opt_name, expr)) in args.iter().enumerate() {
+        let v = value(db, *expr)?;
+        let param = match opt_name {
+            Some(n) => {
+                if !param_names.contains(&n.as_str()) {
+                    return Err(RunError::UnknownFunction(format!(
+                        "{name}: unknown parameter name '{n}'"
+                    )));
+                }
+                if bound.contains_key(n) {
+                    return Err(RunError::UnknownFunction(format!(
+                        "{name}: duplicate parameter '{n}'"
+                    )));
+                }
+                n.clone()
+            }
+            None => {
+                param_names
+                    .get(i)
+                    .copied()
+                    .map(String::from)
+                    .ok_or_else(|| {
+                        RunError::UnknownFunction(format!(
+                            "{name}: too many arguments (expected {})",
+                            param_names.len()
+                        ))
+                    })?
+            }
+        };
+        bound.insert(param, v);
+    }
+    for p in param_names.iter() {
+        if !bound.contains_key(*p) {
+            return Err(RunError::UnknownFunction(format!(
+                "{name}: missing argument for parameter '{p}'"
+            )));
+        }
+    }
+    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+    let param_values: Result<Vec<Quantity>, RunError> = param_names
+        .iter()
+        .map(|p| {
+            let v = bound.get(*p).unwrap();
+            v.to_quantity(&sym_reg)
+        })
+        .collect();
+    match param_values {
+        Ok(qs) => functions::call_builtin(name, &qs, registry),
+        Err(_) => {
+            let sym_args: Vec<SymbolicExpr> = param_names
+                .iter()
+                .map(|p| {
+                    let v = bound.get(*p).unwrap();
+                    value_to_symbolic_expr(v)
+                })
+                .collect();
+            Ok(functions::symbolic_call(name, &sym_args, Unit::scalar()))
+        }
+    }
+}
+
+fn value_to_symbolic_expr(v: &Value) -> SymbolicExpr {
+    match v {
+        Value::Numeric(q) => SymbolicExpr::number(q.value()),
+        Value::Symbolic(sq) => sq.expr.clone(),
+    }
 }
 
 fn add_values(

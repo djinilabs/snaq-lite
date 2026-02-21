@@ -31,6 +31,22 @@ pub fn substitute_symbols(def: ExprDef, registry: &SymbolRegistry) -> Result<Exp
             Box::new(substitute_symbols(*r, registry)?),
         )),
         ExprDef::Neg(inner) => Ok(ExprDef::Neg(Box::new(substitute_symbols(*inner, registry)?))),
+        ExprDef::Call(name, args) => {
+            let args = args
+                .into_iter()
+                .map(|arg| {
+                    Ok::<crate::ir::CallArg, RunError>(match arg {
+                        crate::ir::CallArg::Positional(e) => {
+                            crate::ir::CallArg::Positional(Box::new(substitute_symbols(*e, registry)?))
+                        }
+                        crate::ir::CallArg::Named(n, e) => {
+                            crate::ir::CallArg::Named(n, Box::new(substitute_symbols(*e, registry)?))
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            Ok(ExprDef::Call(name, args))
+        }
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved ExprDef: resolve() must be called before substitute_symbols")
         }

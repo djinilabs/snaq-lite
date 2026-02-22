@@ -34,6 +34,8 @@ pub enum ExprDef {
     Neg(Box<ExprDef>),
     /// Function call (e.g. sin(x), max(1, 2)). Name and args; args are positional or named.
     Call(String, Vec<CallArg>),
+    /// Unit conversion: left expr evaluated to quantity, right expr is unit-only (e.g. "10 km as m").
+    As(Box<ExprDef>, Box<ExprDef>),
 }
 
 /// Input that holds the root expression definition.
@@ -62,4 +64,6 @@ pub enum ExprData<'db> {
     Neg(Expression<'db>),
     /// Function call: name and args as (param name if named, expression).
     Call(String, Vec<(Option<String>, Expression<'db>)>),
+    /// Unit conversion: left value, right unit expression.
+    As(Expression<'db>, Expression<'db>),
 }

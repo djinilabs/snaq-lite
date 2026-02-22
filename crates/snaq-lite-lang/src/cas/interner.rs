@@ -20,6 +20,8 @@ pub enum ExprNode {
     Div(ExprId, ExprId),
     Neg(ExprId),
     Call(String, Vec<(Option<String>, ExprId)>),
+    /// Unit conversion: value expr, unit expr. Not folded; conversion in value().
+    As(ExprId, ExprId),
 }
 
 /// Central cache: same structure => same ExprId. New nodes are interned on construction.

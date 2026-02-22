@@ -95,6 +95,11 @@ fn rewrite_rec(
                 .collect::<Result<Vec<_>, RunError>>()?;
             Ok(out.intern(ExprNode::Call(name.clone(), new_args)))
         }
+        ExprNode::As(l, r) => {
+            let new_l = rewrite_rec(pool, out, *l, registry)?;
+            let new_r = rewrite_rec(pool, out, *r, registry)?;
+            Ok(out.intern(ExprNode::As(new_l, new_r)))
+        }
     }
 }
 

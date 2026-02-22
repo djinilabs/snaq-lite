@@ -83,6 +83,11 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
                 .collect();
             ExprData::Call(name, arg_exprs)
         }
+        ExprDef::As(l, r) => {
+            let left = build_expression(db, *l);
+            let right = build_expression(db, *r);
+            ExprData::As(left, right)
+        }
     };
     Expression::new(db, data)
 }
@@ -125,6 +130,40 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
             neg_value(&v)
         }
         ExprData::Call(name, args) => eval_call(db, name, args, registry),
+        ExprData::As(left, right) => {
+            let left_val = value(db, *left)?;
+            let right_val = value(db, *right)?;
+            let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+            let target_quantity = right_val.to_quantity(&sym_reg).map_err(|_| {
+                RunError::UnknownUnit(
+                    "as: right side must evaluate to a unit (no symbols)".to_string(),
+                )
+            })?;
+            let target_unit = target_quantity.unit().clone();
+            match &left_val {
+                Value::Numeric(q) => {
+                    let converted = q.clone().convert_to(registry, &target_unit).map_err(|e| {
+                        match e {
+                            crate::quantity::QuantityError::IncompatibleUnits(left, right) => {
+                                RunError::DimensionMismatch { left, right }
+                            }
+                            _ => RunError::DivisionByZero,
+                        }
+                    })?;
+                    Ok(Value::Numeric(converted))
+                }
+                Value::Symbolic(sq) => {
+                    let scaled = scale_expr_to_unit(
+                        &left_val,
+                        &sq.expr,
+                        &sq.unit,
+                        &target_unit,
+                        registry,
+                    )?;
+                    Ok(Value::Symbolic(SymbolicQuantity::new(scaled, target_unit)))
+                }
+            }
+        }
     })
 }
 

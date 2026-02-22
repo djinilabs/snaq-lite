@@ -64,5 +64,37 @@ pub fn resolve(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, RunErro
                 .collect::<Result<Vec<_>, RunError>>()?;
             Ok(ExprDef::Call(name, args))
         }
+        ExprDef::As(expr, unit_expr) => {
+            let expr = resolve(*expr, registry)?;
+            let unit_expr = resolve_unit_expr(*unit_expr, registry)?;
+            Ok(ExprDef::As(Box::new(expr), Box::new(unit_expr)))
+        }
+    }
+}
+
+/// Resolve the RHS of "as" (unit-only expression). Only LitUnit, Mul, Div allowed; every ident must be a known unit.
+fn resolve_unit_expr(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, RunError> {
+    match def {
+        ExprDef::LitUnit(ref name) => {
+            if let Some(unit) = registry.get_unit_with_prefix(name) {
+                Ok(ExprDef::Lit(Quantity::new(1.0, unit)))
+            } else {
+                Err(RunError::UnknownUnit(name.clone()))
+            }
+        }
+        ExprDef::Mul(l, r) => {
+            let l = resolve_unit_expr(*l, registry)?;
+            let r = resolve_unit_expr(*r, registry)?;
+            Ok(ExprDef::Mul(Box::new(l), Box::new(r)))
+        }
+        ExprDef::Div(l, r) => {
+            let l = resolve_unit_expr(*l, registry)?;
+            let r = resolve_unit_expr(*r, registry)?;
+            Ok(ExprDef::Div(Box::new(l), Box::new(r)))
+        }
+        ExprDef::Lit(_) => Ok(def),
+        _ => Err(RunError::UnknownUnit(
+            "as: right side must be a unit or composed units (e.g. m, meters per second)".to_string(),
+        )),
     }
 }

@@ -21,6 +21,7 @@ extern {
         "*" => Tok::Star,
         "/" => Tok::Slash,
         "per" => Tok::Per,
+        "as" => Tok::As,
         "π" => Tok::Pi,
         "," => Tok::Comma,
         ":" => Tok::Colon,
@@ -33,7 +34,16 @@ extern {
 pub Expr: ExprDef = {
     <l:Expr> "+" <r:Term> => ExprDef::Add(Box::new(l), Box::new(r)),
     <l:Expr> "-" <r:Term> => ExprDef::Sub(Box::new(l), Box::new(r)),
+    <e:Expr> "as" <u:UnitTerm> => ExprDef::As(Box::new(e), Box::new(u)),
     Term,
+};
+
+// Unit-only expression (idents, *, /, per): e.g. "m", "meters per second", "newton per squareinch".
+UnitTerm: ExprDef = {
+    <l:UnitTerm> "*" <r:IdentIdents> => ExprDef::Mul(Box::new(l), Box::new(r)),
+    <l:UnitTerm> "/" <r:IdentIdents> => ExprDef::Div(Box::new(l), Box::new(r)),
+    <l:UnitTerm> "per" <r:IdentIdents> => ExprDef::Div(Box::new(l), Box::new(r)),
+    IdentIdents,
 };
 
 ImplicitMulRight: ExprDef = {

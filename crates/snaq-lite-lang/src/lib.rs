@@ -29,7 +29,8 @@ pub use unit_registry::{default_si_registry, UnitRegistry};
 /// Parse and evaluate the expression, returning a Value (symbolic by default, e.g. "6 + π").
 ///
 /// Supports float literals, quantity literals (e.g. `100 m`), symbols (e.g. `pi`, `π`, `e`),
-/// implicit multiplication, and division as `/` or `per`. Uses the default unit registry.
+/// implicit multiplication, division as `/` or `per`, and unit conversion with `as` (e.g. `10 km as m`).
+/// Uses the default unit registry.
 pub fn run(input: &str) -> Result<Value, RunError> {
     run_with_registry(input, &default_si_registry())
 }
@@ -361,6 +362,40 @@ mod tests {
         assert!((q.value() - 5.0).abs() < 1e-10);
         let factors: Vec<_> = q.unit().iter().collect();
         assert_eq!(factors.len(), 2);
+    }
+
+    #[test]
+    fn parse_as_unit_conversion() {
+        // "10 km as m" parses as Expr::As(Term(10 km), UnitTerm(m))
+        let parsed = parse("10 km as m").unwrap();
+        assert!(matches!(parsed, ExprDef::As(_, _)));
+        let q = run_numeric("10 km as m").unwrap();
+        assert!((q.value() - 10_000.0).abs() < 1e-10);
+        assert_eq!(q.unit().iter().next().map(|f| f.unit_name.as_str()), Some("m"));
+    }
+
+    #[test]
+    fn run_as_simple_and_compound_unit() {
+        let q = run_numeric("10 km as m").unwrap();
+        assert!((q.value() - 10_000.0).abs() < 1e-10);
+        // 10 km/hour as m/s
+        let q3 = run_numeric("10 km per hour as m / s").unwrap();
+        assert!((q3.value() - 10.0 / 3.6).abs() < 1e-10);
+        let factors: Vec<_> = q3.unit().iter().collect();
+        assert_eq!(factors.len(), 2); // m and s in denominator
+    }
+
+    #[test]
+    fn run_as_dimension_mismatch_errors() {
+        let e = run_numeric("10 km as s").unwrap_err();
+        assert!(matches!(e, RunError::DimensionMismatch { .. }));
+    }
+
+    #[test]
+    fn run_as_precedence() {
+        // "10 km + 5 m as m" => (10 km + 5 m) as m
+        let q = run_numeric("10 km + 5 m as m").unwrap();
+        assert!((q.value() - 10_005.0).abs() < 1e-10);
     }
 
     #[test]

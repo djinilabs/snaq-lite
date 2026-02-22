@@ -19,6 +19,8 @@ pub enum Tok {
     Star,
     Slash,
     Per,
+    /// "as" keyword for unit conversion (e.g. "10 km as m").
+    As,
     Pi,
     Comma,
     Colon,
@@ -147,7 +149,11 @@ impl<'input> Iterator for Lexer<'input> {
         let start = self.pos;
         let rest = &self.input[self.pos..];
 
-        // Single chars / fixed strings (longer first)
+        // Single chars / fixed strings (longer first); "as" before "per" so "aspect" stays Ident
+        if rest.starts_with("as") && !rest[2..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            self.pos += 2;
+            return Some(Ok((start, Tok::As, self.pos)));
+        }
         if rest.starts_with("per") && !rest[3..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
             self.pos += 3;
             return Some(Ok((start, Tok::Per, self.pos)));

@@ -72,8 +72,10 @@ impl Prefix {
 }
 
 /// Pairs of (short symbol, prefix) for parsing, sorted by symbol length descending (longest first).
-pub fn metric_short_prefixes() -> [(&'static str, Prefix); 20] {
+/// Includes "hect" (hecto, 10²) so that "hectare" parses as hect + are.
+pub fn metric_short_prefixes() -> [(&'static str, Prefix); 21] {
     [
+        ("hect", Prefix::Metric(2)),
         ("da", Prefix::Metric(1)),
         ("µ", Prefix::Metric(-6)),
         ("Y", Prefix::Metric(24)),

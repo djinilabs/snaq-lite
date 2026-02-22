@@ -1,5 +1,6 @@
 //! Unit registry: base and derived units, resolution to base representation.
-//! Supports prefix parsing (e.g. "km" → kilo × meter).
+//! Supports prefix parsing (e.g. "km" → kilo × meter) and squared-length resolution
+//! (e.g. "km2" or "km²" → (kilo·meter)² = 10⁶ m²) so prefixed area units convert correctly.
 //! Plural unit names (e.g. "meters") are normalized to singular before lookup.
 
 use crate::dimension::{BaseRepresentation, DimensionRegistry};
@@ -77,7 +78,12 @@ impl UnitRegistry {
         self.units.get(name).map(|_| Unit::from_base_unit(name))
     }
 
+    /// Squared-length rest names: when prefix + rest is parsed and rest is one of these,
+    /// resolve to (prefix × base length)² so that e.g. km2 → (k·m)² = 10⁶ m².
+    const SQUARED_LENGTH_REST: &[&str] = &["m2", "m²"];
+
     /// Try to resolve an identifier to a Unit: exact match first, then prefix + base (e.g. "km" → kilo×m).
+    /// When rest is a squared-length form (e.g. "m2", "m²"), returns (prefix × base length)² so conversion is correct.
     /// Prefix list must be sorted longest-first (so "Mm" → mega×m, not milli×"m").
     fn try_lookup(
         &self,
@@ -89,9 +95,14 @@ impl UnitRegistry {
         }
         for (symbol, p) in prefixes_by_len {
             if ident.len() > symbol.len() && ident.starts_with(*symbol) {
-                let base = &ident[symbol.len()..];
-                if self.units.contains_key(base) {
-                    let u = self.get_unit(base).unwrap();
+                let rest = &ident[symbol.len()..];
+                // Squared-length: rest "m2" or "m²" → (prefix·m)² so km2, cm2, mm2 convert correctly
+                if Self::SQUARED_LENGTH_REST.contains(&rest) && self.units.contains_key("m") {
+                    let u = self.get_unit("m").unwrap();
+                    return Some(u.with_prefix(*p).powi(2));
+                }
+                if self.units.contains_key(rest) {
+                    let u = self.get_unit(rest).unwrap();
                     return Some(u.with_prefix(*p));
                 }
             }
@@ -279,6 +290,76 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("m"),
     );
 
+    // Area: m² (canonical), are = 100 m², hectare = 100 are. km2/cm2/mm2 resolved via prefix + m2 → (prefix·m)².
+    reg.dimensions.add_base_dimension("Area");
+    reg.add_derived_unit(
+        "m2",
+        BaseRepresentation::from_base("Area"),
+        1.0,
+        Unit::from_base_unit("m").powi(2),
+    );
+    reg.add_derived_unit(
+        "are",
+        BaseRepresentation::from_base("Area"),
+        100.0,
+        Unit::from_base_unit("m2"),
+    );
+    reg.add_derived_unit(
+        "hectare",
+        BaseRepresentation::from_base("Area"),
+        100.0,
+        Unit::from_base_unit("are"),
+    );
+    add_derived_alias(&mut reg, "ha", "Area", Unit::from_base_unit("hectare"));
+    add_derived_alias(&mut reg, "m²", "Area", Unit::from_base_unit("m2"));
+    add_derived_alias(&mut reg, "sqm", "Area", Unit::from_base_unit("m2"));
+    add_derived_alias(&mut reg, "squaremeter", "Area", Unit::from_base_unit("m2"));
+    add_derived_alias(&mut reg, "square_meter", "Area", Unit::from_base_unit("m2"));
+    add_derived_alias(&mut reg, "squarekilometer", "Area", Unit::from_base_unit("m").with_prefix(Prefix::Metric(3)).powi(2));
+    add_derived_alias(&mut reg, "square_kilometer", "Area", Unit::from_base_unit("m").with_prefix(Prefix::Metric(3)).powi(2));
+    add_derived_alias(&mut reg, "squarecentimeter", "Area", Unit::from_base_unit("m").with_prefix(Prefix::Metric(-2)).powi(2));
+    add_derived_alias(&mut reg, "square_centimeter", "Area", Unit::from_base_unit("m").with_prefix(Prefix::Metric(-2)).powi(2));
+    add_derived_alias(&mut reg, "squaremillimeter", "Area", Unit::from_base_unit("m").with_prefix(Prefix::Metric(-3)).powi(2));
+    add_derived_alias(&mut reg, "square_millimeter", "Area", Unit::from_base_unit("m").with_prefix(Prefix::Metric(-3)).powi(2));
+
+    // Length: inch and foot (for area in2, ft2)
+    const INCH_TO_M: f64 = 0.0254;
+    const FOOT_TO_M: f64 = 0.3048;
+    reg.add_derived_unit(
+        "inch",
+        BaseRepresentation::from_base("Length"),
+        INCH_TO_M,
+        Unit::from_base_unit("m"),
+    );
+    add_derived_alias(&mut reg, "in", "Length", Unit::from_base_unit("inch"));
+    reg.add_derived_unit(
+        "foot",
+        BaseRepresentation::from_base("Length"),
+        FOOT_TO_M,
+        Unit::from_base_unit("m"),
+    );
+    add_derived_alias(&mut reg, "ft", "Length", Unit::from_base_unit("foot"));
+    // Area: square inch, square foot
+    reg.add_derived_unit(
+        "in2",
+        BaseRepresentation::from_base("Area"),
+        INCH_TO_M * INCH_TO_M,
+        Unit::from_base_unit("inch").powi(2),
+    );
+    add_derived_alias(&mut reg, "in²", "Area", Unit::from_base_unit("in2"));
+    add_derived_alias(&mut reg, "sqin", "Area", Unit::from_base_unit("in2"));
+    add_derived_alias(&mut reg, "squareinch", "Area", Unit::from_base_unit("in2"));
+    add_derived_alias(&mut reg, "square_inch", "Area", Unit::from_base_unit("in2"));
+    reg.add_derived_unit(
+        "ft2",
+        BaseRepresentation::from_base("Area"),
+        FOOT_TO_M * FOOT_TO_M,
+        Unit::from_base_unit("foot").powi(2),
+    );
+    add_derived_alias(&mut reg, "sqft", "Area", Unit::from_base_unit("ft2"));
+    add_derived_alias(&mut reg, "squarefoot", "Area", Unit::from_base_unit("ft2"));
+    add_derived_alias(&mut reg, "square_foot", "Area", Unit::from_base_unit("ft2"));
+
     // Time: SI derived
     reg.add_derived_unit(
         "hour",
@@ -343,6 +424,7 @@ pub fn default_si_registry() -> UnitRegistry {
         1.0,
         newton_unit,
     );
+    add_derived_alias(&mut reg, "newton", "Force", Unit::from_base_unit("N"));
 
     // Pressure: Pa = N/m²
     reg.dimensions.add_base_dimension("Pressure");
@@ -352,6 +434,7 @@ pub fn default_si_registry() -> UnitRegistry {
         1.0,
         Unit::from_base_unit("N").div(&Unit::from_base_unit("m").powi(2)),
     );
+    add_derived_alias(&mut reg, "pascal", "Pressure", Unit::from_base_unit("Pa"));
 
     // Power: W = J/s
     reg.dimensions.add_base_dimension("Power");
@@ -600,6 +683,92 @@ mod tests {
         assert_eq!(base.iter().next().unwrap().unit_name, "m");
         assert!((factor - 0.001).abs() < 1e-10);
     }
+
+    // --- Area dimension and units ---
+
+    #[test]
+    fn area_same_dimension_m2_and_m_times_m() {
+        let reg = default_si_registry();
+        let m2 = Unit::from_base_unit("m2");
+        let m_times_m = Unit::from_base_unit("m").powi(2);
+        assert!(reg.same_dimension(&m2, &m_times_m).unwrap());
+    }
+
+    #[test]
+    fn area_are_equals_100_m2() {
+        let reg = default_si_registry();
+        let are = Unit::from_base_unit("are");
+        let m2 = Unit::from_base_unit("m2");
+        let q_are = Quantity::new(1.0, are);
+        let as_m2 = q_are.convert_to(&reg, &m2).unwrap();
+        assert!((as_m2.value() - 100.0).abs() < 1e-10, "1 are = 100 m²");
+    }
+
+    #[test]
+    fn area_hectare_equals_10000_m2() {
+        let reg = default_si_registry();
+        let hectare = reg.get_unit_with_prefix("hectare").unwrap();
+        let m2 = Unit::from_base_unit("m2");
+        let q_ha = Quantity::new(1.0, hectare);
+        let as_m2 = q_ha.convert_to(&reg, &m2).unwrap();
+        assert!((as_m2.value() - 10_000.0).abs() < 1e-10, "1 hectare = 10 000 m²");
+    }
+
+    #[test]
+    fn area_ha_alias_equals_10000_m2() {
+        let reg = default_si_registry();
+        let ha = reg.get_unit_with_prefix("ha").unwrap();
+        let m2 = Unit::from_base_unit("m2");
+        let q = Quantity::new(1.0, ha);
+        let as_m2 = q.convert_to(&reg, &m2).unwrap();
+        assert!((as_m2.value() - 10_000.0).abs() < 1e-10, "1 ha = 10 000 m²");
+    }
+
+    #[test]
+    fn area_km2_as_m2_is_1e6() {
+        let q = crate::run_numeric("1 km2 as m2").unwrap();
+        assert!((q.value() - 1e6).abs() < 1.0, "1 km² = 10⁶ m²");
+    }
+
+    #[test]
+    fn area_m2_as_km2_is_1e_minus_6() {
+        let q = crate::run_numeric("1 m2 as km2").unwrap();
+        assert!((q.value() - 1e-6).abs() < 1e-15, "1 m² = 10⁻⁶ km²");
+    }
+
+    #[test]
+    fn area_cm2_as_m2_is_1e_minus_4() {
+        let q = crate::run_numeric("1 cm2 as m2").unwrap();
+        assert!((q.value() - 1e-4).abs() < 1e-12, "1 cm² = 10⁻⁴ m²");
+    }
+
+    #[test]
+    fn area_mm2_as_m2_is_1e_minus_6() {
+        let q = crate::run_numeric("1 mm2 as m2").unwrap();
+        assert!((q.value() - 1e-6).abs() < 1e-15, "1 mm² = 10⁻⁶ m²");
+    }
+
+    #[test]
+    fn area_km_times_km_same_dimension_as_m2_and_converts() {
+        let reg = default_si_registry();
+        let q = crate::run_numeric("1 km * 1 km").unwrap();
+        let m2 = Unit::from_base_unit("m2");
+        assert!(reg.same_dimension(q.unit(), &m2).unwrap());
+        let as_m2 = q.convert_to(&reg, &m2).unwrap();
+        assert!((as_m2.value() - 1e6).abs() < 1.0, "1 km × 1 km = 10⁶ m²");
+    }
+
+    #[test]
+    fn area_parsing_m2_squaremeter_squareinch_ha_hectare_are() {
+        let cases = [
+            "1 m2", "1 squaremeter", "1 squareinch", "1 ha", "1 hectare", "1 are", "1 in2", "1 sqin",
+            "1 sqft", "1 squarefoot", "1 ft2", "1 foot", "1 ft",
+        ];
+        for expr in cases {
+            let q = crate::run_numeric(expr).unwrap_or_else(|e| panic!("{expr}: {e}"));
+            assert!((q.value() - 1.0).abs() < 1e-12, "{}", expr);
+        }
+    }
 }
 
 /// Extensive tests for SI base units, derived units, prefixes, and compound expressions.
@@ -832,7 +1001,7 @@ mod all_units_tests {
     #[test]
     fn numbat_units_we_do_not_support_treated_as_symbols() {
         use crate::Value;
-        let unsupported = ["week", "year", "inch", "foot", "pound"];
+        let unsupported = ["week", "year", "pound"];
         for name in unsupported {
             let expr = format!("1 {name}");
             let res = crate::run(&expr);

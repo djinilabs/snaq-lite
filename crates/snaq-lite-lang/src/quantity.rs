@@ -319,6 +319,7 @@ impl Quantity {
     /// Convert this quantity to the target unit. Same dimension required.
     /// Uses common-factor optimization (Numbat-style): when converting e.g. km/h to mile/h,
     /// only the length part is converted, leaving the "per hour" factor unchanged.
+    /// Variance is propagated as Var(result) = ratio² × Var(self) via [SnaqNumber] scaling.
     pub fn convert_to(
         &self,
         registry: &UnitRegistry,
@@ -530,6 +531,19 @@ mod tests {
         let q = Quantity::new(1.0, Unit::from_base_unit("km"));
         let as_m = q.convert_to(&reg, &Unit::from_base_unit("m")).unwrap();
         assert!((as_m.value() - 1000.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn quantity_convert_to_propagates_variance() {
+        let reg = default_si_registry();
+        let q = Quantity::with_number(
+            SnaqNumber::new(10.0, 0.25),
+            Unit::from_base_unit("km"),
+        );
+        let as_m = q.convert_to(&reg, &Unit::from_base_unit("m")).unwrap();
+        assert!((as_m.value() - 10_000.0).abs() < 1e-10);
+        // ratio = 1000 (km → m), so Var(result) = 1000² × 0.25 = 250_000
+        assert!((as_m.variance() - 250_000.0).abs() < 1e-6);
     }
 
     #[test]

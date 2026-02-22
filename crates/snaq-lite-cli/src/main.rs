@@ -58,8 +58,8 @@ fn main() {
             }
         }
     } else {
-        match snaq_lite_lang::run(&expression) {
-            Ok(value) => println!("{value}"),
+        match snaq_lite_lang::run_format(&expression) {
+            Ok(formatted) => println!("{formatted}"),
             Err(e) => {
                 eprintln!("error: {e}");
                 std::process::exit(1);

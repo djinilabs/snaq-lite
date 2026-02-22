@@ -49,6 +49,44 @@ pub fn run_with_registry(input: &str, registry: &UnitRegistry) -> Result<Value, 
     value(&db, root)
 }
 
+/// Format the result of evaluating the expression for display. Vectors are shown as `[e1, e2, ...]`.
+/// Uses the default unit registry.
+pub fn run_format(input: &str) -> Result<String, RunError> {
+    run_with_registry_format(input, &default_si_registry())
+}
+
+/// Like [run_format], but with a custom unit registry.
+pub fn run_with_registry_format(input: &str, registry: &UnitRegistry) -> Result<String, RunError> {
+    let root_def = parse(input).map_err(RunError::from)?;
+    let root_def = resolve::resolve(root_def, registry)?;
+    let root_def = cas::simplify_symbolic(root_def, registry)?;
+    set_eval_registry(registry.clone());
+    let db = salsa::DatabaseImpl::new();
+    let program_def = ProgramDef::new(&db, root_def);
+    let root = program(&db, program_def);
+    let val = value(&db, root)?;
+    match &val {
+        Value::Vector(lv) => {
+            let stream = vector_into_stream(&db, lv.clone());
+            let results: Vec<_> = futures::executor::block_on(async move {
+                use futures::stream::StreamExt;
+                stream.collect().await
+            });
+            let mut parts = Vec::with_capacity(results.len());
+            for r in results {
+                let opt = r?;
+                let s = match opt {
+                    None => "?".to_string(),
+                    Some(v) => format!("{v}"),
+                };
+                parts.push(s);
+            }
+            Ok(format!("[{}]", parts.join(", ")))
+        }
+        _ => Ok(format!("{val}")),
+    }
+}
+
 /// Evaluate and substitute all symbols with their numeric values; returns a single Quantity.
 /// Errors if any symbol has no value in the default symbol registry.
 pub fn run_numeric(input: &str) -> Result<Quantity, RunError> {

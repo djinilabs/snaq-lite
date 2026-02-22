@@ -15,15 +15,17 @@ pub mod symbol_registry;
 pub mod symbolic;
 pub mod unit;
 pub mod unit_registry;
+pub mod vector;
 
 pub use error::{ParseError, RunError};
 pub use quantity::{Quantity, QuantityError, SnaqNumber};
 pub use unit::Unit;
 pub use ir::{ExprDef, Expression, ProgramDef};
 pub use parser::parse;
-pub use queries::{program, set_eval_registry, value};
+pub use queries::{program, set_eval_registry, value, vector_into_stream};
 pub use symbol_registry::SymbolRegistry;
 pub use symbolic::{SymbolicQuantity, SymbolicExpr, Value};
+pub use vector::LazyVector;
 pub use unit_registry::{default_si_registry, UnitRegistry};
 
 /// Parse and evaluate the expression, returning a Value (symbolic by default, e.g. "6 + π").
@@ -823,6 +825,74 @@ mod tests {
     fn run_unknown_function_errors() {
         let e = run("foo(1)");
         assert!(matches!(e, Err(RunError::UnknownFunction(_))));
+    }
+
+    // --- Vector literal and vector type ---
+
+    #[test]
+    fn parse_vector_literal() {
+        use crate::ir::ExprDef;
+        let r = parse("[1]").unwrap();
+        assert!(matches!(r, ExprDef::VecLiteral(e) if e.len() == 1));
+        let r = parse("[1, 2*3]").unwrap();
+        assert!(matches!(r, ExprDef::VecLiteral(e) if e.len() == 2));
+        let r = parse("[]").unwrap();
+        assert!(matches!(r, ExprDef::VecLiteral(e) if e.is_empty()));
+    }
+
+    #[test]
+    fn run_vector_literal_returns_vector() {
+        let v = run("[1, 2, 3]").unwrap();
+        assert!(matches!(v, Value::Vector(_)));
+        assert_eq!(format!("{}", v), "<vector>");
+
+        let v = run("[]").unwrap();
+        assert!(matches!(v, Value::Vector(_)));
+    }
+
+    #[test]
+    fn run_numeric_vector_returns_err() {
+        let e = run_numeric("[1, 2]").unwrap_err();
+        assert!(matches!(e, RunError::UnsupportedVectorOperation));
+    }
+
+    #[test]
+    fn run_vector_arithmetic_errors() {
+        let e = run("[1] + 1").unwrap_err();
+        assert!(matches!(e, RunError::UnsupportedVectorOperation));
+        let e = run("1 + [1]").unwrap_err();
+        assert!(matches!(e, RunError::UnsupportedVectorOperation));
+    }
+
+    #[test]
+    fn run_vector_stream_yields_elements() {
+        use crate::queries::{program, set_eval_registry, value, vector_into_stream};
+        use crate::resolve;
+        use crate::cas;
+        use salsa::DatabaseImpl;
+
+        let registry = default_si_registry();
+        let root_def = parse("[1, 2, 3]").unwrap();
+        let root_def = resolve::resolve(root_def, &registry).unwrap();
+        let root_def = cas::simplify_symbolic(root_def, &registry).unwrap();
+        set_eval_registry(registry.clone());
+        let db = DatabaseImpl::new();
+        let program_def = ProgramDef::new(&db, root_def);
+        let root = program(&db, program_def);
+        let v = value(&db, root).unwrap();
+        let lv = match &v {
+            Value::Vector(l) => l.clone(),
+            _ => panic!("expected vector"),
+        };
+        let stream = vector_into_stream(&db, lv);
+        let results: Vec<_> = futures::executor::block_on(async move {
+            use futures::stream::StreamExt;
+            stream.collect().await
+        });
+        assert_eq!(results.len(), 3);
+        assert!(matches!(&results[0], Ok(Some(Value::Numeric(q))) if (q.value() - 1.0).abs() < 1e-10));
+        assert!(matches!(&results[1], Ok(Some(Value::Numeric(q))) if (q.value() - 2.0).abs() < 1e-10));
+        assert!(matches!(&results[2], Ok(Some(Value::Numeric(q))) if (q.value() - 3.0).abs() < 1e-10));
     }
 
     #[test]

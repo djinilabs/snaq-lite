@@ -16,6 +16,8 @@ extern {
     enum crate::lexer::Tok {
         "(" => Tok::LParen,
         ")" => Tok::RParen,
+        "[" => Tok::LBracket,
+        "]" => Tok::RBracket,
         "+" => Tok::Plus,
         "-" => Tok::Minus,
         "*" => Tok::Star,
@@ -104,6 +106,18 @@ Factor: ExprDef = {
     <id:FuncIdent> "(" <args:ArgList> ")" => ExprDef::Call(id, args),
     <ii:IdentIdents> => ii,
     "(" <e:Expr> ")" => e,
+    "[" <elems:VecExprList> "]" => ExprDef::VecLiteral(elems),
+};
+
+// Comma-separated list of expressions for vector literal: [ expr, expr, ... ] or [].
+VecExprList: Vec<ExprDef> = {
+    => vec![],
+    <single:Expr> => vec![single],
+    <rest:VecExprList> "," <last:Expr> => {
+        let mut rest = rest;
+        rest.push(last);
+        rest
+    },
 };
 
 // One argument: named (Ident : Expr) or positional (Expr). Named first so "a: 1" is not parsed as positional "a".

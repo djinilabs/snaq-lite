@@ -15,6 +15,7 @@ pub enum Rank {
     Div(Box<Rank>, Box<Rank>),
     Call(String, Vec<Rank>),
     As(Box<Rank>, Box<Rank>),
+    VecLiteral(Vec<Rank>),
 }
 
 fn tag_order(r: &Rank) -> u8 {
@@ -28,6 +29,7 @@ fn tag_order(r: &Rank) -> u8 {
         Rank::Div(_, _) => 6,
         Rank::Call(..) => 7,
         Rank::As(..) => 8,
+        Rank::VecLiteral(_) => 9,
     }
 }
 
@@ -53,6 +55,7 @@ impl Ord for Rank {
             (Rank::Div(a1, a2), Rank::Div(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::Call(a, aargs), Rank::Call(b, bargs)) => a.cmp(b).then(aargs.cmp(bargs)),
             (Rank::As(a1, a2), Rank::As(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
+            (Rank::VecLiteral(a), Rank::VecLiteral(b)) => a.cmp(b),
             _ => Ordering::Equal,
         }
     }
@@ -72,6 +75,7 @@ pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
             Rank::Call(name.clone(), args.iter().map(|(_, id)| rank(pool, *id)).collect())
         }
         ExprNode::As(l, r) => Rank::As(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
+        ExprNode::VecLiteral(ids) => Rank::VecLiteral(ids.iter().map(|&i| rank(pool, i)).collect()),
     }
 }
 
@@ -162,6 +166,13 @@ fn canonicalize_rec(
             let new_l = canonicalize_rec(pool, out, *l);
             let new_r = canonicalize_rec(pool, out, *r);
             out.intern(ExprNode::As(new_l, new_r))
+        }
+        ExprNode::VecLiteral(ids) => {
+            let new_ids: Vec<ExprId> = ids
+                .iter()
+                .map(|&id| canonicalize_rec(pool, out, id))
+                .collect();
+            out.intern(ExprNode::VecLiteral(new_ids))
         }
     }
 }

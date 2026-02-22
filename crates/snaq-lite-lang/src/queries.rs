@@ -11,9 +11,12 @@ use crate::quantity::Quantity;
 use crate::symbolic::{SymbolicExpr, SymbolicQuantity, Value};
 use crate::unit::Unit;
 use crate::unit_registry::UnitRegistry;
+use crate::vector::LazyVector;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Neg;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 thread_local! {
     /// Registry used during evaluation (set by run()).
@@ -23,6 +26,83 @@ thread_local! {
 /// Set the unit registry for the current thread (used by run() before evaluation).
 pub fn set_eval_registry(registry: UnitRegistry) {
     EVAL_REGISTRY.with(|r| *r.borrow_mut() = Some(registry));
+}
+
+/// Stream that yields pre-evaluated vector elements. Elements are evaluated at stream creation
+/// time (Salsa does not allow creating tracked structs from within stream poll).
+/// Unpin so it can be used with StreamExt::next/collect.
+pub struct LiteralVectorStream {
+    results: std::vec::IntoIter<Result<Option<Value>, RunError>>,
+}
+
+impl futures::stream::Stream for LiteralVectorStream {
+    type Item = Result<Option<Value>, RunError>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        Poll::Ready(this.results.next())
+    }
+}
+
+impl std::marker::Unpin for LiteralVectorStream {}
+
+/// Empty stream (for transpose/transform stubs). Unpin.
+struct EmptyVectorStream;
+
+impl futures::stream::Stream for EmptyVectorStream {
+    type Item = Result<Option<Value>, RunError>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        Poll::Ready(None)
+    }
+}
+
+impl std::marker::Unpin for EmptyVectorStream {}
+
+/// Unified stream type for vector elements (literal or empty).
+pub enum VectorStream {
+    Literal(LiteralVectorStream),
+    Empty(futures::stream::Iter<std::iter::Empty<Result<Option<Value>, RunError>>>),
+}
+
+impl futures::stream::Stream for VectorStream {
+    type Item = Result<Option<Value>, RunError>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        match self.get_mut() {
+            VectorStream::Literal(s) => Pin::new(s).poll_next(cx),
+            VectorStream::Empty(s) => Pin::new(s).poll_next(cx),
+        }
+    }
+}
+
+impl std::marker::Unpin for VectorStream {}
+
+/// Turn a vector into a stream of elements. Elements are evaluated at creation time (Salsa
+/// requires tracked queries to run in the right context). Requires the same database that was
+/// used to create the program (e.g. from [run_with_registry]).
+pub fn vector_into_stream(
+    _db: &dyn salsa::Database,
+    vector: LazyVector,
+) -> VectorStream {
+    if let Some(results) = vector.take_evaluated_results() {
+        VectorStream::Literal(LiteralVectorStream {
+            results: results.into_iter(),
+        })
+    } else {
+        VectorStream::Empty(futures::stream::iter(
+            std::iter::empty::<Result<Option<Value>, RunError>>(),
+        ))
+    }
 }
 
 fn with_registry<R, F: FnOnce(&UnitRegistry) -> R>(f: F) -> R {
@@ -87,6 +167,13 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
             let left = build_expression(db, *l);
             let right = build_expression(db, *r);
             ExprData::As(left, right)
+        }
+        ExprDef::VecLiteral(elems) => {
+            let exprs: Vec<Expression<'_>> = elems
+                .into_iter()
+                .map(|d| build_expression(db, d))
+                .collect();
+            ExprData::VecLiteral(exprs)
         }
     };
     Expression::new(db, data)
@@ -162,9 +249,67 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
                     )?;
                     Ok(Value::Symbolic(SymbolicQuantity::new(scaled, target_unit)))
                 }
+                Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
             }
         }
+        ExprData::VecLiteral(exprs) => {
+            // Evaluate all elements while we're inside this tracked query (Salsa does not allow
+            // creating tracked structs from outside). Store results for lazy streaming.
+            let results: Vec<Result<Option<Value>, RunError>> = exprs
+                .iter()
+                .map(|e| value(db, *e).map(Some))
+                .collect();
+            Ok(Value::Vector(LazyVector::from_evaluated(results)))
+        }
     })
+}
+
+/// Convert a tracked Expression back to ExprDef (inverse of build_expression).
+#[allow(dead_code)]
+fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef {
+    match expr.data(db) {
+        ExprData::Lit(q) => ExprDef::Lit(q.clone()),
+        ExprData::LitSymbol(name) => ExprDef::LitSymbol(name.clone()),
+        ExprData::Add(l, r) => ExprDef::Add(
+            Box::new(expression_to_def(db, *l)),
+            Box::new(expression_to_def(db, *r)),
+        ),
+        ExprData::Sub(l, r) => ExprDef::Sub(
+            Box::new(expression_to_def(db, *l)),
+            Box::new(expression_to_def(db, *r)),
+        ),
+        ExprData::Mul(l, r) => ExprDef::Mul(
+            Box::new(expression_to_def(db, *l)),
+            Box::new(expression_to_def(db, *r)),
+        ),
+        ExprData::Div(l, r) => ExprDef::Div(
+            Box::new(expression_to_def(db, *l)),
+            Box::new(expression_to_def(db, *r)),
+        ),
+        ExprData::Neg(inner) => ExprDef::Neg(Box::new(expression_to_def(db, *inner))),
+        ExprData::Call(name, args) => ExprDef::Call(
+            name.clone(),
+            args.iter()
+                .map(|(opt_n, e)| {
+                    if let Some(n) = opt_n {
+                        CallArg::Named(n.clone(), Box::new(expression_to_def(db, *e)))
+                    } else {
+                        CallArg::Positional(Box::new(expression_to_def(db, *e)))
+                    }
+                })
+                .collect(),
+        ),
+        ExprData::As(l, r) => ExprDef::As(
+            Box::new(expression_to_def(db, *l)),
+            Box::new(expression_to_def(db, *r)),
+        ),
+        ExprData::VecLiteral(elems) => ExprDef::VecLiteral(
+            elems
+                .iter()
+                .map(|e| expression_to_def(db, *e))
+                .collect(),
+        ),
+    }
 }
 
 /// Bind call args (positional + named) to param names and evaluate.
@@ -214,6 +359,9 @@ fn eval_call(
                 "{name}: missing argument for parameter '{p}'"
             )));
         }
+    }
+    if bound.values().any(|v| matches!(v, Value::Vector(_))) {
+        return Err(RunError::UnsupportedVectorOperation);
     }
     let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
     let param_values: Result<Vec<Quantity>, RunError> = param_names
@@ -289,6 +437,7 @@ fn value_to_symbolic_expr(v: &Value) -> SymbolicExpr {
     match v {
         Value::Numeric(q) => SymbolicExpr::number(q.value()),
         Value::Symbolic(sq) => sq.expr.clone(),
+        Value::Vector(_) => panic!("value_to_symbolic_expr: vector not supported"),
     }
 }
 
@@ -298,6 +447,7 @@ fn add_values(
     registry: &UnitRegistry,
 ) -> Result<Value, RunError> {
     match (a, b) {
+        (Value::Vector(_), _) | (_, Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
         (Value::Numeric(qa), Value::Numeric(qb)) => qa
             .clone()
             .add(qb, registry)
@@ -336,6 +486,7 @@ fn sub_values(
     registry: &UnitRegistry,
 ) -> Result<Value, RunError> {
     match (a, b) {
+        (Value::Vector(_), _) | (_, Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
         (Value::Numeric(qa), Value::Numeric(qb)) => qa
             .clone()
             .sub(qb, registry)
@@ -370,6 +521,7 @@ fn sub_values(
 
 fn mul_values(a: &Value, b: &Value) -> Result<Value, RunError> {
     match (a, b) {
+        (Value::Vector(_), _) | (_, Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
         (Value::Numeric(qa), Value::Numeric(qb)) => Ok(Value::Numeric(qa.clone() * qb.clone())),
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
@@ -385,6 +537,7 @@ fn mul_values(a: &Value, b: &Value) -> Result<Value, RunError> {
 
 fn div_values(a: &Value, b: &Value) -> Result<Value, RunError> {
     match (a, b) {
+        (Value::Vector(_), _) | (_, Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
         (Value::Numeric(qa), Value::Numeric(qb)) => (qa.clone() / qb.clone())
             .map(Value::Numeric)
             .map_err(|_| RunError::DivisionByZero),
@@ -402,6 +555,7 @@ fn div_values(a: &Value, b: &Value) -> Result<Value, RunError> {
 
 fn neg_value(v: &Value) -> Result<Value, RunError> {
     match v {
+        Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
         Value::Numeric(q) => Ok(Value::Numeric(Neg::neg(q.clone()))),
         Value::Symbolic(sq) => Ok(Value::Symbolic(SymbolicQuantity::new(
             SymbolicExpr::neg(&sq.expr),
@@ -414,6 +568,7 @@ fn value_to_expr_unit(v: &Value) -> (SymbolicExpr, Unit) {
     match v {
         Value::Numeric(q) => (SymbolicExpr::number(q.value()), q.unit().clone()),
         Value::Symbolic(sq) => (sq.expr.clone(), sq.unit.clone()),
+        Value::Vector(_) => panic!("value_to_expr_unit: vector not supported"),
     }
 }
 
@@ -456,5 +611,6 @@ fn scale_expr_to_unit(
             Ok(SymbolicExpr::number(converted.value()))
         }
         Value::Symbolic(_) => Ok(SymbolicExpr::mul(expr, &SymbolicExpr::number(ratio))),
+        Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
     }
 }

@@ -14,6 +14,8 @@ pub enum RunError {
     UnknownFunction(String),
     /// Trig function (sin, cos, tan) received an argument that is not an angle (rad or degree).
     ExpectedAngle { actual: crate::unit::Unit },
+    /// Operation not supported for vector (e.g. arithmetic or to_quantity).
+    UnsupportedVectorOperation,
 }
 
 /// Parse error for expression strings.
@@ -61,6 +63,9 @@ impl std::fmt::Display for RunError {
                     write!(f, "{actual}")?;
                 }
                 Ok(())
+            }
+            RunError::UnsupportedVectorOperation => {
+                write!(f, "operation not supported for vector (expected scalar)")
             }
         }
     }

@@ -36,6 +36,8 @@ pub enum ExprDef {
     Call(String, Vec<CallArg>),
     /// Unit conversion: left expr evaluated to quantity, right expr is unit-only (e.g. "10 km as m").
     As(Box<ExprDef>, Box<ExprDef>),
+    /// Vector literal: `[ expr, expr, ... ]`.
+    VecLiteral(Vec<ExprDef>),
 }
 
 /// Input that holds the root expression definition.
@@ -66,4 +68,6 @@ pub enum ExprData<'db> {
     Call(String, Vec<(Option<String>, Expression<'db>)>),
     /// Unit conversion: left value, right unit expression.
     As(Expression<'db>, Expression<'db>),
+    /// Vector literal: list of element expressions.
+    VecLiteral(Vec<Expression<'db>>),
 }

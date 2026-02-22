@@ -100,6 +100,13 @@ fn rewrite_rec(
             let new_r = rewrite_rec(pool, out, *r, registry)?;
             Ok(out.intern(ExprNode::As(new_l, new_r)))
         }
+        ExprNode::VecLiteral(ids) => {
+            let new_ids: Vec<ExprId> = ids
+                .iter()
+                .map(|&id| rewrite_rec(pool, out, id, registry))
+                .collect::<Result<Vec<_>, RunError>>()?;
+            Ok(out.intern(ExprNode::VecLiteral(new_ids)))
+        }
     }
 }
 

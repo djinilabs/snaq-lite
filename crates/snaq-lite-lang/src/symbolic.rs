@@ -489,7 +489,7 @@ impl fmt::Display for SymbolicQuantity {
     }
 }
 
-/// Result of evaluation: either a numeric quantity or a symbolic expression (with optional unit).
+/// Result of evaluation: either a numeric quantity, a symbolic expression (with optional unit), or a vector.
 ///
 /// Use [Value::to_string] for display (e.g. `"6 + π"` or `"1000 + π m"`). Use [Value::to_quantity]
 /// with a [crate::SymbolRegistry] to substitute symbols and get a single [crate::Quantity].
@@ -497,6 +497,8 @@ impl fmt::Display for SymbolicQuantity {
 pub enum Value {
     Numeric(Quantity),
     Symbolic(SymbolicQuantity),
+    /// Lazy vector: elements are streamed on demand.
+    Vector(crate::vector::LazyVector),
 }
 
 impl Value {
@@ -509,10 +511,12 @@ impl Value {
     }
 
     /// Substitute all symbols and return a single Quantity. Errors if any symbol has no value.
+    /// Returns [RunError::UnsupportedVectorOperation] for vectors.
     pub fn to_quantity(&self, registry: &SymbolRegistry) -> Result<Quantity, RunError> {
         match self {
             Value::Numeric(q) => Ok(q.clone()),
             Value::Symbolic(sq) => sq.substitute_or_err(registry),
+            Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
         }
     }
 
@@ -534,6 +538,7 @@ impl fmt::Display for Value {
         match self {
             Value::Numeric(q) => write!(f, "{q}"),
             Value::Symbolic(sq) => write!(f, "{sq}"),
+            Value::Vector(lv) => write!(f, "{lv}"),
         }
     }
 }

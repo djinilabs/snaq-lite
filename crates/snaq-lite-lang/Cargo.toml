@@ -10,6 +10,7 @@ workspace = true
 lalrpop = "0.21"
 
 [dependencies]
+futures = "0.3"
 singularize = "0.1"
 lalrpop-util = { version = "0.21", features = ["lexer"] }
 num-rational = "0.4"

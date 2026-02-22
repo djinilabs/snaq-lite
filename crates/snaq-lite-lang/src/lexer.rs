@@ -24,6 +24,10 @@ pub enum Tok {
     Pi,
     Comma,
     Colon,
+    /// Vector literal start: `[`
+    LBracket,
+    /// Vector literal end: `]`
+    RBracket,
 }
 
 #[derive(Clone, Debug)]
@@ -170,6 +174,8 @@ impl<'input> Iterator for Lexer<'input> {
         let tok = match c {
             '(' => Tok::LParen,
             ')' => Tok::RParen,
+            '[' => Tok::LBracket,
+            ']' => Tok::RBracket,
             '+' => Tok::Plus,
             '-' => Tok::Minus,
             '*' => Tok::Star,

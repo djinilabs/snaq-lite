@@ -22,6 +22,8 @@ pub enum ExprNode {
     Call(String, Vec<(Option<String>, ExprId)>),
     /// Unit conversion: value expr, unit expr. Not folded; conversion in value().
     As(ExprId, ExprId),
+    /// Vector literal: element expr ids. Pass-through in CAS.
+    VecLiteral(Vec<ExprId>),
 }
 
 /// Central cache: same structure => same ExprId. New nodes are interned on construction.

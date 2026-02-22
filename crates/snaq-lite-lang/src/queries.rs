@@ -50,7 +50,7 @@ impl futures::stream::Stream for LiteralVectorStream {
 impl std::marker::Unpin for LiteralVectorStream {}
 
 /// Empty stream (for transpose/transform stubs). Unpin.
-struct EmptyVectorStream;
+pub struct EmptyVectorStream;
 
 impl futures::stream::Stream for EmptyVectorStream {
     type Item = Result<Option<Value>, RunError>;
@@ -68,7 +68,7 @@ impl std::marker::Unpin for EmptyVectorStream {}
 /// Unified stream type for vector elements (literal or empty).
 pub enum VectorStream {
     Literal(LiteralVectorStream),
-    Empty(futures::stream::Iter<std::iter::Empty<Result<Option<Value>, RunError>>>),
+    Empty(EmptyVectorStream),
 }
 
 impl futures::stream::Stream for VectorStream {
@@ -99,9 +99,7 @@ pub fn vector_into_stream(
             results: results.into_iter(),
         })
     } else {
-        VectorStream::Empty(futures::stream::iter(
-            std::iter::empty::<Result<Option<Value>, RunError>>(),
-        ))
+        VectorStream::Empty(EmptyVectorStream)
     }
 }
 

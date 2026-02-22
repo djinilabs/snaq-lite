@@ -211,7 +211,7 @@ fn add_derived_alias(
 /// Build default registry with full SI base units, key SI derived units, and Numbat-parity units.
 ///
 /// **SI base (7):** m (length), kg (mass), s (time), A (current), K (temperature), mol (amount), cd (luminous intensity).
-/// **SI derived (with special names):** J, C, V, F, ohm, S, Wb, T, H, Hz, N, Pa, W, lm, lx, Bq, Gy, Sv, kat; km, g, hour, minute, second; plus mile, au, parsec, light_year, eV, celsius. Plural input (e.g. "meters") is normalized to singular before lookup.
+/// **SI derived (with special names):** J, C, V, F, ohm, S, Wb, T, H, Hz, N, Pa, W, lm, lx, Bq, Gy, Sv, kat; km, g, hour, minute, second, day, week, month, quarter, year, decade, century, millennium; plus mile, au, parsec, light_year, eV, celsius. Plural input (e.g. "meters") is normalized to singular before lookup.
 pub fn default_si_registry() -> UnitRegistry {
     let mut reg = UnitRegistry::new();
 
@@ -360,7 +360,10 @@ pub fn default_si_registry() -> UnitRegistry {
     add_derived_alias(&mut reg, "squarefoot", "Area", Unit::from_base_unit("ft2"));
     add_derived_alias(&mut reg, "square_foot", "Area", Unit::from_base_unit("ft2"));
 
-    // Time: SI derived
+    // Time: SI derived. Calendar-style durations use Julian year (365.25 days) for a fixed definition.
+    const HOURS_PER_DAY: f64 = 24.0;
+    const DAYS_PER_WEEK: f64 = 7.0;
+    const DAYS_PER_YEAR_JULIAN: f64 = 365.25;
     reg.add_derived_unit(
         "hour",
         BaseRepresentation::from_base("Time"),
@@ -378,6 +381,54 @@ pub fn default_si_registry() -> UnitRegistry {
         BaseRepresentation::from_base("Time"),
         1.0,
         Unit::from_base_unit("s"),
+    );
+    reg.add_derived_unit(
+        "day",
+        BaseRepresentation::from_base("Time"),
+        HOURS_PER_DAY,
+        Unit::from_base_unit("hour"),
+    );
+    reg.add_derived_unit(
+        "week",
+        BaseRepresentation::from_base("Time"),
+        DAYS_PER_WEEK,
+        Unit::from_base_unit("day"),
+    );
+    reg.add_derived_unit(
+        "year",
+        BaseRepresentation::from_base("Time"),
+        DAYS_PER_YEAR_JULIAN,
+        Unit::from_base_unit("day"),
+    );
+    reg.add_derived_unit(
+        "month",
+        BaseRepresentation::from_base("Time"),
+        1.0 / 12.0,
+        Unit::from_base_unit("year"),
+    );
+    reg.add_derived_unit(
+        "quarter",
+        BaseRepresentation::from_base("Time"),
+        1.0 / 4.0,
+        Unit::from_base_unit("year"),
+    );
+    reg.add_derived_unit(
+        "decade",
+        BaseRepresentation::from_base("Time"),
+        10.0,
+        Unit::from_base_unit("year"),
+    );
+    reg.add_derived_unit(
+        "century",
+        BaseRepresentation::from_base("Time"),
+        100.0,
+        Unit::from_base_unit("year"),
+    );
+    reg.add_derived_unit(
+        "millennium",
+        BaseRepresentation::from_base("Time"),
+        1000.0,
+        Unit::from_base_unit("year"),
     );
     reg.dimensions.add_base_dimension("Frequency");
     reg.add_derived_unit(
@@ -809,6 +860,15 @@ mod si_tests {
         ("g", 0.001, "kg"),
         ("hour", 3600.0, "s"),
         ("minute", 60.0, "s"),
+        // day = 24 h, week = 7 d, year = 365.25 d (Julian); month = year/12, quarter = year/4
+        ("day", 86400.0, "s"),
+        ("week", 604_800.0, "s"),
+        ("year", 31_557_600.0, "s"),
+        ("month", 2_629_800.0, "s"),
+        ("quarter", 7_889_400.0, "s"),
+        ("decade", 315_576_000.0, "s"),
+        ("century", 3_155_760_000.0, "s"),
+        ("millennium", 31_557_600_000.0, "s"),
         ("Hz", 1.0, "s"),
         ("joule", 1.0, "kg"),
         ("J", 1.0, "kg"),
@@ -843,6 +903,45 @@ mod si_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn time_units_convert_correctly() {
+        const SECONDS_PER_DAY: f64 = 24.0 * 3600.0; // match day = 24 hour, hour = 3600 s
+        let reg = default_si_registry();
+        // 10 hours as day = 10/24 days
+        let q = crate::run_numeric_with_registry(
+            "10 hours as day",
+            &reg,
+            &crate::SymbolRegistry::default_registry(),
+        )
+        .unwrap();
+        assert!((q.value() - 10.0 / 24.0).abs() < 1e-10, "10 hours as day");
+        assert_eq!(q.unit().iter().next().unwrap().unit_name, "day");
+        // Plural "days" and "weeks" resolve via singularize
+        let q_days = crate::run_numeric("2 days").unwrap();
+        assert!((q_days.value() - 2.0).abs() < 1e-12);
+        assert_eq!(q_days.unit().iter().next().unwrap().unit_name, "day");
+        let q_weeks = crate::run_numeric("1 weeks").unwrap();
+        assert!((q_weeks.value() - 1.0).abs() < 1e-12);
+        assert_eq!(q_weeks.unit().iter().next().unwrap().unit_name, "week");
+        // 1 day -> seconds in base representation
+        let day = Unit::from_base_unit("day");
+        let (base_u, factor) = reg.to_base_unit_representation(&day).unwrap();
+        assert_eq!(base_u.iter().next().unwrap().unit_name, "s");
+        assert!(
+            (factor - SECONDS_PER_DAY).abs() < 1e-6 * SECONDS_PER_DAY,
+            "1 day = {} s",
+            SECONDS_PER_DAY
+        );
+        // 1 week = 7 days
+        let week = Unit::from_base_unit("week");
+        let (_, week_factor) = reg.to_base_unit_representation(&week).unwrap();
+        assert!(
+            (week_factor - 7.0 * SECONDS_PER_DAY).abs() < 1e-6 * (7.0 * SECONDS_PER_DAY),
+            "1 week = 7 * {} s",
+            SECONDS_PER_DAY
+        );
     }
 
     #[test]
@@ -888,6 +987,22 @@ mod si_tests {
         let length_units = ["m", "km", "mm", "mile", "au"];
         for a in length_units {
             for b in length_units {
+                let ua = reg.get_unit_with_prefix(a).unwrap();
+                let ub = reg.get_unit_with_prefix(b).unwrap();
+                assert!(reg.same_dimension(&ua, &ub).unwrap(), "{a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn si_same_dimension_time_units() {
+        let reg = default_si_registry();
+        let time_units = [
+            "s", "second", "minute", "hour", "day", "week", "month", "quarter",
+            "year", "decade", "century", "millennium",
+        ];
+        for a in time_units {
+            for b in time_units {
                 let ua = reg.get_unit_with_prefix(a).unwrap();
                 let ub = reg.get_unit_with_prefix(b).unwrap();
                 assert!(reg.same_dimension(&ua, &ub).unwrap(), "{a} vs {b}");
@@ -996,12 +1111,12 @@ mod all_units_tests {
         }
     }
 
-    /// Numbat supports many more units (week, year, inch, etc.). We treat unknown identifiers
+    /// Numbat supports many more units (e.g. pound). We treat unknown identifiers
     /// as symbols, so run() succeeds with Value::Symbolic; run_numeric() fails with SymbolHasNoValue.
     #[test]
     fn numbat_units_we_do_not_support_treated_as_symbols() {
         use crate::Value;
-        let unsupported = ["week", "year", "pound"];
+        let unsupported = ["pound"];
         for name in unsupported {
             let expr = format!("1 {name}");
             let res = crate::run(&expr);

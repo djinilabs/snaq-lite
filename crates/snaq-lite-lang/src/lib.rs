@@ -386,6 +386,16 @@ mod tests {
     }
 
     #[test]
+    fn run_numeric_time_units_convert_and_add() {
+        let q = run_numeric("10 hours as day").unwrap();
+        assert!((q.value() - 10.0 / 24.0).abs() < 1e-10, "10 hours as day");
+        assert_eq!(q.unit().iter().next().unwrap().unit_name, "day");
+        let q2 = run_numeric("1 week + 2 days").unwrap();
+        assert!((q2.value() - 9.0).abs() < 1e-10, "1 week + 2 days = 9 days");
+        assert_eq!(q2.unit().iter().next().unwrap().unit_name, "day");
+    }
+
+    #[test]
     fn run_as_dimension_mismatch_errors() {
         let e = run_numeric("10 km as s").unwrap_err();
         assert!(matches!(e, RunError::DimensionMismatch { .. }));

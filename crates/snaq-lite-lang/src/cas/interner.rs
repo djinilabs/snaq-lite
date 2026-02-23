@@ -24,6 +24,8 @@ pub enum ExprNode {
     As(ExprId, ExprId),
     /// Vector literal: element expr ids. Pass-through in CAS.
     VecLiteral(Vec<ExprId>),
+    /// Postfix transpose: inner must evaluate to a vector. Pass-through in CAS.
+    Transpose(ExprId),
 }
 
 /// Central cache: same structure => same ExprId. New nodes are interned on construction.

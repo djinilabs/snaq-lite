@@ -66,12 +66,12 @@ impl futures::stream::Stream for EmptyVectorStream {
 impl std::marker::Unpin for EmptyVectorStream {}
 
 /// Stream that applies a [VectorMapOp] to each element of an inner stream.
-pub struct MappedVectorStream {
-    inner: Box<VectorStream>,
+pub struct MappedVectorStream<'a> {
+    inner: Box<VectorStream<'a>>,
     op: VectorMapOp,
 }
 
-impl futures::stream::Stream for MappedVectorStream {
+impl<'a> futures::stream::Stream for MappedVectorStream<'a> {
     type Item = Result<Option<Value>, RunError>;
 
     fn poll_next(
@@ -91,16 +91,137 @@ impl futures::stream::Stream for MappedVectorStream {
     }
 }
 
-impl std::marker::Unpin for MappedVectorStream {}
+impl std::marker::Unpin for MappedVectorStream<'_> {}
 
-/// Unified stream type for vector elements (literal, mapped, or empty).
-pub enum VectorStream {
-    Literal(LiteralVectorStream),
-    Mapped(MappedVectorStream),
-    Empty(EmptyVectorStream),
+/// Stream state for 2D transpose. Created by [vector_into_stream] for [crate::vector::LazyVector::Transpose].
+/// Collects the source stream in [poll_next] (no blocking), then yields columns if every element was a vector, else yields the same elements (1D identity).
+pub struct TransposedVectorStream<'a> {
+    db: &'a dyn salsa::Database,
+    inner: Box<VectorStream<'a>>,
+    row_stream: Option<Box<VectorStream<'a>>>,
+    buffer: Vec<Result<Option<Value>, RunError>>,
+    current_row: Vec<Result<Option<Value>, RunError>>,
+    rows: Vec<Vec<Result<Option<Value>, RunError>>>,
+    phase: TransposePhase,
 }
 
-impl futures::stream::Stream for VectorStream {
+enum TransposePhase {
+    Collecting,
+    Yielding1D { index: usize },
+    YieldingColumns {
+        col_index: usize,
+        max_cols: usize,
+    },
+    Done,
+}
+
+impl<'a> TransposedVectorStream<'a> {
+    fn new(db: &'a dyn salsa::Database, inner: VectorStream<'a>) -> Self {
+        Self {
+            db,
+            inner: Box::new(inner),
+            row_stream: None,
+            buffer: Vec::new(),
+            current_row: Vec::new(),
+            rows: Vec::new(),
+            phase: TransposePhase::Collecting,
+        }
+    }
+}
+
+impl<'a> futures::stream::Stream for TransposedVectorStream<'a> {
+    type Item = Result<Option<Value>, RunError>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            match &mut this.phase {
+                TransposePhase::Collecting => {
+                    if let Some(ref mut row_stream) = this.row_stream {
+                        match Pin::new(row_stream.as_mut()).poll_next(cx) {
+                            Poll::Ready(Some(item)) => {
+                                this.current_row.push(item);
+                                continue;
+                            }
+                            Poll::Ready(None) => {
+                                this.rows.push(std::mem::take(&mut this.current_row));
+                                this.row_stream = None;
+                                continue;
+                            }
+                            Poll::Pending => return Poll::Pending,
+                        }
+                    }
+                    match Pin::new(this.inner.as_mut()).poll_next(cx) {
+                        Poll::Ready(Some(item)) => {
+                            this.buffer.push(item.clone());
+                            if let Ok(Some(Value::Vector(lv))) = &item {
+                                let row_stream = vector_into_stream(this.db, lv.clone());
+                                this.row_stream = Some(Box::new(row_stream));
+                            }
+                            continue;
+                        }
+                        Poll::Ready(None) => {
+                            if this.rows.len() == this.buffer.len() && !this.buffer.is_empty() {
+                                let max_cols =
+                                    this.rows.iter().map(|r| r.len()).max().unwrap_or(0);
+                                this.phase = TransposePhase::YieldingColumns {
+                                    col_index: 0,
+                                    max_cols,
+                                };
+                                continue;
+                            }
+                            this.phase = TransposePhase::Yielding1D { index: 0 };
+                            continue;
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                TransposePhase::Yielding1D { index } => {
+                    let i = *index;
+                    if i >= this.buffer.len() {
+                        this.phase = TransposePhase::Done;
+                        return Poll::Ready(None);
+                    }
+                    *index += 1;
+                    return Poll::Ready(Some(this.buffer[i].clone()));
+                }
+                TransposePhase::YieldingColumns {
+                    col_index,
+                    max_cols,
+                } => {
+                    if *col_index >= *max_cols {
+                        this.phase = TransposePhase::Done;
+                        return Poll::Ready(None);
+                    }
+                    let col: Vec<Result<Option<Value>, RunError>> = this
+                        .rows
+                        .iter()
+                        .map(|row| row.get(*col_index).cloned().unwrap_or(Ok(None)))
+                        .collect();
+                    *col_index += 1;
+                    let val = Ok(Some(Value::Vector(LazyVector::from_evaluated(col))));
+                    return Poll::Ready(Some(val));
+                }
+                TransposePhase::Done => return Poll::Ready(None),
+            }
+        }
+    }
+}
+
+impl std::marker::Unpin for TransposedVectorStream<'_> {}
+
+/// Unified stream type for vector elements (literal, mapped, empty, or transposed).
+pub enum VectorStream<'a> {
+    Literal(LiteralVectorStream),
+    Mapped(MappedVectorStream<'a>),
+    Empty(EmptyVectorStream),
+    Transposed(TransposedVectorStream<'a>),
+}
+
+impl<'a> futures::stream::Stream for VectorStream<'a> {
     type Item = Result<Option<Value>, RunError>;
 
     fn poll_next(
@@ -111,11 +232,12 @@ impl futures::stream::Stream for VectorStream {
             VectorStream::Literal(s) => Pin::new(s).poll_next(cx),
             VectorStream::Mapped(s) => Pin::new(s).poll_next(cx),
             VectorStream::Empty(s) => Pin::new(s).poll_next(cx),
+            VectorStream::Transposed(s) => Pin::new(s).poll_next(cx),
         }
     }
 }
 
-impl std::marker::Unpin for VectorStream {}
+impl std::marker::Unpin for VectorStream<'_> {}
 
 /// Apply a vector map op to one element. For `None` (sparse slot) returns `Ok(None)`.
 /// Used by [MappedVectorStream] when streaming a [LazyVector::Map].
@@ -199,24 +321,29 @@ fn apply_unary_builtin(
 ///
 /// For [LazyVector::FromEvaluated], elements are already computed and yielded as-is.
 /// For [LazyVector::Map], each element is computed when the stream is consumed (op applied per element).
+/// For [LazyVector::Transpose], 1D is identity; 2D (vector of vectors) is streamed without blocking (rows become columns).
 /// Requires the same database that was used to create the program (e.g. from [run_with_registry]).
-pub fn vector_into_stream(
-    _db: &dyn salsa::Database,
+pub fn vector_into_stream<'db>(
+    db: &'db dyn salsa::Database,
     vector: LazyVector,
-) -> VectorStream {
+) -> VectorStream<'db> {
     match vector {
         LazyVector::FromEvaluated(results) => VectorStream::Literal(LiteralVectorStream {
             results: results.into_iter(),
         }),
         LazyVector::Map { source, op } => {
-            let inner = vector_into_stream(_db, *source);
+            let inner = vector_into_stream(db, *source);
             VectorStream::Mapped(MappedVectorStream {
                 inner: Box::new(inner),
                 op,
             })
         }
-        LazyVector::FromExprs(_) | LazyVector::Transform { .. } | LazyVector::Transpose { .. } => {
+        LazyVector::FromExprs(_) | LazyVector::Transform { .. } => {
             VectorStream::Empty(EmptyVectorStream)
+        }
+        LazyVector::Transpose { source } => {
+            let inner = vector_into_stream(db, *source);
+            VectorStream::Transposed(TransposedVectorStream::new(db, inner))
         }
     }
 }
@@ -290,6 +417,10 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
                 .map(|d| build_expression(db, d))
                 .collect();
             ExprData::VecLiteral(exprs)
+        }
+        ExprDef::Transpose(inner) => {
+            let inner_expr = build_expression(db, *inner);
+            ExprData::Transpose(inner_expr)
         }
     };
     Expression::new(db, data)
@@ -377,6 +508,15 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
                 .collect();
             Ok(Value::Vector(LazyVector::from_evaluated(results)))
         }
+        ExprData::Transpose(inner) => {
+            let v = value(db, *inner)?;
+            match v {
+                Value::Vector(lv) => Ok(Value::Vector(LazyVector::Transpose {
+                    source: Box::new(lv),
+                })),
+                _ => Err(RunError::ExpectedVector),
+            }
+        }
     })
 }
 
@@ -425,6 +565,7 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
                 .map(|e| expression_to_def(db, *e))
                 .collect(),
         ),
+        ExprData::Transpose(inner) => ExprDef::Transpose(Box::new(expression_to_def(db, *inner))),
     }
 }
 

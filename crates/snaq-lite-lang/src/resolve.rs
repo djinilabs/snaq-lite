@@ -76,6 +76,10 @@ pub fn resolve(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, RunErro
                 .collect::<Result<Vec<_>, RunError>>()?;
             Ok(ExprDef::VecLiteral(elems))
         }
+        ExprDef::Transpose(inner) => {
+            let inner = resolve(*inner, registry)?;
+            Ok(ExprDef::Transpose(Box::new(inner)))
+        }
     }
 }
 
@@ -100,7 +104,7 @@ fn resolve_unit_expr(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, R
             Ok(ExprDef::Div(Box::new(l), Box::new(r)))
         }
         ExprDef::Lit(_) => Ok(def),
-        ExprDef::VecLiteral(..) => Err(RunError::UnknownUnit(
+        ExprDef::VecLiteral(..) | ExprDef::Transpose(..) => Err(RunError::UnknownUnit(
             "as: right side must be a unit or composed units (e.g. m, meters per second)".to_string(),
         )),
         _ => Err(RunError::UnknownUnit(

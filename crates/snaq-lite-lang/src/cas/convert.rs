@@ -55,6 +55,10 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
             let ids: Vec<_> = elems.iter().map(|e| expr_def_to_interned(e, pool)).collect();
             pool.intern(ExprNode::VecLiteral(ids))
         }
+        ExprDef::Transpose(inner) => {
+            let id = expr_def_to_interned(inner, pool);
+            pool.intern(ExprNode::Transpose(id))
+        }
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved ExprDef: resolve() must be called before CAS")
         }
@@ -99,6 +103,7 @@ pub fn interned_to_expr_def(pool: &ExprInterner, id: ExprId) -> ExprDef {
                 .map(|&id| interned_to_expr_def(pool, id))
                 .collect(),
         ),
+        ExprNode::Transpose(inner) => ExprDef::Transpose(Box::new(interned_to_expr_def(pool, *inner))),
     }
 }
 

@@ -27,6 +27,7 @@ extern {
         "π" => Tok::Pi,
         "," => Tok::Comma,
         ":" => Tok::Colon,
+        "'" => Tok::Apostrophe,
         Num => Tok::Num(<ordered_float::OrderedFloat<f64>>),
         Ident => Tok::Ident(<String>),
         FuncIdent => Tok::FuncIdent(<String>),
@@ -91,10 +92,16 @@ PiIdents: ExprDef = {
 };
 
 Term: ExprDef = {
-    <l:Term> "*" <r:Factor> => ExprDef::Mul(Box::new(l), Box::new(r)),
-    <l:Term> "/" <r:Factor> => ExprDef::Div(Box::new(l), Box::new(r)),
-    <l:Term> "per" <r:Factor> => ExprDef::Div(Box::new(l), Box::new(r)),
+    <l:Term> "*" <r:PostfixFactor> => ExprDef::Mul(Box::new(l), Box::new(r)),
+    <l:Term> "/" <r:PostfixFactor> => ExprDef::Div(Box::new(l), Box::new(r)),
+    <l:Term> "per" <r:PostfixFactor> => ExprDef::Div(Box::new(l), Box::new(r)),
     <l:Term> <r:ImplicitMulRight> => ExprDef::Mul(Box::new(l), Box::new(r)),
+    PostfixFactor,
+};
+
+// Factor with optional postfix transpose(s): [1,2,3]', [1,2,3]'', (expr)', etc.
+PostfixFactor: ExprDef = {
+    <f:PostfixFactor> "'" => ExprDef::Transpose(Box::new(f)),
     Factor,
 };
 

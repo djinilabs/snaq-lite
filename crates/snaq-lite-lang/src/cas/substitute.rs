@@ -58,6 +58,7 @@ pub fn substitute_symbols(def: ExprDef, registry: &SymbolRegistry) -> Result<Exp
                 .collect::<Result<Vec<_>, RunError>>()?;
             Ok(ExprDef::VecLiteral(elems))
         }
+        ExprDef::Transpose(inner) => Ok(ExprDef::Transpose(Box::new(substitute_symbols(*inner, registry)?))),
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved ExprDef: resolve() must be called before substitute_symbols")
         }

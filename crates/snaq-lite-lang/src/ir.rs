@@ -38,6 +38,8 @@ pub enum ExprDef {
     As(Box<ExprDef>, Box<ExprDef>),
     /// Vector literal: `[ expr, expr, ... ]`.
     VecLiteral(Vec<ExprDef>),
+    /// Postfix transpose: `expr'` (e.g. [1,2,3]'). Inner must evaluate to a vector.
+    Transpose(Box<ExprDef>),
 }
 
 /// Input that holds the root expression definition.
@@ -70,4 +72,6 @@ pub enum ExprData<'db> {
     As(Expression<'db>, Expression<'db>),
     /// Vector literal: list of element expressions.
     VecLiteral(Vec<Expression<'db>>),
+    /// Postfix transpose: inner must evaluate to a vector.
+    Transpose(Expression<'db>),
 }

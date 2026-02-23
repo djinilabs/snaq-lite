@@ -28,6 +28,8 @@ pub enum Tok {
     LBracket,
     /// Vector literal end: `]`
     RBracket,
+    /// Postfix transpose: `'` (e.g. [1,2,3]')
+    Apostrophe,
 }
 
 #[derive(Clone, Debug)]
@@ -182,6 +184,7 @@ impl<'input> Iterator for Lexer<'input> {
             '/' => Tok::Slash,
             ',' => Tok::Comma,
             ':' => Tok::Colon,
+            '\'' => Tok::Apostrophe,
             'a'..='z' | 'A'..='Z' | '_' => {
                 self.pos -= c.len_utf8(); // put back
                 if let Some(s) = self.take_ident() {

@@ -47,8 +47,7 @@ pub enum LazyVector {
     Transform {
         source: Box<LazyVector>,
     },
-    /// Placeholder for transpose (vector of vectors → vector of column vectors); not implemented yet.
-    #[allow(dead_code)]
+    /// Postfix transpose (e.g. `[1,2,3]'`, `[[1,4],[2,2],[3,5]]'`). For 1D vectors, streaming yields the same elements (identity). For vectors of vectors (2D), rows become columns (see [crate::queries::vector_into_stream]).
     Transpose {
         source: Box<LazyVector>,
     },
@@ -109,10 +108,11 @@ impl LazyVector {
                 Box::new(stream::iter(iter))
             }
             LazyVector::FromEvaluated(results) => Box::new(stream::iter(results)),
-            LazyVector::Map { .. } | LazyVector::Transform { .. } | LazyVector::Transpose { .. } => {
+            LazyVector::Map { .. } | LazyVector::Transform { .. } => {
                 // Stub: yield nothing (or could return an error)
                 Box::new(stream::iter(std::iter::empty::<Result<Option<Value>, RunError>>()))
             }
+            LazyVector::Transpose { source } => (*source).into_stream(ctx),
         }
     }
 }

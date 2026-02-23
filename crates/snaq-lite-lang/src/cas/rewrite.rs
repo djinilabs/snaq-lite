@@ -107,6 +107,10 @@ fn rewrite_rec(
                 .collect::<Result<Vec<_>, RunError>>()?;
             Ok(out.intern(ExprNode::VecLiteral(new_ids)))
         }
+        ExprNode::Transpose(inner) => {
+            let new_inner = rewrite_rec(pool, out, *inner, registry)?;
+            Ok(out.intern(ExprNode::Transpose(new_inner)))
+        }
     }
 }
 

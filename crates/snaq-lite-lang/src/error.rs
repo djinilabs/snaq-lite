@@ -16,6 +16,8 @@ pub enum RunError {
     ExpectedAngle { actual: crate::unit::Unit },
     /// Operation not supported for vector (e.g. arithmetic or to_quantity).
     UnsupportedVectorOperation,
+    /// Transpose operator (') applied to a non-vector (scalar or symbolic).
+    ExpectedVector,
 }
 
 /// Parse error for expression strings.
@@ -66,6 +68,9 @@ impl std::fmt::Display for RunError {
             }
             RunError::UnsupportedVectorOperation => {
                 write!(f, "operation not supported for vector (expected scalar)")
+            }
+            RunError::ExpectedVector => {
+                write!(f, "transpose (') requires a vector (got scalar or symbolic)")
             }
         }
     }

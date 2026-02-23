@@ -31,7 +31,8 @@ pub use unit_registry::{default_si_registry, UnitRegistry};
 /// Parse and evaluate the expression, returning a Value (symbolic by default, e.g. "6 + π").
 ///
 /// Supports float literals, quantity literals (e.g. `100 m`), symbols (e.g. `pi`, `π`, `e`),
-/// implicit multiplication, division as `/` or `per`, and unit conversion with `as` (e.g. `10 km as m`).
+/// implicit multiplication, division as `/` or `per`, unit conversion with `as` (e.g. `10 km as m`),
+/// vector literals `[ expr, ... ]`, and postfix transpose `'` on vectors (e.g. `[1,2,3]'`).
 /// Uses the default unit registry.
 pub fn run(input: &str) -> Result<Value, RunError> {
     run_with_registry(input, &default_si_registry())
@@ -49,13 +50,41 @@ pub fn run_with_registry(input: &str, registry: &UnitRegistry) -> Result<Value, 
     value(&db, root)
 }
 
+/// Recursively format a value for display. Vectors are shown as `[e1, e2, ...]` with nested
+/// vectors fully expanded. Sparse (undefined) elements are shown as `?`.
+fn format_value_for_display(db: &dyn salsa::Database, value: &Value) -> Result<String, RunError> {
+    match value {
+        Value::Numeric(q) => Ok(format!("{q}")),
+        Value::Symbolic(sq) => Ok(format!("{sq}")),
+        Value::Vector(lv) => {
+            let stream = vector_into_stream(db, lv.clone());
+            let results: Vec<_> = futures::executor::block_on(async move {
+                use futures::stream::StreamExt;
+                stream.collect().await
+            });
+            let mut parts = Vec::with_capacity(results.len());
+            for r in results {
+                let opt = r?;
+                // Sparse (undefined) elements display as "?"
+                let s = match opt {
+                    None => "?".to_string(),
+                    Some(v) => format_value_for_display(db, &v)?,
+                };
+                parts.push(s);
+            }
+            Ok(format!("[{}]", parts.join(", ")))
+        }
+    }
+}
+
 /// Format the result of evaluating the expression for display. Vectors are shown as `[e1, e2, ...]`.
 /// Uses the default unit registry.
 pub fn run_format(input: &str) -> Result<String, RunError> {
     run_with_registry_format(input, &default_si_registry())
 }
 
-/// Like [run_format], but with a custom unit registry.
+/// Like [run_format], but with a custom unit registry. Nested vectors are fully expanded
+/// in the output (e.g. `[[1, 2], [3, 4]]`).
 pub fn run_with_registry_format(input: &str, registry: &UnitRegistry) -> Result<String, RunError> {
     let root_def = parse(input).map_err(RunError::from)?;
     let root_def = resolve::resolve(root_def, registry)?;
@@ -65,26 +94,7 @@ pub fn run_with_registry_format(input: &str, registry: &UnitRegistry) -> Result<
     let program_def = ProgramDef::new(&db, root_def);
     let root = program(&db, program_def);
     let val = value(&db, root)?;
-    match &val {
-        Value::Vector(lv) => {
-            let stream = vector_into_stream(&db, lv.clone());
-            let results: Vec<_> = futures::executor::block_on(async move {
-                use futures::stream::StreamExt;
-                stream.collect().await
-            });
-            let mut parts = Vec::with_capacity(results.len());
-            for r in results {
-                let opt = r?;
-                let s = match opt {
-                    None => "?".to_string(),
-                    Some(v) => format!("{v}"),
-                };
-                parts.push(s);
-            }
-            Ok(format!("[{}]", parts.join(", ")))
-        }
-        _ => Ok(format!("{val}")),
-    }
+    format_value_for_display(&db, &val)
 }
 
 /// Evaluate and substitute all symbols with their numeric values; returns a single Quantity.
@@ -879,6 +889,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_vector_transpose() {
+        use crate::ir::ExprDef;
+        let r = parse("[1, 2, 3]'").unwrap();
+        assert!(matches!(r, ExprDef::Transpose(ref b) if matches!(b.as_ref(), ExprDef::VecLiteral(e) if e.len() == 3)));
+    }
+
+    #[test]
+    fn run_vector_transpose_format() {
+        assert_eq!(run_format("[1, 2, 3]'").unwrap(), "[1, 2, 3]");
+        assert_eq!(run_format("([1, 2] + 10)'").unwrap(), "[11, 12]");
+        // Chained transpose: still identity for 1D
+        assert_eq!(run_format("[1, 2, 3]''").unwrap(), "[1, 2, 3]");
+        // 2D transpose: rows become columns
+        assert_eq!(
+            run_format("[[1, 4], [2, 2], [3, 5]]'").unwrap(),
+            "[[1, 2, 3], [4, 2, 5]]"
+        );
+        // 2D transpose with empty rows: 3×0 -> 0×3, so no columns
+        assert_eq!(run_format("[[], [], []]'").unwrap(), "[]");
+    }
+
+    #[test]
+    fn run_transpose_non_vector_errors() {
+        let e = run("3'").unwrap_err();
+        assert!(matches!(e, RunError::ExpectedVector));
+        let e = run("(1 + 2)'").unwrap_err();
+        assert!(matches!(e, RunError::ExpectedVector));
+    }
+
+    #[test]
     fn run_vector_literal_returns_vector() {
         let v = run("[1, 2, 3]").unwrap();
         assert!(matches!(v, Value::Vector(_)));
@@ -965,6 +1005,29 @@ mod tests {
         assert!(matches!(&results[0], Ok(Some(Value::Numeric(q))) if (q.value() - 1.0).abs() < 1e-10));
         assert!(matches!(&results[1], Ok(Some(Value::Numeric(q))) if (q.value() - 2.0).abs() < 1e-10));
         assert!(matches!(&results[2], Ok(Some(Value::Numeric(q))) if (q.value() - 3.0).abs() < 1e-10));
+    }
+
+    #[test]
+    fn run_format_scalar() {
+        assert_eq!(run_format("2 + 3").unwrap(), "5");
+        assert_eq!(run_format("1 m + 2 m").unwrap(), "3 m");
+    }
+
+    #[test]
+    fn run_format_symbolic() {
+        assert_eq!(run_format("1 + pi").unwrap(), "1 + π");
+    }
+
+    #[test]
+    fn run_format_nested_vector() {
+        let s = run_format("[[1, 2], [3, 4]]").unwrap();
+        assert_eq!(s, "[[1, 2], [3, 4]]");
+    }
+
+    #[test]
+    fn run_format_triple_nested_vector() {
+        let s = run_format("[[[1], [2]], [[3]]]").unwrap();
+        assert_eq!(s, "[[[1], [2]], [[3]]]");
     }
 
     #[test]

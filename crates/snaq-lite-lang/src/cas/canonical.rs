@@ -16,6 +16,7 @@ pub enum Rank {
     Call(String, Vec<Rank>),
     As(Box<Rank>, Box<Rank>),
     VecLiteral(Vec<Rank>),
+    Transpose(Box<Rank>),
 }
 
 fn tag_order(r: &Rank) -> u8 {
@@ -30,6 +31,7 @@ fn tag_order(r: &Rank) -> u8 {
         Rank::Call(..) => 7,
         Rank::As(..) => 8,
         Rank::VecLiteral(_) => 9,
+        Rank::Transpose(_) => 10,
     }
 }
 
@@ -56,6 +58,7 @@ impl Ord for Rank {
             (Rank::Call(a, aargs), Rank::Call(b, bargs)) => a.cmp(b).then(aargs.cmp(bargs)),
             (Rank::As(a1, a2), Rank::As(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::VecLiteral(a), Rank::VecLiteral(b)) => a.cmp(b),
+            (Rank::Transpose(a), Rank::Transpose(b)) => a.cmp(b),
             _ => Ordering::Equal,
         }
     }
@@ -76,6 +79,7 @@ pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
         }
         ExprNode::As(l, r) => Rank::As(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
         ExprNode::VecLiteral(ids) => Rank::VecLiteral(ids.iter().map(|&i| rank(pool, i)).collect()),
+        ExprNode::Transpose(inner) => Rank::Transpose(Box::new(rank(pool, *inner))),
     }
 }
 
@@ -173,6 +177,10 @@ fn canonicalize_rec(
                 .map(|&id| canonicalize_rec(pool, out, id))
                 .collect();
             out.intern(ExprNode::VecLiteral(new_ids))
+        }
+        ExprNode::Transpose(inner) => {
+            let new_inner = canonicalize_rec(pool, out, *inner);
+            out.intern(ExprNode::Transpose(new_inner))
         }
     }
 }

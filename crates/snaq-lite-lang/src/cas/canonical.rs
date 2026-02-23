@@ -64,6 +64,12 @@ impl Ord for Rank {
     }
 }
 
+/// True if this rank represents a vector-valued expression (literal or transpose). Used to avoid
+/// reordering Mul operands when both are vectors, so row×column (dot) vs column×row (outer) is preserved.
+fn rank_is_vector_valued(r: &Rank) -> bool {
+    matches!(r, Rank::VecLiteral(_) | Rank::Transpose(_))
+}
+
 /// Compute the rank of an expression (used for sorting operands).
 pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
     match pool.get(id) {
@@ -146,7 +152,14 @@ fn canonicalize_rec(
                 .map(|i| canonicalize_rec(pool, out, i))
                 .collect();
             let mut sorted = flat;
-            sorted.sort_by_key(|a| rank(out, *a));
+            // Preserve order only for binary vector×vector (exactly two operands, both vector-valued):
+            // row×column (dot) vs column×row (outer) must not be swapped; 3+ operands are still sorted.
+            let preserve_order = sorted.len() == 2
+                && rank_is_vector_valued(&rank(out, sorted[0]))
+                && rank_is_vector_valued(&rank(out, sorted[1]));
+            if !preserve_order {
+                sorted.sort_by_key(|a| rank(out, *a));
+            }
             out.intern(ExprNode::Mul(sorted))
         }
         ExprNode::Sub(l, r) => {
@@ -256,6 +269,44 @@ mod tests {
                 }
             }
             _ => panic!("expected Add"),
+        }
+    }
+
+    #[test]
+    fn canonicalize_preserves_vector_times_vector_order() {
+        // [1,2]' * [3,4] = row × column (dot). Order must not be swapped to column × row (outer).
+        let row = ExprDef::Transpose(Box::new(ExprDef::VecLiteral(vec![lit(1.0), lit(2.0)])));
+        let col = ExprDef::VecLiteral(vec![lit(3.0), lit(4.0)]);
+        let def = ExprDef::Mul(Box::new(row), Box::new(col));
+        let mut pool = ExprInterner::new();
+        let id = expr_def_to_interned(&def, &mut pool);
+        let (cpool, croot) = canonicalize(&pool, id);
+        let back = interned_to_expr_def(&cpool, croot);
+        match &back {
+            ExprDef::Mul(l, r) => {
+                assert!(matches!(l.as_ref(), ExprDef::Transpose(_)), "left should stay Transpose (row)");
+                assert!(matches!(r.as_ref(), ExprDef::VecLiteral(_)), "right should stay VecLiteral (column)");
+            }
+            _ => panic!("expected Mul, got {:?}", back),
+        }
+    }
+
+    #[test]
+    fn canonicalize_preserves_column_times_row_order() {
+        // [1,2] * [3,4]' = column × row (outer). Order must not be swapped to row × column (dot).
+        let col = ExprDef::VecLiteral(vec![lit(1.0), lit(2.0)]);
+        let row = ExprDef::Transpose(Box::new(ExprDef::VecLiteral(vec![lit(3.0), lit(4.0)])));
+        let def = ExprDef::Mul(Box::new(col), Box::new(row));
+        let mut pool = ExprInterner::new();
+        let id = expr_def_to_interned(&def, &mut pool);
+        let (cpool, croot) = canonicalize(&pool, id);
+        let back = interned_to_expr_def(&cpool, croot);
+        match &back {
+            ExprDef::Mul(l, r) => {
+                assert!(matches!(l.as_ref(), ExprDef::VecLiteral(_)), "left should stay VecLiteral (column)");
+                assert!(matches!(r.as_ref(), ExprDef::Transpose(_)), "right should stay Transpose (row)");
+            }
+            _ => panic!("expected Mul, got {:?}", back),
         }
     }
 }

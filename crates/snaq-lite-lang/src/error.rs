@@ -18,6 +18,8 @@ pub enum RunError {
     UnsupportedVectorOperation,
     /// Transpose operator (') applied to a non-vector (scalar or symbolic).
     ExpectedVector,
+    /// Vector operation (element-wise or dot) requires same length; left and right lengths differ.
+    VectorLengthMismatch { left_len: usize, right_len: usize },
 }
 
 /// Parse error for expression strings.
@@ -71,6 +73,12 @@ impl std::fmt::Display for RunError {
             }
             RunError::ExpectedVector => {
                 write!(f, "transpose (') requires a vector (got scalar or symbolic)")
+            }
+            RunError::VectorLengthMismatch { left_len, right_len } => {
+                write!(
+                    f,
+                    "vector length mismatch: left has {left_len} elements, right has {right_len}"
+                )
             }
         }
     }

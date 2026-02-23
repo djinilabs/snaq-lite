@@ -11,7 +11,7 @@ use crate::quantity::Quantity;
 use crate::symbolic::{SymbolicExpr, SymbolicQuantity, Value};
 use crate::unit::Unit;
 use crate::unit_registry::UnitRegistry;
-use crate::vector::{LazyVector, VectorMapOp, VectorValue};
+use crate::vector::{LazyVector, VectorBinaryOp, VectorMapOp, VectorOrientation, VectorValue};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Neg;
@@ -215,12 +215,207 @@ impl<'a> futures::stream::Stream for TransposedVectorStream<'a> {
 
 impl std::marker::Unpin for TransposedVectorStream<'_> {}
 
-/// Unified stream type for vector elements (literal, mapped, empty, or transposed).
+/// Stream that zips two vectors element-wise and applies a binary op. Used for column×column and row×row.
+pub struct ZippedVectorStream<'a> {
+    left: Box<VectorStream<'a>>,
+    right: Box<VectorStream<'a>>,
+    op: VectorBinaryOp,
+    left_count: usize,
+    right_count: usize,
+}
+
+impl<'a> ZippedVectorStream<'a> {
+    fn new(left: VectorStream<'a>, right: VectorStream<'a>, op: VectorBinaryOp) -> Self {
+        Self {
+            left: Box::new(left),
+            right: Box::new(right),
+            op,
+            left_count: 0,
+            right_count: 0,
+        }
+    }
+}
+
+impl<'a> futures::stream::Stream for ZippedVectorStream<'a> {
+    type Item = Result<Option<Value>, RunError>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let left_item = Pin::new(this.left.as_mut()).poll_next(cx);
+        let right_item = Pin::new(this.right.as_mut()).poll_next(cx);
+        match (left_item, right_item) {
+            (Poll::Ready(Some(Ok(la))), Poll::Ready(Some(Ok(rb)))) => {
+                this.left_count += 1;
+                this.right_count += 1;
+                let result = with_registry(|registry| {
+                    apply_binary_op(&this.op, la, rb, registry)
+                });
+                Poll::Ready(Some(result))
+            }
+            (Poll::Ready(Some(Err(e))), _) | (_, Poll::Ready(Some(Err(e)))) => {
+                Poll::Ready(Some(Err(e)))
+            }
+            (Poll::Ready(None), Poll::Ready(None)) => Poll::Ready(None),
+            (Poll::Ready(None), Poll::Ready(Some(_))) => Poll::Ready(Some(Err(
+                RunError::VectorLengthMismatch {
+                    left_len: this.left_count,
+                    right_len: this.right_count + 1,
+                },
+            ))),
+            (Poll::Ready(Some(_)), Poll::Ready(None)) => Poll::Ready(Some(Err(
+                RunError::VectorLengthMismatch {
+                    left_len: this.left_count + 1,
+                    right_len: this.right_count,
+                },
+            ))),
+            _ => Poll::Pending,
+        }
+    }
+}
+
+impl std::marker::Unpin for ZippedVectorStream<'_> {}
+
+/// Stream for outer product (column × row): yields one column vector per right (row) element.
+/// Column j = [left_0 op right_j, left_1 op right_j, ...], so matrix(i,j) = left_i op right_j.
+pub struct OuterProductVectorStream<'a> {
+    left_buffer: Vec<Result<Option<Value>, RunError>>,
+    right: Box<VectorStream<'a>>,
+    op: VectorBinaryOp,
+    phase: OuterPhase<'a>,
+}
+
+enum OuterPhase<'a> {
+    /// Still draining the left (column) stream into left_buffer.
+    DrainingLeft(Box<VectorStream<'a>>),
+    /// Left buffer full; each poll fetches one right element and yields one column (Value::Vector).
+    YieldColumn,
+    /// No more right elements.
+    Done,
+}
+
+impl<'a> OuterProductVectorStream<'a> {
+    fn new(
+        left: VectorStream<'a>,
+        right: VectorStream<'a>,
+        op: VectorBinaryOp,
+    ) -> Self {
+        Self {
+            left_buffer: Vec::new(),
+            right: Box::new(right),
+            op,
+            phase: OuterPhase::DrainingLeft(Box::new(left)),
+        }
+    }
+}
+
+impl<'a> futures::stream::Stream for OuterProductVectorStream<'a> {
+    type Item = Result<Option<Value>, RunError>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            match &mut this.phase {
+                OuterPhase::DrainingLeft(ref mut left_stream) => {
+                    match Pin::new(left_stream.as_mut()).poll_next(cx) {
+                        Poll::Ready(Some(item)) => {
+                            this.left_buffer.push(item);
+                            continue;
+                        }
+                        Poll::Ready(None) => {
+                            if this.left_buffer.is_empty() {
+                                this.phase = OuterPhase::Done;
+                            } else {
+                                this.phase = OuterPhase::YieldColumn;
+                            }
+                            continue;
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                OuterPhase::YieldColumn => {
+                    // Fetch next right element (if any) and build column = [left_i op right_j for all i].
+                    match Pin::new(this.right.as_mut()).poll_next(cx) {
+                        Poll::Ready(Some(Ok(Some(right_val)))) => {
+                            let column: Vec<Result<Option<Value>, RunError>> = this
+                                .left_buffer
+                                .iter()
+                                .map(|r| {
+                                    let left_opt = r.as_ref().ok().and_then(|x| x.clone());
+                                    with_registry(|registry| {
+                                        apply_binary_op(
+                                            &this.op,
+                                            left_opt,
+                                            Some(right_val.clone()),
+                                            registry,
+                                        )
+                                    })
+                                })
+                                .collect();
+                            let col_vec = VectorValue::column(LazyVector::from_evaluated(
+                                column,
+                            ));
+                            return Poll::Ready(Some(Ok(Some(Value::Vector(col_vec)))));
+                        }
+                        Poll::Ready(Some(Ok(None))) => {
+                            let column = this
+                                .left_buffer
+                                .iter()
+                                .map(|_| Ok(None))
+                                .collect();
+                            let col_vec = VectorValue::column(LazyVector::from_evaluated(
+                                column,
+                            ));
+                            return Poll::Ready(Some(Ok(Some(Value::Vector(col_vec)))));
+                        }
+                        Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+                        Poll::Ready(None) => {
+                            this.phase = OuterPhase::Done;
+                            return Poll::Ready(None);
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                OuterPhase::Done => return Poll::Ready(None),
+            }
+        }
+    }
+}
+
+impl std::marker::Unpin for OuterProductVectorStream<'_> {}
+
+/// Apply a binary op to two optional element values (for zip and outer). None propagates as Ok(None).
+fn apply_binary_op(
+    op: &VectorBinaryOp,
+    a: Option<Value>,
+    b: Option<Value>,
+    registry: &UnitRegistry,
+) -> Result<Option<Value>, RunError> {
+    let (Some(a), Some(b)) = (a, b) else {
+        return Ok(None);
+    };
+    let result = match op {
+        VectorBinaryOp::Add => add_values(&a, &b, registry, None)?,
+        VectorBinaryOp::Sub => sub_values(&a, &b, registry, None)?,
+        VectorBinaryOp::Mul => mul_values(&a, &b, registry, None)?,
+        VectorBinaryOp::Div => div_values(&a, &b, registry, None)?,
+    };
+    Ok(Some(result))
+}
+
+/// Unified stream type for vector elements (literal, mapped, empty, transposed, zipped, or outer).
 pub enum VectorStream<'a> {
     Literal(LiteralVectorStream),
     Mapped(MappedVectorStream<'a>),
     Empty(EmptyVectorStream),
     Transposed(TransposedVectorStream<'a>),
+    Zipped(ZippedVectorStream<'a>),
+    OuterProduct(OuterProductVectorStream<'a>),
 }
 
 impl<'a> futures::stream::Stream for VectorStream<'a> {
@@ -235,6 +430,8 @@ impl<'a> futures::stream::Stream for VectorStream<'a> {
             VectorStream::Mapped(s) => Pin::new(s).poll_next(cx),
             VectorStream::Empty(s) => Pin::new(s).poll_next(cx),
             VectorStream::Transposed(s) => Pin::new(s).poll_next(cx),
+            VectorStream::Zipped(s) => Pin::new(s).poll_next(cx),
+            VectorStream::OuterProduct(s) => Pin::new(s).poll_next(cx),
         }
     }
 }
@@ -252,12 +449,12 @@ fn apply_map_op(
         return Ok(None);
     };
     let result = match op {
-        VectorMapOp::Add(scalar) => add_values(&v, scalar, registry)?,
-        VectorMapOp::SubRhs(scalar) => sub_values(&v, scalar, registry)?,
-        VectorMapOp::SubLhs(scalar) => sub_values(scalar, &v, registry)?,
-        VectorMapOp::Mul(scalar) => mul_values(&v, scalar)?,
-        VectorMapOp::DivRhs(scalar) => div_values(&v, scalar)?,
-        VectorMapOp::DivLhs(scalar) => div_values(scalar, &v)?,
+        VectorMapOp::Add(scalar) => add_values(&v, scalar, registry, None)?,
+        VectorMapOp::SubRhs(scalar) => sub_values(&v, scalar, registry, None)?,
+        VectorMapOp::SubLhs(scalar) => sub_values(scalar, &v, registry, None)?,
+        VectorMapOp::Mul(scalar) => mul_values(&v, scalar, registry, None)?,
+        VectorMapOp::DivRhs(scalar) => div_values(&v, scalar, registry, None)?,
+        VectorMapOp::DivLhs(scalar) => div_values(scalar, &v, registry, None)?,
         VectorMapOp::Neg => neg_value(&v)?,
         VectorMapOp::UnaryFunc(name) => apply_unary_builtin(name, &v, registry)?,
     };
@@ -347,6 +544,20 @@ pub fn vector_into_stream<'db>(
             let inner = vector_into_stream(db, *source);
             VectorStream::Transposed(TransposedVectorStream::new(db, inner))
         }
+        LazyVector::ZipMap { left, right, op } => {
+            let left_s = vector_into_stream(db, *left);
+            let right_s = vector_into_stream(db, *right);
+            VectorStream::Zipped(ZippedVectorStream::new(left_s, right_s, op))
+        }
+        LazyVector::Outer { left, right, op } => {
+            let left_s = vector_into_stream(db, *left);
+            let right_s = vector_into_stream(db, *right);
+            VectorStream::OuterProduct(OuterProductVectorStream::new(
+                left_s,
+                right_s,
+                op,
+            ))
+        }
     }
 }
 
@@ -356,6 +567,16 @@ fn with_registry<R, F: FnOnce(&UnitRegistry) -> R>(f: F) -> R {
         let reg = reg.as_ref().expect("unit registry not set; use run() or set_eval_registry()");
         f(reg)
     })
+}
+
+/// Collect a vector stream to a vec (used for row×column dot product and sum).
+fn collect_vector_stream(
+    db: &dyn salsa::Database,
+    v: LazyVector,
+) -> Vec<Result<Option<Value>, RunError>> {
+    use futures::stream::StreamExt;
+    let stream = vector_into_stream(db, v);
+    futures::executor::block_on(async move { stream.collect().await })
 }
 
 /// Build the tracked expression graph from the program definition; returns the root.
@@ -444,22 +665,22 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
         ExprData::Add(l, r) => {
             let left = value(db, *l)?;
             let right = value(db, *r)?;
-            add_values(&left, &right, registry)
+            add_values(&left, &right, registry, Some(db))
         }
         ExprData::Sub(l, r) => {
             let left = value(db, *l)?;
             let right = value(db, *r)?;
-            sub_values(&left, &right, registry)
+            sub_values(&left, &right, registry, Some(db))
         }
         ExprData::Mul(l, r) => {
             let left = value(db, *l)?;
             let right = value(db, *r)?;
-            mul_values(&left, &right)
+            mul_values(&left, &right, registry, Some(db))
         }
         ExprData::Div(l, r) => {
             let left = value(db, *l)?;
             let right = value(db, *r)?;
-            div_values(&left, &right)
+            div_values(&left, &right, registry, Some(db))
         }
         ExprData::Neg(inner) => {
             let v = value(db, *inner)?;
@@ -713,10 +934,50 @@ fn value_to_symbolic_expr(v: &Value) -> SymbolicExpr {
     }
 }
 
+/// Sum all elements of a collected vector (for row×column add/sub). Skips None (sparse); empty → 0.
+fn sum_vector_elements(
+    elems: &[Result<Option<Value>, RunError>],
+    registry: &UnitRegistry,
+) -> Result<Value, RunError> {
+    let mut acc = Value::Numeric(Quantity::from_scalar(0.0));
+    for r in elems {
+        let opt = r.as_ref().map_err(|e| e.clone())?;
+        if let Some(v) = opt {
+            acc = add_values(&acc, v, registry, None)?;
+        }
+    }
+    Ok(acc)
+}
+
+/// Dot product of two collected vectors (row×column mul). Returns scalar.
+fn dot_product(
+    left_elems: &[Result<Option<Value>, RunError>],
+    right_elems: &[Result<Option<Value>, RunError>],
+    registry: &UnitRegistry,
+) -> Result<Value, RunError> {
+    if left_elems.len() != right_elems.len() {
+        return Err(RunError::VectorLengthMismatch {
+            left_len: left_elems.len(),
+            right_len: right_elems.len(),
+        });
+    }
+    let mut acc = Value::Numeric(Quantity::from_scalar(0.0));
+    for (l, r) in left_elems.iter().zip(right_elems.iter()) {
+        let l_opt = l.as_ref().map_err(|e| e.clone())?;
+        let r_opt = r.as_ref().map_err(|e| e.clone())?;
+        if let (Some(a), Some(b)) = (l_opt, r_opt) {
+            let product = mul_values(a, b, registry, None)?;
+            acc = add_values(&acc, &product, registry, None)?;
+        }
+    }
+    Ok(acc)
+}
+
 fn add_values(
     a: &Value,
     b: &Value,
     registry: &UnitRegistry,
+    db: Option<&dyn salsa::Database>,
 ) -> Result<Value, RunError> {
     match (a, b) {
         (Value::Vector(v), scalar) | (scalar, Value::Vector(v))
@@ -730,7 +991,54 @@ fn add_values(
                 orientation: v.orientation,
             }))
         }
-        (Value::Vector(_), Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
+        (Value::Vector(left), Value::Vector(right)) => {
+            let db = db.ok_or(RunError::UnsupportedVectorOperation)?;
+            match (left.orientation, right.orientation) {
+                (VectorOrientation::Column, VectorOrientation::Column) => Ok(Value::Vector(
+                    VectorValue {
+                        inner: LazyVector::ZipMap {
+                            left: Box::new(left.inner.clone()),
+                            right: Box::new(right.inner.clone()),
+                            op: VectorBinaryOp::Add,
+                        },
+                        orientation: VectorOrientation::Column,
+                    },
+                )),
+                (VectorOrientation::Row, VectorOrientation::Row) => Ok(Value::Vector(
+                    VectorValue {
+                        inner: LazyVector::ZipMap {
+                            left: Box::new(left.inner.clone()),
+                            right: Box::new(right.inner.clone()),
+                            op: VectorBinaryOp::Add,
+                        },
+                        orientation: VectorOrientation::Row,
+                    },
+                )),
+                (VectorOrientation::Column, VectorOrientation::Row) => Ok(Value::Vector(
+                    VectorValue {
+                        inner: LazyVector::Outer {
+                            left: Box::new(left.inner.clone()),
+                            right: Box::new(right.inner.clone()),
+                            op: VectorBinaryOp::Add,
+                        },
+                        orientation: VectorOrientation::Column,
+                    },
+                )),
+                (VectorOrientation::Row, VectorOrientation::Column) => {
+                    let left_elems = collect_vector_stream(db, left.inner.clone());
+                    let right_elems = collect_vector_stream(db, right.inner.clone());
+                    if left_elems.len() != right_elems.len() {
+                        return Err(RunError::VectorLengthMismatch {
+                            left_len: left_elems.len(),
+                            right_len: right_elems.len(),
+                        });
+                    }
+                    let sum_left = sum_vector_elements(&left_elems, registry)?;
+                    let sum_right = sum_vector_elements(&right_elems, registry)?;
+                    add_values(&sum_left, &sum_right, registry, None)
+                }
+            }
+        }
         (Value::Numeric(qa), Value::Numeric(qb)) => qa
             .clone()
             .add(qb, registry)
@@ -767,6 +1075,7 @@ fn sub_values(
     a: &Value,
     b: &Value,
     registry: &UnitRegistry,
+    db: Option<&dyn salsa::Database>,
 ) -> Result<Value, RunError> {
     match (a, b) {
         (Value::Vector(v), scalar) if !matches!(scalar, Value::Vector(_)) => {
@@ -787,7 +1096,54 @@ fn sub_values(
                 orientation: v.orientation,
             }))
         }
-        (Value::Vector(_), Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
+        (Value::Vector(left), Value::Vector(right)) => {
+            let db = db.ok_or(RunError::UnsupportedVectorOperation)?;
+            match (left.orientation, right.orientation) {
+                (VectorOrientation::Column, VectorOrientation::Column) => Ok(Value::Vector(
+                    VectorValue {
+                        inner: LazyVector::ZipMap {
+                            left: Box::new(left.inner.clone()),
+                            right: Box::new(right.inner.clone()),
+                            op: VectorBinaryOp::Sub,
+                        },
+                        orientation: VectorOrientation::Column,
+                    },
+                )),
+                (VectorOrientation::Row, VectorOrientation::Row) => Ok(Value::Vector(
+                    VectorValue {
+                        inner: LazyVector::ZipMap {
+                            left: Box::new(left.inner.clone()),
+                            right: Box::new(right.inner.clone()),
+                            op: VectorBinaryOp::Sub,
+                        },
+                        orientation: VectorOrientation::Row,
+                    },
+                )),
+                (VectorOrientation::Column, VectorOrientation::Row) => Ok(Value::Vector(
+                    VectorValue {
+                        inner: LazyVector::Outer {
+                            left: Box::new(left.inner.clone()),
+                            right: Box::new(right.inner.clone()),
+                            op: VectorBinaryOp::Sub,
+                        },
+                        orientation: VectorOrientation::Column,
+                    },
+                )),
+                (VectorOrientation::Row, VectorOrientation::Column) => {
+                    let left_elems = collect_vector_stream(db, left.inner.clone());
+                    let right_elems = collect_vector_stream(db, right.inner.clone());
+                    if left_elems.len() != right_elems.len() {
+                        return Err(RunError::VectorLengthMismatch {
+                            left_len: left_elems.len(),
+                            right_len: right_elems.len(),
+                        });
+                    }
+                    let sum_left = sum_vector_elements(&left_elems, registry)?;
+                    let sum_right = sum_vector_elements(&right_elems, registry)?;
+                    sub_values(&sum_left, &sum_right, registry, None)
+                }
+            }
+        }
         (Value::Numeric(qa), Value::Numeric(qb)) => qa
             .clone()
             .sub(qb, registry)
@@ -820,7 +1176,12 @@ fn sub_values(
     }
 }
 
-fn mul_values(a: &Value, b: &Value) -> Result<Value, RunError> {
+fn mul_values(
+    a: &Value,
+    b: &Value,
+    registry: &UnitRegistry,
+    db: Option<&dyn salsa::Database>,
+) -> Result<Value, RunError> {
     match (a, b) {
         (Value::Vector(v), scalar) | (scalar, Value::Vector(v))
             if !matches!(scalar, Value::Vector(_)) =>
@@ -833,7 +1194,46 @@ fn mul_values(a: &Value, b: &Value) -> Result<Value, RunError> {
                 orientation: v.orientation,
             }))
         }
-        (Value::Vector(_), Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
+        (Value::Vector(left), Value::Vector(right)) => {
+            let db = db.ok_or(RunError::UnsupportedVectorOperation)?;
+            match (left.orientation, right.orientation) {
+                (VectorOrientation::Column, VectorOrientation::Column) => Ok(Value::Vector(
+                    VectorValue {
+                        inner: LazyVector::ZipMap {
+                            left: Box::new(left.inner.clone()),
+                            right: Box::new(right.inner.clone()),
+                            op: VectorBinaryOp::Mul,
+                        },
+                        orientation: VectorOrientation::Column,
+                    },
+                )),
+                (VectorOrientation::Row, VectorOrientation::Row) => Ok(Value::Vector(
+                    VectorValue {
+                        inner: LazyVector::ZipMap {
+                            left: Box::new(left.inner.clone()),
+                            right: Box::new(right.inner.clone()),
+                            op: VectorBinaryOp::Mul,
+                        },
+                        orientation: VectorOrientation::Row,
+                    },
+                )),
+                (VectorOrientation::Column, VectorOrientation::Row) => Ok(Value::Vector(
+                    VectorValue {
+                        inner: LazyVector::Outer {
+                            left: Box::new(left.inner.clone()),
+                            right: Box::new(right.inner.clone()),
+                            op: VectorBinaryOp::Mul,
+                        },
+                        orientation: VectorOrientation::Column,
+                    },
+                )),
+                (VectorOrientation::Row, VectorOrientation::Column) => {
+                    let left_elems = collect_vector_stream(db, left.inner.clone());
+                    let right_elems = collect_vector_stream(db, right.inner.clone());
+                    dot_product(&left_elems, &right_elems, registry)
+                }
+            }
+        }
         (Value::Numeric(qa), Value::Numeric(qb)) => Ok(Value::Numeric(qa.clone() * qb.clone())),
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
@@ -847,7 +1247,12 @@ fn mul_values(a: &Value, b: &Value) -> Result<Value, RunError> {
     }
 }
 
-fn div_values(a: &Value, b: &Value) -> Result<Value, RunError> {
+fn div_values(
+    a: &Value,
+    b: &Value,
+    registry: &UnitRegistry,
+    db: Option<&dyn salsa::Database>,
+) -> Result<Value, RunError> {
     match (a, b) {
         (Value::Vector(v), scalar) if !matches!(scalar, Value::Vector(_)) => {
             Ok(Value::Vector(VectorValue {
@@ -867,7 +1272,45 @@ fn div_values(a: &Value, b: &Value) -> Result<Value, RunError> {
                 orientation: v.orientation,
             }))
         }
-        (Value::Vector(_), Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
+        (Value::Vector(left), Value::Vector(right)) => {
+            let _db = db.ok_or(RunError::UnsupportedVectorOperation)?;
+            match (left.orientation, right.orientation) {
+                (VectorOrientation::Column, VectorOrientation::Column) => Ok(Value::Vector(
+                    VectorValue {
+                        inner: LazyVector::ZipMap {
+                            left: Box::new(left.inner.clone()),
+                            right: Box::new(right.inner.clone()),
+                            op: VectorBinaryOp::Div,
+                        },
+                        orientation: VectorOrientation::Column,
+                    },
+                )),
+                (VectorOrientation::Row, VectorOrientation::Row) => Ok(Value::Vector(
+                    VectorValue {
+                        inner: LazyVector::ZipMap {
+                            left: Box::new(left.inner.clone()),
+                            right: Box::new(right.inner.clone()),
+                            op: VectorBinaryOp::Div,
+                        },
+                        orientation: VectorOrientation::Row,
+                    },
+                )),
+                (VectorOrientation::Column, VectorOrientation::Row) => Ok(Value::Vector(
+                    VectorValue {
+                        inner: LazyVector::Outer {
+                            left: Box::new(left.inner.clone()),
+                            right: Box::new(right.inner.clone()),
+                            op: VectorBinaryOp::Div,
+                        },
+                        orientation: VectorOrientation::Column,
+                    },
+                )),
+                (VectorOrientation::Row, VectorOrientation::Column) => {
+                    let _ = registry;
+                    Err(RunError::UnsupportedVectorOperation)
+                }
+            }
+        }
         (Value::Numeric(qa), Value::Numeric(qb)) => (qa.clone() / qb.clone())
             .map(Value::Numeric)
             .map_err(|_| RunError::DivisionByZero),

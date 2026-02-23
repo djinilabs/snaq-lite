@@ -3,6 +3,11 @@
 //! Vectors have orientation (column by default, row after transpose); see [VectorValue].
 //! Display is intentionally `"<vector>"` for all vectors (orientation not shown); transpose flips
 //! orientation, and element-wise Map preserves the operand's orientation.
+//!
+//! **Vector–vector binary ops** (add, sub, mul, div) depend on orientation: column×column or
+//! row×row → element-wise ([ZipMap](LazyVector::ZipMap)), result column or row respectively;
+//! column×row → outer product ([Outer](LazyVector::Outer)), result = vector of column vectors
+//! (N×M matrix); row×column → dot product (mul) or sum(left) op sum(right) (add/sub), scalar.
 
 use crate::error::RunError;
 use crate::ir::ExprDef;
@@ -89,6 +94,16 @@ pub enum VectorMapOp {
     UnaryFunc(String),
 }
 
+/// Binary operation for vector–vector (zip element-wise or outer product).
+/// Used by [LazyVector::ZipMap] and [LazyVector::Outer].
+#[derive(Clone, Debug, PartialEq)]
+pub enum VectorBinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
 /// Lazy vector: produces a stream of elements on demand (async).
 /// Construction does no work; evaluation happens when the stream is consumed (or at creation for FromEvaluated).
 #[derive(Clone, Debug, PartialEq)]
@@ -110,6 +125,18 @@ pub enum LazyVector {
     /// Postfix transpose (e.g. `[1,2,3]'`, `[[1,4],[2,2],[3,5]]'`). For 1D vectors, streaming yields the same elements (identity). For vectors of vectors (2D), rows become columns (see [crate::queries::vector_into_stream]).
     Transpose {
         source: Box<LazyVector>,
+    },
+    /// Element-wise zip of two vectors (same orientation: column×column or row×row). When streamed, yields op(left_i, right_i) for each i. Result orientation preserved.
+    ZipMap {
+        left: Box<LazyVector>,
+        right: Box<LazyVector>,
+        op: VectorBinaryOp,
+    },
+    /// Outer product: column (left) × row (right). When streamed, yields one column per right (row) element: column j = [op(left_0, right_j), ..., op(left_{N-1}, right_j)]. Result is vector of column vectors (N×M matrix).
+    Outer {
+        left: Box<LazyVector>,
+        right: Box<LazyVector>,
+        op: VectorBinaryOp,
     },
 }
 
@@ -138,7 +165,9 @@ impl LazyVector {
             LazyVector::Map { .. }
             | LazyVector::FromExprs(_)
             | LazyVector::Transform { .. }
-            | LazyVector::Transpose { .. } => None,
+            | LazyVector::Transpose { .. }
+            | LazyVector::ZipMap { .. }
+            | LazyVector::Outer { .. } => None,
         }
     }
 
@@ -150,7 +179,9 @@ impl LazyVector {
             LazyVector::Map { .. }
             | LazyVector::FromEvaluated(_)
             | LazyVector::Transform { .. }
-            | LazyVector::Transpose { .. } => None,
+            | LazyVector::Transpose { .. }
+            | LazyVector::ZipMap { .. }
+            | LazyVector::Outer { .. } => None,
         }
     }
 
@@ -173,6 +204,10 @@ impl LazyVector {
                 Box::new(stream::iter(std::iter::empty::<Result<Option<Value>, RunError>>()))
             }
             LazyVector::Transpose { source } => (*source).into_stream(ctx),
+            LazyVector::ZipMap { .. } | LazyVector::Outer { .. } => {
+                // Streaming for ZipMap/Outer is done via vector_into_stream in queries (needs db).
+                Box::new(stream::iter(std::iter::empty::<Result<Option<Value>, RunError>>()))
+            }
         }
     }
 }

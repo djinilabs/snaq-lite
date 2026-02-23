@@ -981,9 +981,60 @@ mod tests {
 
     #[test]
     fn run_vector_arithmetic_errors() {
-        // Vector + vector is not supported (no implicit mapping).
-        let e = run("[1, 2] + [3, 4]").unwrap_err();
-        assert!(matches!(e, RunError::UnsupportedVectorOperation));
+        // Column + column is element-wise.
+        assert_eq!(run_format("[1, 2] + [3, 4]").unwrap(), "[4, 6]");
+        // Vector × vector with incompatible length: error when stream is consumed (format).
+        let e = run_format("[1, 2] + [3, 4, 5]").unwrap_err();
+        assert!(matches!(e, RunError::VectorLengthMismatch { .. }));
+    }
+
+    #[test]
+    fn run_vector_vector_element_wise() {
+        // Column × column: element-wise, result column.
+        assert_eq!(run_format("[1, 2] + [3, 4]").unwrap(), "[4, 6]");
+        assert_eq!(run_format("[5, 10] - [1, 2]").unwrap(), "[4, 8]");
+        assert_eq!(run_format("[2, 3] * [4, 5]").unwrap(), "[8, 15]");
+        assert_eq!(run_format("[10, 20] / [2, 4]").unwrap(), "[5, 5]");
+        // Row × row: element-wise, result row.
+        assert_eq!(run_format("[1, 2]' + [3, 4]'").unwrap(), "[4, 6]");
+        assert_eq!(run_format("[2, 3]' * [4, 5]'").unwrap(), "[8, 15]");
+    }
+
+    #[test]
+    fn run_vector_vector_outer_product() {
+        // Column (N) × Row (M) → N×M matrix (vector of column vectors). Each column is left_i * row.
+        let s = run_format("[1, 2] * [3, 4]'").unwrap();
+        // Columns: col0 = [1*3, 2*3] = [3, 6], col1 = [1*4, 2*4] = [4, 8].
+        assert_eq!(s, "[[3, 6], [4, 8]]");
+    }
+
+    #[test]
+    fn run_vector_vector_dot_product() {
+        // Row × Column → dot product (scalar). CAS preserves vector×vector Mul order, so dot stays dot.
+        let v = run("[1, 2]' * [3, 4]").unwrap();
+        match &v {
+            Value::Numeric(q) => assert!((q.value() - 11.0).abs() < 1e-10, "1*3+2*4 = 11"),
+            other => panic!("expected scalar 11, got {:?}", other),
+        }
+        let v2 = run("[3, 4]' * [1, 2]").unwrap();
+        match &v2 {
+            Value::Numeric(q) => assert!((q.value() - 11.0).abs() < 1e-10, "3*1+4*2 = 11"),
+            other => panic!("expected scalar 11, got {:?}", other),
+        }
+        // Orthogonal: 1*0 + 0*1 = 0.
+        let v0 = run("[1, 0]' * [0, 1]").unwrap();
+        match &v0 {
+            Value::Numeric(q) => assert!(q.value().abs() < 1e-10),
+            other => panic!("expected scalar 0, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn run_vector_vector_empty() {
+        // []' * [] = row×column = dot of empties = 0. CAS preserves vector×vector order.
+        assert_eq!(run_format("[]' * []").unwrap(), "0");
+        // Empty outer: empty col × row → no columns.
+        assert_eq!(run_format("[] * [1, 2]'").unwrap(), "[]");
     }
 
     #[test]

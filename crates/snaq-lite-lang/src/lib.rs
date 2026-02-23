@@ -896,10 +896,44 @@ mod tests {
 
     #[test]
     fn run_vector_arithmetic_errors() {
-        let e = run("[1] + 1").unwrap_err();
+        // Vector + vector is not supported (no implicit mapping).
+        let e = run("[1, 2] + [3, 4]").unwrap_err();
         assert!(matches!(e, RunError::UnsupportedVectorOperation));
-        let e = run("1 + [1]").unwrap_err();
-        assert!(matches!(e, RunError::UnsupportedVectorOperation));
+    }
+
+    #[test]
+    fn run_vector_scalar_binary_mapping() {
+        assert_eq!(run_format("[1, 2, 3] + 10").unwrap(), "[11, 12, 13]");
+        assert_eq!(run_format("10 + [1, 2, 3]").unwrap(), "[11, 12, 13]");
+        assert_eq!(run_format("[1, 2, 3] * 2").unwrap(), "[2, 4, 6]");
+        assert_eq!(run_format("10 - [1, 2, 3]").unwrap(), "[9, 8, 7]");
+        assert_eq!(run_format("[1, 2, 3] - 1").unwrap(), "[0, 1, 2]");
+        assert_eq!(run_format("[10, 20, 30] / 10").unwrap(), "[1, 2, 3]");
+        assert_eq!(run_format("100 / [10, 20, 25]").unwrap(), "[10, 5, 4]");
+    }
+
+    #[test]
+    fn run_vector_scalar_binary_mapping_with_units() {
+        assert_eq!(run_format("[1 m, 2 m] + 3 m").unwrap(), "[4 m, 5 m]");
+    }
+
+    #[test]
+    fn run_vector_unary_neg_mapping() {
+        assert_eq!(run_format("-[1, 2, 3]").unwrap(), "[-1, -2, -3]");
+    }
+
+    #[test]
+    fn run_vector_unary_func_mapping() {
+        // cos(0 rad) = 1, cos(pi rad) = -1
+        assert_eq!(run_format("cos([0 rad, pi rad])").unwrap(), "[1, -1]");
+        // sin(0 rad) = 0
+        assert_eq!(run_format("sin([0 rad])").unwrap(), "[0]");
+    }
+
+    #[test]
+    fn run_vector_chained_mapping() {
+        // cos([0, pi rad]) + 1 → [1, -1] + 1 → [2, 0]
+        assert_eq!(run_format("cos([0 rad, pi rad]) + 1").unwrap(), "[2, 0]");
     }
 
     #[test]

@@ -11,7 +11,7 @@ use crate::quantity::Quantity;
 use crate::symbolic::{SymbolicExpr, SymbolicQuantity, Value};
 use crate::unit::Unit;
 use crate::unit_registry::UnitRegistry;
-use crate::vector::LazyVector;
+use crate::vector::{LazyVector, VectorMapOp};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Neg;
@@ -65,9 +65,38 @@ impl futures::stream::Stream for EmptyVectorStream {
 
 impl std::marker::Unpin for EmptyVectorStream {}
 
-/// Unified stream type for vector elements (literal or empty).
+/// Stream that applies a [VectorMapOp] to each element of an inner stream.
+pub struct MappedVectorStream {
+    inner: Box<VectorStream>,
+    op: VectorMapOp,
+}
+
+impl futures::stream::Stream for MappedVectorStream {
+    type Item = Result<Option<Value>, RunError>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match Pin::new(this.inner.as_mut()).poll_next(cx) {
+            Poll::Ready(Some(Ok(opt_elem))) => {
+                let result = with_registry(|registry| apply_map_op(&this.op, opt_elem, registry));
+                Poll::Ready(Some(result))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl std::marker::Unpin for MappedVectorStream {}
+
+/// Unified stream type for vector elements (literal, mapped, or empty).
 pub enum VectorStream {
     Literal(LiteralVectorStream),
+    Mapped(MappedVectorStream),
     Empty(EmptyVectorStream),
 }
 
@@ -80,6 +109,7 @@ impl futures::stream::Stream for VectorStream {
     ) -> Poll<Option<Self::Item>> {
         match self.get_mut() {
             VectorStream::Literal(s) => Pin::new(s).poll_next(cx),
+            VectorStream::Mapped(s) => Pin::new(s).poll_next(cx),
             VectorStream::Empty(s) => Pin::new(s).poll_next(cx),
         }
     }
@@ -87,19 +117,107 @@ impl futures::stream::Stream for VectorStream {
 
 impl std::marker::Unpin for VectorStream {}
 
-/// Turn a vector into a stream of elements. Elements are evaluated at creation time (Salsa
-/// requires tracked queries to run in the right context). Requires the same database that was
-/// used to create the program (e.g. from [run_with_registry]).
+/// Apply a vector map op to one element. For `None` (sparse slot) returns `Ok(None)`.
+/// Used by [MappedVectorStream] when streaming a [LazyVector::Map].
+fn apply_map_op(
+    op: &VectorMapOp,
+    elem: Option<Value>,
+    registry: &UnitRegistry,
+) -> Result<Option<Value>, RunError> {
+    let Some(v) = elem else {
+        return Ok(None);
+    };
+    let result = match op {
+        VectorMapOp::Add(scalar) => add_values(&v, scalar, registry)?,
+        VectorMapOp::SubRhs(scalar) => sub_values(&v, scalar, registry)?,
+        VectorMapOp::SubLhs(scalar) => sub_values(scalar, &v, registry)?,
+        VectorMapOp::Mul(scalar) => mul_values(&v, scalar)?,
+        VectorMapOp::DivRhs(scalar) => div_values(&v, scalar)?,
+        VectorMapOp::DivLhs(scalar) => div_values(scalar, &v)?,
+        VectorMapOp::Neg => neg_value(&v)?,
+        VectorMapOp::UnaryFunc(name) => apply_unary_builtin(name, &v, registry)?,
+    };
+    Ok(Some(result))
+}
+
+/// Evaluate a single-argument built-in on a scalar value.
+/// Used when applying [VectorMapOp::UnaryFunc] per element; currently only sin, cos, tan are mapped over vectors.
+fn apply_unary_builtin(
+    name: &str,
+    v: &Value,
+    registry: &UnitRegistry,
+) -> Result<Value, RunError> {
+    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+    if let Ok(q) = v.to_quantity(&sym_reg) {
+        if matches!(name, "sin" | "cos" | "tan") {
+            let rad_unit = Unit::from_base_unit("rad");
+            if let Ok(in_rad) = q.clone().convert_to(registry, &rad_unit) {
+                let angle_rad = in_rad.value();
+                if let Some(m) = functions::known_angle_from_rad(angle_rad) {
+                    let exact = match name {
+                        "sin" => Some(functions::exact_sin_match(m)),
+                        "cos" => Some(functions::exact_cos_match(m)),
+                        "tan" => functions::exact_tan_match(m),
+                        _ => unreachable!(),
+                    };
+                    if let Some(expr) = exact {
+                        return Ok(Value::Symbolic(SymbolicQuantity::new(
+                            expr,
+                            Unit::scalar(),
+                        )));
+                    }
+                }
+            }
+        }
+        return functions::call_builtin(name, &[q], registry);
+    }
+    if matches!(name, "sin" | "cos" | "tan") {
+        if let Value::Symbolic(sq) = v {
+            if let Some(m) =
+                functions::known_angle_from_symbolic(&sq.expr, &sq.unit, registry)
+            {
+                let exact = match name {
+                    "sin" => Some(functions::exact_sin_match(m)),
+                    "cos" => Some(functions::exact_cos_match(m)),
+                    "tan" => functions::exact_tan_match(m),
+                    _ => unreachable!(),
+                };
+                if let Some(expr) = exact {
+                    return Ok(Value::Symbolic(SymbolicQuantity::new(
+                        expr,
+                        Unit::scalar(),
+                    )));
+                }
+            }
+        }
+    }
+    let sym_args = vec![value_to_symbolic_expr(v)];
+    Ok(functions::symbolic_call(name, &sym_args, Unit::scalar()))
+}
+
+/// Turn a vector into a stream of elements.
+///
+/// For [LazyVector::FromEvaluated], elements are already computed and yielded as-is.
+/// For [LazyVector::Map], each element is computed when the stream is consumed (op applied per element).
+/// Requires the same database that was used to create the program (e.g. from [run_with_registry]).
 pub fn vector_into_stream(
     _db: &dyn salsa::Database,
     vector: LazyVector,
 ) -> VectorStream {
-    if let Some(results) = vector.take_evaluated_results() {
-        VectorStream::Literal(LiteralVectorStream {
+    match vector {
+        LazyVector::FromEvaluated(results) => VectorStream::Literal(LiteralVectorStream {
             results: results.into_iter(),
-        })
-    } else {
-        VectorStream::Empty(EmptyVectorStream)
+        }),
+        LazyVector::Map { source, op } => {
+            let inner = vector_into_stream(_db, *source);
+            VectorStream::Mapped(MappedVectorStream {
+                inner: Box::new(inner),
+                op,
+            })
+        }
+        LazyVector::FromExprs(_) | LazyVector::Transform { .. } | LazyVector::Transpose { .. } => {
+            VectorStream::Empty(EmptyVectorStream)
+        }
     }
 }
 
@@ -358,6 +476,16 @@ fn eval_call(
             )));
         }
     }
+    // Unary built-ins (sin, cos, tan): map over vector when the single argument is a vector.
+    if param_names.len() == 1 && matches!(name, "sin" | "cos" | "tan") {
+        let v = bound.get(param_names[0]).unwrap();
+        if let Value::Vector(lv) = v {
+            return Ok(Value::Vector(LazyVector::Map {
+                source: Box::new(lv.clone()),
+                op: VectorMapOp::UnaryFunc(name.to_string()),
+            }));
+        }
+    }
     if bound.values().any(|v| matches!(v, Value::Vector(_))) {
         return Err(RunError::UnsupportedVectorOperation);
     }
@@ -445,7 +573,15 @@ fn add_values(
     registry: &UnitRegistry,
 ) -> Result<Value, RunError> {
     match (a, b) {
-        (Value::Vector(_), _) | (_, Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
+        (Value::Vector(lv), scalar) | (scalar, Value::Vector(lv))
+            if !matches!(scalar, Value::Vector(_)) =>
+        {
+            Ok(Value::Vector(LazyVector::Map {
+                source: Box::new(lv.clone()),
+                op: VectorMapOp::Add(Box::new(scalar.clone())),
+            }))
+        }
+        (Value::Vector(_), Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
         (Value::Numeric(qa), Value::Numeric(qb)) => qa
             .clone()
             .add(qb, registry)
@@ -484,7 +620,19 @@ fn sub_values(
     registry: &UnitRegistry,
 ) -> Result<Value, RunError> {
     match (a, b) {
-        (Value::Vector(_), _) | (_, Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
+        (Value::Vector(lv), scalar) if !matches!(scalar, Value::Vector(_)) => {
+            Ok(Value::Vector(LazyVector::Map {
+                source: Box::new(lv.clone()),
+                op: VectorMapOp::SubRhs(Box::new(scalar.clone())),
+            }))
+        }
+        (scalar, Value::Vector(lv)) if !matches!(scalar, Value::Vector(_)) => {
+            Ok(Value::Vector(LazyVector::Map {
+                source: Box::new(lv.clone()),
+                op: VectorMapOp::SubLhs(Box::new(scalar.clone())),
+            }))
+        }
+        (Value::Vector(_), Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
         (Value::Numeric(qa), Value::Numeric(qb)) => qa
             .clone()
             .sub(qb, registry)
@@ -519,7 +667,15 @@ fn sub_values(
 
 fn mul_values(a: &Value, b: &Value) -> Result<Value, RunError> {
     match (a, b) {
-        (Value::Vector(_), _) | (_, Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
+        (Value::Vector(lv), scalar) | (scalar, Value::Vector(lv))
+            if !matches!(scalar, Value::Vector(_)) =>
+        {
+            Ok(Value::Vector(LazyVector::Map {
+                source: Box::new(lv.clone()),
+                op: VectorMapOp::Mul(Box::new(scalar.clone())),
+            }))
+        }
+        (Value::Vector(_), Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
         (Value::Numeric(qa), Value::Numeric(qb)) => Ok(Value::Numeric(qa.clone() * qb.clone())),
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
@@ -535,7 +691,19 @@ fn mul_values(a: &Value, b: &Value) -> Result<Value, RunError> {
 
 fn div_values(a: &Value, b: &Value) -> Result<Value, RunError> {
     match (a, b) {
-        (Value::Vector(_), _) | (_, Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
+        (Value::Vector(lv), scalar) if !matches!(scalar, Value::Vector(_)) => {
+            Ok(Value::Vector(LazyVector::Map {
+                source: Box::new(lv.clone()),
+                op: VectorMapOp::DivRhs(Box::new(scalar.clone())),
+            }))
+        }
+        (scalar, Value::Vector(lv)) if !matches!(scalar, Value::Vector(_)) => {
+            Ok(Value::Vector(LazyVector::Map {
+                source: Box::new(lv.clone()),
+                op: VectorMapOp::DivLhs(Box::new(scalar.clone())),
+            }))
+        }
+        (Value::Vector(_), Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
         (Value::Numeric(qa), Value::Numeric(qb)) => (qa.clone() / qb.clone())
             .map(Value::Numeric)
             .map_err(|_| RunError::DivisionByZero),
@@ -553,7 +721,10 @@ fn div_values(a: &Value, b: &Value) -> Result<Value, RunError> {
 
 fn neg_value(v: &Value) -> Result<Value, RunError> {
     match v {
-        Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
+        Value::Vector(lv) => Ok(Value::Vector(LazyVector::Map {
+            source: Box::new(lv.clone()),
+            op: VectorMapOp::Neg,
+        })),
         Value::Numeric(q) => Ok(Value::Numeric(Neg::neg(q.clone()))),
         Value::Symbolic(sq) => Ok(Value::Symbolic(SymbolicQuantity::new(
             SymbolicExpr::neg(&sq.expr),

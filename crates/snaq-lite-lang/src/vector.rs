@@ -7,6 +7,28 @@ use crate::symbolic::Value;
 use futures::stream::{self, Stream};
 use std::fmt;
 
+/// Operation to apply element-wise when streaming a [LazyVector::Map].
+/// Scalar operands are boxed to avoid recursive type size (Value → LazyVector → VectorMapOp → Value).
+#[derive(Clone, Debug, PartialEq)]
+pub enum VectorMapOp {
+    /// elem + scalar (or scalar + elem)
+    Add(Box<Value>),
+    /// vector - scalar → elem - scalar
+    SubRhs(Box<Value>),
+    /// scalar - vector → scalar - elem
+    SubLhs(Box<Value>),
+    /// elem * scalar (or scalar * elem)
+    Mul(Box<Value>),
+    /// vector / scalar → elem / scalar
+    DivRhs(Box<Value>),
+    /// scalar / vector → scalar / elem
+    DivLhs(Box<Value>),
+    /// -elem
+    Neg,
+    /// Unary built-in by name (e.g. "sin", "cos", "tan")
+    UnaryFunc(String),
+}
+
 /// Lazy vector: produces a stream of elements on demand (async).
 /// Construction does no work; evaluation happens when the stream is consumed (or at creation for FromEvaluated).
 #[derive(Clone, Debug, PartialEq)]
@@ -15,6 +37,11 @@ pub enum LazyVector {
     FromExprs(Vec<ExprDef>),
     /// Pre-evaluated elements (from a literal evaluated inside a Salsa query; stream yields these).
     FromEvaluated(Vec<Result<Option<Value>, RunError>>),
+    /// Element-wise map: when streamed (via [crate::queries::vector_into_stream]), each element is transformed by [VectorMapOp].
+    Map {
+        source: Box<LazyVector>,
+        op: VectorMapOp,
+    },
     /// Placeholder for transform (one vector → another); not implemented yet.
     #[allow(dead_code)]
     Transform {
@@ -49,7 +76,10 @@ impl LazyVector {
     pub fn take_evaluated_results(self) -> Option<Vec<Result<Option<Value>, RunError>>> {
         match self {
             LazyVector::FromEvaluated(r) => Some(r),
-            _ => None,
+            LazyVector::Map { .. }
+            | LazyVector::FromExprs(_)
+            | LazyVector::Transform { .. }
+            | LazyVector::Transpose { .. } => None,
         }
     }
 
@@ -58,7 +88,10 @@ impl LazyVector {
     pub fn take_literal_defs(self) -> Option<Vec<ExprDef>> {
         match self {
             LazyVector::FromExprs(defs) => Some(defs),
-            _ => None,
+            LazyVector::Map { .. }
+            | LazyVector::FromEvaluated(_)
+            | LazyVector::Transform { .. }
+            | LazyVector::Transpose { .. } => None,
         }
     }
 
@@ -76,7 +109,7 @@ impl LazyVector {
                 Box::new(stream::iter(iter))
             }
             LazyVector::FromEvaluated(results) => Box::new(stream::iter(results)),
-            LazyVector::Transform { .. } | LazyVector::Transpose { .. } => {
+            LazyVector::Map { .. } | LazyVector::Transform { .. } | LazyVector::Transpose { .. } => {
                 // Stub: yield nothing (or could return an error)
                 Box::new(stream::iter(std::iter::empty::<Result<Option<Value>, RunError>>()))
             }

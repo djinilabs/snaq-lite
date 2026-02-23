@@ -1,11 +1,71 @@
 //! Lazy, async vector type: ordered collection streamed from start to end.
 //! Elements are `Option<Value>` (None = undefined/sparse). Vectors can be nested.
+//! Vectors have orientation (column by default, row after transpose); see [VectorValue].
+//! Display is intentionally `"<vector>"` for all vectors (orientation not shown); transpose flips
+//! orientation, and element-wise Map preserves the operand's orientation.
 
 use crate::error::RunError;
 use crate::ir::ExprDef;
 use crate::symbolic::Value;
 use futures::stream::{self, Stream};
 use std::fmt;
+
+/// Column (default) or row orientation. Transpose flips orientation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VectorOrientation {
+    Column,
+    Row,
+}
+
+impl VectorOrientation {
+    pub fn flip(self) -> Self {
+        match self {
+            VectorOrientation::Column => VectorOrientation::Row,
+            VectorOrientation::Row => VectorOrientation::Column,
+        }
+    }
+}
+
+/// Vector with orientation. Wraps [LazyVector]; used by [Value](crate::symbolic::Value).
+/// Literals and 2D column yields are column; [transpose](VectorValue::transpose) flips to row;
+/// Map (e.g. vector + scalar) preserves the vector operand's orientation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VectorValue {
+    pub inner: LazyVector,
+    pub orientation: VectorOrientation,
+}
+
+impl VectorValue {
+    pub fn column(inner: LazyVector) -> Self {
+        Self {
+            inner,
+            orientation: VectorOrientation::Column,
+        }
+    }
+
+    pub fn row(inner: LazyVector) -> Self {
+        Self {
+            inner,
+            orientation: VectorOrientation::Row,
+        }
+    }
+
+    /// Wrap inner in [LazyVector::Transpose] and flip orientation.
+    pub fn transpose(self) -> Self {
+        Self {
+            inner: LazyVector::Transpose {
+                source: Box::new(self.inner),
+            },
+            orientation: self.orientation.flip(),
+        }
+    }
+}
+
+impl fmt::Display for VectorValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<vector>")
+    }
+}
 
 /// Operation to apply element-wise when streaming a [LazyVector::Map].
 /// Scalar operands are boxed to avoid recursive type size (Value → LazyVector → VectorMapOp → Value).

@@ -11,7 +11,7 @@ use crate::quantity::Quantity;
 use crate::symbolic::{SymbolicExpr, SymbolicQuantity, Value};
 use crate::unit::Unit;
 use crate::unit_registry::UnitRegistry;
-use crate::vector::{LazyVector, VectorMapOp};
+use crate::vector::{LazyVector, VectorMapOp, VectorValue};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Neg;
@@ -157,8 +157,8 @@ impl<'a> futures::stream::Stream for TransposedVectorStream<'a> {
                     match Pin::new(this.inner.as_mut()).poll_next(cx) {
                         Poll::Ready(Some(item)) => {
                             this.buffer.push(item.clone());
-                            if let Ok(Some(Value::Vector(lv))) = &item {
-                                let row_stream = vector_into_stream(this.db, lv.clone());
+                            if let Ok(Some(Value::Vector(v))) = &item {
+                                let row_stream = vector_into_stream(this.db, v.inner.clone());
                                 this.row_stream = Some(Box::new(row_stream));
                             }
                             continue;
@@ -202,7 +202,9 @@ impl<'a> futures::stream::Stream for TransposedVectorStream<'a> {
                         .map(|row| row.get(*col_index).cloned().unwrap_or(Ok(None)))
                         .collect();
                     *col_index += 1;
-                    let val = Ok(Some(Value::Vector(LazyVector::from_evaluated(col))));
+                    let val = Ok(Some(Value::Vector(VectorValue::column(
+                        LazyVector::from_evaluated(col),
+                    ))));
                     return Poll::Ready(Some(val));
                 }
                 TransposePhase::Done => return Poll::Ready(None),
@@ -506,14 +508,14 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
                 .iter()
                 .map(|e| value(db, *e).map(Some))
                 .collect();
-            Ok(Value::Vector(LazyVector::from_evaluated(results)))
+            Ok(Value::Vector(VectorValue::column(LazyVector::from_evaluated(
+                results,
+            ))))
         }
         ExprData::Transpose(inner) => {
             let v = value(db, *inner)?;
             match v {
-                Value::Vector(lv) => Ok(Value::Vector(LazyVector::Transpose {
-                    source: Box::new(lv),
-                })),
+                Value::Vector(v) => Ok(Value::Vector(v.transpose())),
                 _ => Err(RunError::ExpectedVector),
             }
         }
@@ -620,10 +622,13 @@ fn eval_call(
     // Unary built-ins (sin, cos, tan): map over vector when the single argument is a vector.
     if param_names.len() == 1 && matches!(name, "sin" | "cos" | "tan") {
         let v = bound.get(param_names[0]).unwrap();
-        if let Value::Vector(lv) = v {
-            return Ok(Value::Vector(LazyVector::Map {
-                source: Box::new(lv.clone()),
-                op: VectorMapOp::UnaryFunc(name.to_string()),
+        if let Value::Vector(v) = v {
+            return Ok(Value::Vector(VectorValue {
+                inner: LazyVector::Map {
+                    source: Box::new(v.inner.clone()),
+                    op: VectorMapOp::UnaryFunc(name.to_string()),
+                },
+                orientation: v.orientation,
             }));
         }
     }
@@ -714,12 +719,15 @@ fn add_values(
     registry: &UnitRegistry,
 ) -> Result<Value, RunError> {
     match (a, b) {
-        (Value::Vector(lv), scalar) | (scalar, Value::Vector(lv))
+        (Value::Vector(v), scalar) | (scalar, Value::Vector(v))
             if !matches!(scalar, Value::Vector(_)) =>
         {
-            Ok(Value::Vector(LazyVector::Map {
-                source: Box::new(lv.clone()),
-                op: VectorMapOp::Add(Box::new(scalar.clone())),
+            Ok(Value::Vector(VectorValue {
+                inner: LazyVector::Map {
+                    source: Box::new(v.inner.clone()),
+                    op: VectorMapOp::Add(Box::new(scalar.clone())),
+                },
+                orientation: v.orientation,
             }))
         }
         (Value::Vector(_), Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
@@ -761,16 +769,22 @@ fn sub_values(
     registry: &UnitRegistry,
 ) -> Result<Value, RunError> {
     match (a, b) {
-        (Value::Vector(lv), scalar) if !matches!(scalar, Value::Vector(_)) => {
-            Ok(Value::Vector(LazyVector::Map {
-                source: Box::new(lv.clone()),
-                op: VectorMapOp::SubRhs(Box::new(scalar.clone())),
+        (Value::Vector(v), scalar) if !matches!(scalar, Value::Vector(_)) => {
+            Ok(Value::Vector(VectorValue {
+                inner: LazyVector::Map {
+                    source: Box::new(v.inner.clone()),
+                    op: VectorMapOp::SubRhs(Box::new(scalar.clone())),
+                },
+                orientation: v.orientation,
             }))
         }
-        (scalar, Value::Vector(lv)) if !matches!(scalar, Value::Vector(_)) => {
-            Ok(Value::Vector(LazyVector::Map {
-                source: Box::new(lv.clone()),
-                op: VectorMapOp::SubLhs(Box::new(scalar.clone())),
+        (scalar, Value::Vector(v)) if !matches!(scalar, Value::Vector(_)) => {
+            Ok(Value::Vector(VectorValue {
+                inner: LazyVector::Map {
+                    source: Box::new(v.inner.clone()),
+                    op: VectorMapOp::SubLhs(Box::new(scalar.clone())),
+                },
+                orientation: v.orientation,
             }))
         }
         (Value::Vector(_), Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
@@ -808,12 +822,15 @@ fn sub_values(
 
 fn mul_values(a: &Value, b: &Value) -> Result<Value, RunError> {
     match (a, b) {
-        (Value::Vector(lv), scalar) | (scalar, Value::Vector(lv))
+        (Value::Vector(v), scalar) | (scalar, Value::Vector(v))
             if !matches!(scalar, Value::Vector(_)) =>
         {
-            Ok(Value::Vector(LazyVector::Map {
-                source: Box::new(lv.clone()),
-                op: VectorMapOp::Mul(Box::new(scalar.clone())),
+            Ok(Value::Vector(VectorValue {
+                inner: LazyVector::Map {
+                    source: Box::new(v.inner.clone()),
+                    op: VectorMapOp::Mul(Box::new(scalar.clone())),
+                },
+                orientation: v.orientation,
             }))
         }
         (Value::Vector(_), Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
@@ -832,16 +849,22 @@ fn mul_values(a: &Value, b: &Value) -> Result<Value, RunError> {
 
 fn div_values(a: &Value, b: &Value) -> Result<Value, RunError> {
     match (a, b) {
-        (Value::Vector(lv), scalar) if !matches!(scalar, Value::Vector(_)) => {
-            Ok(Value::Vector(LazyVector::Map {
-                source: Box::new(lv.clone()),
-                op: VectorMapOp::DivRhs(Box::new(scalar.clone())),
+        (Value::Vector(v), scalar) if !matches!(scalar, Value::Vector(_)) => {
+            Ok(Value::Vector(VectorValue {
+                inner: LazyVector::Map {
+                    source: Box::new(v.inner.clone()),
+                    op: VectorMapOp::DivRhs(Box::new(scalar.clone())),
+                },
+                orientation: v.orientation,
             }))
         }
-        (scalar, Value::Vector(lv)) if !matches!(scalar, Value::Vector(_)) => {
-            Ok(Value::Vector(LazyVector::Map {
-                source: Box::new(lv.clone()),
-                op: VectorMapOp::DivLhs(Box::new(scalar.clone())),
+        (scalar, Value::Vector(v)) if !matches!(scalar, Value::Vector(_)) => {
+            Ok(Value::Vector(VectorValue {
+                inner: LazyVector::Map {
+                    source: Box::new(v.inner.clone()),
+                    op: VectorMapOp::DivLhs(Box::new(scalar.clone())),
+                },
+                orientation: v.orientation,
             }))
         }
         (Value::Vector(_), Value::Vector(_)) => Err(RunError::UnsupportedVectorOperation),
@@ -862,9 +885,12 @@ fn div_values(a: &Value, b: &Value) -> Result<Value, RunError> {
 
 fn neg_value(v: &Value) -> Result<Value, RunError> {
     match v {
-        Value::Vector(lv) => Ok(Value::Vector(LazyVector::Map {
-            source: Box::new(lv.clone()),
-            op: VectorMapOp::Neg,
+        Value::Vector(v) => Ok(Value::Vector(VectorValue {
+            inner: LazyVector::Map {
+                source: Box::new(v.inner.clone()),
+                op: VectorMapOp::Neg,
+            },
+            orientation: v.orientation,
         })),
         Value::Numeric(q) => Ok(Value::Numeric(Neg::neg(q.clone()))),
         Value::Symbolic(sq) => Ok(Value::Symbolic(SymbolicQuantity::new(

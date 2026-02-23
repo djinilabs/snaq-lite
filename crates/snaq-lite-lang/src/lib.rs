@@ -25,7 +25,7 @@ pub use parser::parse;
 pub use queries::{program, set_eval_registry, value, vector_into_stream};
 pub use symbol_registry::SymbolRegistry;
 pub use symbolic::{SymbolicQuantity, SymbolicExpr, Value};
-pub use vector::LazyVector;
+pub use vector::{LazyVector, VectorOrientation, VectorValue};
 pub use unit_registry::{default_si_registry, UnitRegistry};
 
 /// Parse and evaluate the expression, returning a Value (symbolic by default, e.g. "6 + π").
@@ -56,8 +56,8 @@ fn format_value_for_display(db: &dyn salsa::Database, value: &Value) -> Result<S
     match value {
         Value::Numeric(q) => Ok(format!("{q}")),
         Value::Symbolic(sq) => Ok(format!("{sq}")),
-        Value::Vector(lv) => {
-            let stream = vector_into_stream(db, lv.clone());
+        Value::Vector(v) => {
+            let stream = vector_into_stream(db, v.inner.clone());
             let results: Vec<_> = futures::executor::block_on(async move {
                 use futures::stream::StreamExt;
                 stream.collect().await
@@ -929,6 +929,51 @@ mod tests {
     }
 
     #[test]
+    fn run_vector_orientation_column_row_transpose() {
+        use crate::vector::VectorOrientation;
+
+        // Literal: column by default
+        let v = run("[1, 2, 3]").unwrap();
+        let vec_val = match &v {
+            Value::Vector(w) => w,
+            _ => panic!("expected vector"),
+        };
+        assert_eq!(vec_val.orientation, VectorOrientation::Column, "literal is column");
+
+        // Single transpose: row
+        let v = run("[1, 2, 3]'").unwrap();
+        let vec_val = match &v {
+            Value::Vector(w) => w,
+            _ => panic!("expected vector"),
+        };
+        assert_eq!(vec_val.orientation, VectorOrientation::Row, "transposed is row");
+
+        // Chained transpose: column again
+        let v = run("[1, 2, 3]''").unwrap();
+        let vec_val = match &v {
+            Value::Vector(w) => w,
+            _ => panic!("expected vector"),
+        };
+        assert_eq!(
+            vec_val.orientation,
+            VectorOrientation::Column,
+            "double transpose is column"
+        );
+
+        // Map preserves orientation: row vector + scalar → row
+        let v = run("[1, 2, 3]' + 0").unwrap();
+        let vec_val = match &v {
+            Value::Vector(w) => w,
+            _ => panic!("expected vector"),
+        };
+        assert_eq!(
+            vec_val.orientation,
+            VectorOrientation::Row,
+            "map preserves row orientation"
+        );
+    }
+
+    #[test]
     fn run_numeric_vector_returns_err() {
         let e = run_numeric("[1, 2]").unwrap_err();
         assert!(matches!(e, RunError::UnsupportedVectorOperation));
@@ -993,7 +1038,7 @@ mod tests {
         let root = program(&db, program_def);
         let v = value(&db, root).unwrap();
         let lv = match &v {
-            Value::Vector(l) => l.clone(),
+            Value::Vector(v) => v.inner.clone(),
             _ => panic!("expected vector"),
         };
         let stream = vector_into_stream(&db, lv);

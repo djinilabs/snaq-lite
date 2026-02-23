@@ -497,8 +497,8 @@ impl fmt::Display for SymbolicQuantity {
 pub enum Value {
     Numeric(Quantity),
     Symbolic(SymbolicQuantity),
-    /// Lazy vector: elements are streamed on demand.
-    Vector(crate::vector::LazyVector),
+    /// Vector with orientation (column by default, row after transpose). Elements streamed on demand.
+    Vector(crate::vector::VectorValue),
 }
 
 impl Value {
@@ -538,7 +538,7 @@ impl fmt::Display for Value {
         match self {
             Value::Numeric(q) => write!(f, "{q}"),
             Value::Symbolic(sq) => write!(f, "{sq}"),
-            Value::Vector(lv) => write!(f, "{lv}"),
+            Value::Vector(v) => write!(f, "{v}"),
         }
     }
 }

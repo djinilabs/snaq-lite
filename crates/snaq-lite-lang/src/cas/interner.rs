@@ -39,6 +39,8 @@ pub enum ExprNode {
     If(ExprId, ExprId, ExprId),
     /// Explicit precision: left ~ right (variance = right.value()²).
     WithPrecision(ExprId, ExprId),
+    /// Block: sequence of expressions; value is the last, or undefined if empty. Order preserved in CAS.
+    Block(Vec<ExprId>),
 }
 
 /// Central cache: same structure => same ExprId. New nodes are interned on construction.

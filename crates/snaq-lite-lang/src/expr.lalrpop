@@ -38,14 +38,49 @@ extern {
         ">" => Tok::Gt,
         ">=" => Tok::Ge,
         "~" => Tok::Tilde,
+        "{" => Tok::LBrace,
+        "}" => Tok::RBrace,
+        ";" => Tok::Semicolon,
+        Newline => Tok::Newline,
         Num => Tok::Num(<crate::ir::NumLiteral>),
         Ident => Tok::Ident(<String>),
         FuncIdent => Tok::FuncIdent(<String>),
     }
 }
 
-// Top level: conditional, comparison, then additive. So "if a < b then 1 else 0" parses as If(cond, then, else).
-pub Expr: ExprDef = {
+// Top-level program: expression list (newline- or semicolon-separated), wrapped in a Block.
+pub Program: ExprDef = {
+    <list:ExprList> => ExprDef::Block(list),
+};
+
+// Expression list for program root and block bodies: zero or more Expr, separated by ";" or Newline.
+ExprList: Vec<ExprDef> = {
+    => vec![],
+    <first:Expr> <rest:ExprListRest> => {
+        let mut v = vec![first];
+        v.extend(rest);
+        v
+    },
+};
+
+ExprListRest: Vec<ExprDef> = {
+    => vec![],
+    ";" <e:Expr> <rest:ExprListRest> => {
+        let mut r = rest;
+        r.insert(0, e);
+        r
+    },
+    Newline <e:Expr> <rest:ExprListRest> => {
+        let mut r = rest;
+        r.insert(0, e);
+        r
+    },
+    ";" <rest:ExprListRest> => rest,
+    Newline <rest:ExprListRest> => rest,
+};
+
+// Expression (used inside blocks and as list elements): conditional, comparison, then additive.
+Expr: ExprDef = {
     <if_expr:IfExpr> => if_expr,
     <l:AddExpr> "==" <r:Expr> => ExprDef::Eq(Box::new(l), Box::new(r)),
     <l:AddExpr> "!=" <r:Expr> => ExprDef::Ne(Box::new(l), Box::new(r)),
@@ -147,6 +182,7 @@ Factor: ExprDef = {
     <ii:IdentIdents> => ii,
     "(" <e:Expr> ")" => e,
     "[" <elems:VecExprList> "]" => ExprDef::VecLiteral(elems),
+    "{" <list:ExprList> "}" => ExprDef::Block(list),
 };
 
 // Comma-separated list of expressions for vector literal: [ expr, expr, ... ] or [].

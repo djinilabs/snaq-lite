@@ -596,6 +596,8 @@ pub enum Value {
     FuzzyBool(FuzzyBool),
     /// Vector with orientation (column by default, row after transpose). Elements streamed on demand.
     Vector(crate::vector::VectorValue),
+    /// Undefined (e.g. empty block or empty program).
+    Undefined,
 }
 
 impl Value {
@@ -621,6 +623,7 @@ impl Value {
             }
             Value::FuzzyBool(_) => Err(RunError::BooleanResult),
             Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
+            Value::Undefined => Err(RunError::UndefinedResult),
         }
     }
 
@@ -644,6 +647,7 @@ impl fmt::Display for Value {
             Value::Symbolic(sq) => write!(f, "{sq}"),
             Value::FuzzyBool(fb) => write!(f, "{fb}"),
             Value::Vector(v) => write!(f, "{v}"),
+            Value::Undefined => write!(f, "undefined"),
         }
     }
 }

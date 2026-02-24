@@ -25,6 +25,7 @@ pub enum Rank {
     Ge(Box<Rank>, Box<Rank>),
     If(Box<Rank>, Box<Rank>, Box<Rank>),
     WithPrecision(Box<Rank>, Box<Rank>),
+    Block(Vec<Rank>),
 }
 
 fn tag_order(r: &Rank) -> u8 {
@@ -48,6 +49,7 @@ fn tag_order(r: &Rank) -> u8 {
         Rank::Ge(..) => 16,
         Rank::If(..) => 17,
         Rank::WithPrecision(..) => 18,
+        Rank::Block(_) => 19,
     }
 }
 
@@ -83,6 +85,7 @@ impl Ord for Rank {
             (Rank::Ge(a1, a2), Rank::Ge(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::If(a1, a2, a3), Rank::If(b1, b2, b3)) => a1.cmp(b1).then(a2.cmp(b2)).then(a3.cmp(b3)),
             (Rank::WithPrecision(a1, a2), Rank::WithPrecision(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
+            (Rank::Block(a), Rank::Block(b)) => a.cmp(b),
             _ => Ordering::Equal,
         }
     }
@@ -126,6 +129,7 @@ pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
             Box::new(rank(pool, *l)),
             Box::new(rank(pool, *r)),
         ),
+        ExprNode::Block(ids) => Rank::Block(ids.iter().map(|&i| rank(pool, i)).collect()),
     }
 }
 
@@ -276,6 +280,13 @@ fn canonicalize_rec(
             let new_l = canonicalize_rec(pool, out, *l);
             let new_r = canonicalize_rec(pool, out, *r);
             out.intern(ExprNode::WithPrecision(new_l, new_r))
+        }
+        ExprNode::Block(ids) => {
+            let new_ids: Vec<ExprId> = ids
+                .iter()
+                .map(|&id| canonicalize_rec(pool, out, id))
+                .collect();
+            out.intern(ExprNode::Block(new_ids))
         }
     }
 }

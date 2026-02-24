@@ -44,6 +44,14 @@ pub enum Tok {
     Ge,
     /// Explicit precision/error bound: `~` (e.g. 10 ~ 2 => value 10 with ±2 error).
     Tilde,
+    /// Block start: `{`
+    LBrace,
+    /// Block end: `}`
+    RBrace,
+    /// Expression separator: `;`
+    Semicolon,
+    /// Newline (expression separator; \n or \r\n).
+    Newline,
 }
 
 #[derive(Clone, Debug)]
@@ -71,12 +79,10 @@ impl<'input> Lexer<'input> {
         Lexer { input, pos: 0 }
     }
 
+    /// Skip only space and tab (not newlines; newlines are tokens for expression separation).
     fn skip_whitespace(&mut self) {
         let rest = &self.input[self.pos..];
-        let skipped = rest
-            .bytes()
-            .take_while(|b| b" \t\n\r".contains(b))
-            .count();
+        let skipped = rest.bytes().take_while(|b| *b == b' ' || *b == b'\t').count();
         self.pos += skipped;
     }
 
@@ -172,6 +178,20 @@ impl<'input> Iterator for Lexer<'input> {
         let start = self.pos;
         let rest = &self.input[self.pos..];
 
+        // Newline: \n or \r\n (expression separator)
+        if rest.starts_with('\n') {
+            self.pos += 1;
+            return Some(Ok((start, Tok::Newline, self.pos)));
+        }
+        if rest.starts_with("\r\n") {
+            self.pos += 2;
+            return Some(Ok((start, Tok::Newline, self.pos)));
+        }
+        if rest.starts_with('\r') {
+            self.pos += 1;
+            return Some(Ok((start, Tok::Newline, self.pos)));
+        }
+
         // Single chars / fixed strings (longer first); "as" before "per" so "aspect" stays Ident
         if rest.starts_with("as") && !rest[2..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
             self.pos += 2;
@@ -224,6 +244,9 @@ impl<'input> Iterator for Lexer<'input> {
             ')' => Tok::RParen,
             '[' => Tok::LBracket,
             ']' => Tok::RBracket,
+            '{' => Tok::LBrace,
+            '}' => Tok::RBrace,
+            ';' => Tok::Semicolon,
             '+' => Tok::Plus,
             '-' => Tok::Minus,
             '*' => Tok::Star,

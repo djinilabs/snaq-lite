@@ -702,6 +702,13 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
             let right = build_expression(db, *r);
             ExprData::WithPrecision(left, right)
         }
+        ExprDef::Block(exprs) => {
+            let exprs: Vec<Expression<'_>> = exprs
+                .into_iter()
+                .map(|d| build_expression(db, d))
+                .collect();
+            ExprData::Block(exprs)
+        }
     };
     Expression::new(db, data)
 }
@@ -809,6 +816,7 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
                     Ok(Value::Symbolic(SymbolicQuantity::new(scaled, target_unit)))
                 }
                 Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
+                Value::Undefined => Err(RunError::UndefinedResult),
             }
         }
         ExprData::VecLiteral(exprs) => {
@@ -851,6 +859,17 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
             )))
         }
         ExprData::If(cond_expr, then_expr, else_expr) => eval_if(db, *cond_expr, *then_expr, *else_expr, registry),
+        ExprData::Block(exprs) => {
+            if exprs.is_empty() {
+                Ok(Value::Undefined)
+            } else {
+                let mut last = value(db, exprs[0])?;
+                for e in &exprs[1..] {
+                    last = value(db, *e)?;
+                }
+                Ok(last)
+            }
+        }
     })
 }
 
@@ -933,6 +952,12 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
             Box::new(expression_to_def(db, *c)),
             Box::new(expression_to_def(db, *t)),
             Box::new(expression_to_def(db, *e)),
+        ),
+        ExprData::Block(exprs) => ExprDef::Block(
+            exprs
+                .iter()
+                .map(|e| expression_to_def(db, *e))
+                .collect(),
         ),
     }
 }
@@ -1171,6 +1196,7 @@ fn value_to_symbolic_expr(v: &Value) -> SymbolicExpr {
         Value::Symbolic(sq) => sq.expr.clone(),
         Value::FuzzyBool(_) => panic!("value_to_symbolic_expr: fuzzy boolean not supported"),
         Value::Vector(_) => panic!("value_to_symbolic_expr: vector not supported"),
+        Value::Undefined => panic!("value_to_symbolic_expr: undefined not supported"),
     }
 }
 
@@ -1744,6 +1770,7 @@ fn div_values(
 fn neg_value(v: &Value) -> Result<Value, RunError> {
     match v {
         Value::FuzzyBool(_) => Err(RunError::BooleanResult),
+        Value::Undefined => Err(RunError::UndefinedResult),
         Value::Vector(v) => Ok(Value::Vector(VectorValue {
             inner: LazyVector::Map {
                 source: Box::new(v.inner.clone()),
@@ -1765,6 +1792,7 @@ fn value_to_expr_unit(v: &Value) -> (SymbolicExpr, Unit) {
         Value::Symbolic(sq) => (sq.expr.clone(), sq.unit.clone()),
         Value::FuzzyBool(_) => panic!("value_to_expr_unit: fuzzy boolean not supported"),
         Value::Vector(_) => panic!("value_to_expr_unit: vector not supported"),
+        Value::Undefined => panic!("value_to_expr_unit: undefined not supported"),
     }
 }
 
@@ -1809,5 +1837,6 @@ fn scale_expr_to_unit(
         Value::Symbolic(_) => Ok(SymbolicExpr::mul(expr, &SymbolicExpr::number(ratio))),
         Value::FuzzyBool(_) => Err(RunError::BooleanResult),
         Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
+        Value::Undefined => Err(RunError::UndefinedResult),
     }
 }

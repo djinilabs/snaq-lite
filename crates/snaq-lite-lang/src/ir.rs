@@ -100,6 +100,8 @@ pub enum ExprDef {
     If(Box<ExprDef>, Box<ExprDef>, Box<ExprDef>),
     /// Explicit precision: left ~ right => value from left with variance = (right.value())². Right must be > 0; right's variance is discarded.
     WithPrecision(Box<ExprDef>, Box<ExprDef>),
+    /// Block: sequence of expressions; value is the last expression, or undefined if empty.
+    Block(Vec<ExprDef>),
 }
 
 /// Input that holds the root expression definition.
@@ -145,4 +147,6 @@ pub enum ExprData<'db> {
     If(Expression<'db>, Expression<'db>, Expression<'db>),
     /// Explicit precision: left ~ right (use right's value as absolute error; variance = error²).
     WithPrecision(Expression<'db>, Expression<'db>),
+    /// Block: sequence of expressions; value is the last, or undefined if empty.
+    Block(Vec<Expression<'db>>),
 }

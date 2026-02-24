@@ -93,6 +93,13 @@ pub fn substitute_symbols(def: ExprDef, registry: &SymbolRegistry) -> Result<Exp
             Box::new(substitute_symbols(*l, registry)?),
             Box::new(substitute_symbols(*r, registry)?),
         )),
+        ExprDef::Block(exprs) => {
+            let exprs = exprs
+                .into_iter()
+                .map(|e| substitute_symbols(e, registry))
+                .collect::<Result<Vec<_>, RunError>>()?;
+            Ok(ExprDef::Block(exprs))
+        }
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved ExprDef: resolve() must be called before substitute_symbols")
         }

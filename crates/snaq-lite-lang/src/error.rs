@@ -30,6 +30,8 @@ pub enum RunError {
     TildeRequiresNumeric,
     /// Right-hand side of ~ (explicit precision) must be strictly positive.
     PrecisionMustBePositive,
+    /// Result is undefined (e.g. empty block or empty program); cannot convert to quantity.
+    UndefinedResult,
 }
 
 /// Parse error for expression strings.
@@ -104,6 +106,9 @@ impl std::fmt::Display for RunError {
             }
             RunError::PrecisionMustBePositive => {
                 write!(f, "precision (right side of ~) must be strictly positive")
+            }
+            RunError::UndefinedResult => {
+                write!(f, "result is undefined (e.g. empty block), cannot convert to quantity")
             }
         }
     }

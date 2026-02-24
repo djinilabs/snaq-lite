@@ -17,10 +17,11 @@ lalrpop_mod!(
     expr
 );
 
-/// Parse a single expression. Uses custom lexer so "sin(1)" is a call and "sin" is a symbol.
+/// Parse a program (expression list, possibly with blocks). Returns an ExprDef that is a Block at top level.
+/// Uses custom lexer so "sin(1)" is a call and "sin" is a symbol.
 pub fn parse(input: &str) -> Result<ExprDef, ParseError> {
     let lexer = lexer::Lexer::new(input);
-    expr::ExprParser::new()
+    expr::ProgramParser::new()
         .parse(lexer)
         .map_err(|e| ParseError::new(format!("{e:?}")))
 }

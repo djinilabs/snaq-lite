@@ -33,6 +33,10 @@ pub use unit_registry::{default_si_registry, UnitRegistry};
 
 /// Parse and evaluate the expression, returning a Value (symbolic by default, e.g. "6 + π").
 ///
+/// Input can be multiple expressions (newline- or `;`-separated) and blocks `{ ... }`; the result
+/// is the last expression's value, or `Value::Undefined` if there are no expressions (e.g. empty
+/// input or empty block).
+///
 /// Supports float literals, quantity literals (e.g. `100 m`), symbols (e.g. `pi`, `π`, `e`),
 /// implicit multiplication, division as `/` or `per`, unit conversion with `as` (e.g. `10 km as m`),
 /// vector literals `[ expr, ... ]`, and postfix transpose `'` on vectors (e.g. `[1,2,3]'`).
@@ -62,6 +66,7 @@ fn format_value_for_display(db: &dyn salsa::Database, value: &Value) -> Result<S
         Value::Numeric(q) => Ok(format!("{q}")),
         Value::Symbolic(sq) => Ok(format!("{sq}")),
         Value::FuzzyBool(fb) => Ok(format!("{fb}")),
+        Value::Undefined => Ok("undefined".to_string()),
         Value::Vector(v) => {
             let stream = vector_into_stream(db, v.inner.clone());
             let results: Vec<_> = futures::executor::block_on(async move {
@@ -104,7 +109,8 @@ pub fn run_with_registry_format(input: &str, registry: &UnitRegistry) -> Result<
 }
 
 /// Evaluate and substitute all symbols with their numeric values; returns a single Quantity.
-/// Errors if any symbol has no value in the default symbol registry.
+/// Errors if any symbol has no value in the default symbol registry, or if the result is undefined
+/// (e.g. empty input or empty block) with [RunError::UndefinedResult].
 pub fn run_numeric(input: &str) -> Result<Quantity, RunError> {
     run_numeric_with_registry(input, &default_si_registry(), &SymbolRegistry::default_registry())
 }
@@ -127,6 +133,7 @@ pub fn run_numeric_with_registry(
 }
 
 /// Evaluate in numeric mode and return the scalar value only if dimensionless.
+/// Errors with [RunError::UndefinedResult] when the result is undefined (e.g. empty input or empty block).
 pub fn run_scalar(input: &str) -> Result<f64, RunError> {
     let q = run_numeric(input)?;
     q.as_scalar().map_err(|e| match e {
@@ -149,25 +156,39 @@ mod tests {
         ExprDef::LitScalar(NumLiteral::from_f64(n))
     }
 
+    /// Top-level parse returns a Block; single expression is Block([expr]).
+    fn block_one(expr: ExprDef) -> ExprDef {
+        ExprDef::Block(vec![expr])
+    }
+
     #[test]
     fn parse_lit() {
-        // Cases where parser raw matches from_f64
-        assert_eq!(parse("1").unwrap(), lit_scalar(1.0));
-        assert_eq!(parse("42").unwrap(), lit_scalar(42.0));
-        assert_eq!(parse("0").unwrap(), lit_scalar(0.0));
-        assert_eq!(parse("1.5").unwrap(), lit_scalar(1.5));
+        // Cases where parser raw matches from_f64; top level is Block([expr])
+        assert_eq!(parse("1").unwrap(), block_one(lit_scalar(1.0)));
+        assert_eq!(parse("42").unwrap(), block_one(lit_scalar(42.0)));
+        assert_eq!(parse("0").unwrap(), block_one(lit_scalar(0.0)));
+        assert_eq!(parse("1.5").unwrap(), block_one(lit_scalar(1.5)));
         // Parser preserves source form (".5", "2e1") so compare value only
         match parse(".5").unwrap() {
-            ExprDef::LitScalar(n) => assert_eq!(n.value_f64(), 0.5),
-            _ => panic!("expected LitScalar"),
+            ExprDef::Block(ref v) if v.len() == 1 => match &v[0] {
+                ExprDef::LitScalar(n) => assert_eq!(n.value_f64(), 0.5),
+                _ => panic!("expected LitScalar"),
+            },
+            _ => panic!("expected Block([LitScalar])"),
         }
         match parse("2e1").unwrap() {
-            ExprDef::LitScalar(n) => assert_eq!(n.value_f64(), 20.0),
-            _ => panic!("expected LitScalar"),
+            ExprDef::Block(ref v) if v.len() == 1 => match &v[0] {
+                ExprDef::LitScalar(n) => assert_eq!(n.value_f64(), 20.0),
+                _ => panic!("expected LitScalar"),
+            },
+            _ => panic!("expected Block([LitScalar])"),
         }
         match parse("9223372036854775807").unwrap() {
-            ExprDef::LitScalar(n) => assert_eq!(n.value_f64(), 9223372036854775807.0),
-            _ => panic!("expected LitScalar"),
+            ExprDef::Block(ref v) if v.len() == 1 => match &v[0] {
+                ExprDef::LitScalar(n) => assert_eq!(n.value_f64(), 9223372036854775807.0),
+                _ => panic!("expected LitScalar"),
+            },
+            _ => panic!("expected Block([LitScalar])"),
         }
     }
 
@@ -175,7 +196,7 @@ mod tests {
     fn parse_add() {
         assert_eq!(
             parse("1 + 2").unwrap(),
-            ExprDef::Add(Box::new(lit_scalar(1.0)), Box::new(lit_scalar(2.0)))
+            block_one(ExprDef::Add(Box::new(lit_scalar(1.0)), Box::new(lit_scalar(2.0))))
         );
     }
 
@@ -183,7 +204,7 @@ mod tests {
     fn parse_sub() {
         assert_eq!(
             parse("1 - 2").unwrap(),
-            ExprDef::Sub(Box::new(lit_scalar(1.0)), Box::new(lit_scalar(2.0)))
+            block_one(ExprDef::Sub(Box::new(lit_scalar(1.0)), Box::new(lit_scalar(2.0))))
         );
     }
 
@@ -191,14 +212,14 @@ mod tests {
     fn parse_unary_minus() {
         assert_eq!(
             parse("-1").unwrap(),
-            ExprDef::Neg(Box::new(lit_scalar(1.0)))
+            block_one(ExprDef::Neg(Box::new(lit_scalar(1.0))))
         );
         assert_eq!(
             parse("-(2 * 3)").unwrap(),
-            ExprDef::Neg(Box::new(ExprDef::Mul(
+            block_one(ExprDef::Neg(Box::new(ExprDef::Mul(
                 Box::new(lit_scalar(2.0)),
                 Box::new(lit_scalar(3.0))
-            )))
+            ))))
         );
     }
 
@@ -206,7 +227,7 @@ mod tests {
     fn parse_mul() {
         assert_eq!(
             parse("2 * 3").unwrap(),
-            ExprDef::Mul(Box::new(lit_scalar(2.0)), Box::new(lit_scalar(3.0)))
+            block_one(ExprDef::Mul(Box::new(lit_scalar(2.0)), Box::new(lit_scalar(3.0))))
         );
     }
 
@@ -214,7 +235,7 @@ mod tests {
     fn parse_implicit_mul() {
         assert_eq!(
             parse("10 20").unwrap(),
-            ExprDef::Mul(Box::new(lit_scalar(10.0)), Box::new(lit_scalar(20.0)))
+            block_one(ExprDef::Mul(Box::new(lit_scalar(10.0)), Box::new(lit_scalar(20.0))))
         );
     }
 
@@ -222,7 +243,7 @@ mod tests {
     fn parse_div() {
         assert_eq!(
             parse("6 / 2").unwrap(),
-            ExprDef::Div(Box::new(lit_scalar(6.0)), Box::new(lit_scalar(2.0)))
+            block_one(ExprDef::Div(Box::new(lit_scalar(6.0)), Box::new(lit_scalar(2.0))))
         );
     }
 
@@ -230,7 +251,7 @@ mod tests {
     fn parse_per_same_as_div() {
         assert_eq!(
             parse("6 per 2").unwrap(),
-            ExprDef::Div(Box::new(lit_scalar(6.0)), Box::new(lit_scalar(2.0)))
+            block_one(ExprDef::Div(Box::new(lit_scalar(6.0)), Box::new(lit_scalar(2.0))))
         );
     }
 
@@ -239,10 +260,10 @@ mod tests {
         // "per" is reserved as operator; identifiers like "percent" are still parsed as Ident
         assert_eq!(
             parse("1 percent").unwrap(),
-            ExprDef::Mul(
+            block_one(ExprDef::Mul(
                 Box::new(ExprDef::LitScalar(NumLiteral::from_f64(1.0))),
                 Box::new(ExprDef::LitUnit("percent".to_string()))
-            )
+            ))
         );
     }
 
@@ -250,10 +271,10 @@ mod tests {
     fn parse_with_parens() {
         assert_eq!(
             parse("(1 + 2) - 1").unwrap(),
-            ExprDef::Sub(
+            block_one(ExprDef::Sub(
                 Box::new(ExprDef::Add(Box::new(lit_scalar(1.0)), Box::new(lit_scalar(2.0)))),
                 Box::new(lit_scalar(1.0))
-            )
+            ))
         );
     }
 
@@ -261,10 +282,10 @@ mod tests {
     fn parse_precedence_mul_tighter_than_add() {
         assert_eq!(
             parse("1 + 2 * 3").unwrap(),
-            ExprDef::Add(
+            block_one(ExprDef::Add(
                 Box::new(lit_scalar(1.0)),
                 Box::new(ExprDef::Mul(Box::new(lit_scalar(2.0)), Box::new(lit_scalar(3.0))))
-            )
+            ))
         );
     }
 
@@ -272,10 +293,10 @@ mod tests {
     fn parse_precedence_div_tighter_than_sub() {
         assert_eq!(
             parse("6 - 4 / 2").unwrap(),
-            ExprDef::Sub(
+            block_one(ExprDef::Sub(
                 Box::new(lit_scalar(6.0)),
                 Box::new(ExprDef::Div(Box::new(lit_scalar(4.0)), Box::new(lit_scalar(2.0))))
-            )
+            ))
         );
     }
 
@@ -283,10 +304,10 @@ mod tests {
     fn parse_precedence_parens_override() {
         assert_eq!(
             parse("(1 + 2) * 3").unwrap(),
-            ExprDef::Mul(
+            block_one(ExprDef::Mul(
                 Box::new(ExprDef::Add(Box::new(lit_scalar(1.0)), Box::new(lit_scalar(2.0)))),
                 Box::new(lit_scalar(3.0))
-            )
+            ))
         );
     }
 
@@ -295,27 +316,27 @@ mod tests {
         // "100 m" and "10 m" parse as implicit mul (number * unit) and resolve to same quantity
         assert_eq!(
             parse("100 m").unwrap(),
-            ExprDef::Mul(
+            block_one(ExprDef::Mul(
                 Box::new(ExprDef::LitScalar(NumLiteral::from_f64(100.0))),
                 Box::new(ExprDef::LitUnit("m".to_string()))
-            )
+            ))
         );
         assert_eq!(
             parse("10 m").unwrap(),
-            ExprDef::Mul(
+            block_one(ExprDef::Mul(
                 Box::new(ExprDef::LitScalar(NumLiteral::from_f64(10.0))),
                 Box::new(ExprDef::LitUnit("m".to_string()))
-            )
+            ))
         );
         // "1.5 * km" parses as Mul(LitScalar(1.5), LitUnit("km")) and resolves to 1.5 km
         assert_eq!(
             parse("1.5 * km").unwrap(),
-            ExprDef::Mul(
+            block_one(ExprDef::Mul(
                 Box::new(ExprDef::LitScalar(NumLiteral::from_f64(1.5))),
                 Box::new(ExprDef::LitUnit("km".to_string()))
-            )
+            ))
         );
-        assert_eq!(parse("hour").unwrap(), ExprDef::LitUnit("hour".to_string()));
+        assert_eq!(parse("hour").unwrap(), block_one(ExprDef::LitUnit("hour".to_string())));
     }
 
     #[test]
@@ -329,7 +350,7 @@ mod tests {
             )),
             Box::new(ExprDef::LitUnit("rad".to_string())),
         );
-        assert_eq!(parsed, expected);
+        assert_eq!(parsed, block_one(expected));
         let q = run_numeric("2 pi rad").unwrap();
         assert!((q.value() - 2.0 * std::f64::consts::PI).abs() < 1e-10);
         assert_eq!(q.unit().iter().next().map(|f| f.unit_name.as_str()), Some("rad"));
@@ -381,12 +402,16 @@ mod tests {
     fn parse_tilde_precedence() {
         // "5 + 10 ~ 2" => 5 + (10 ~ 2), not (5 + 10) ~ 2
         let def = parse("5 + 10 ~ 2").unwrap();
-        match &def {
+        let inner = match &def {
+            ExprDef::Block(v) if v.len() == 1 => &v[0],
+            _ => panic!("expected Block([Add(_, WithPrecision)]), got {:?}", def),
+        };
+        match inner {
             ExprDef::Add(l, r) => {
                 assert!(matches!(l.as_ref(), ExprDef::LitScalar(_) | ExprDef::Lit(_)));
                 assert!(matches!(r.as_ref(), ExprDef::WithPrecision(_, _)));
             }
-            _ => panic!("expected Add(_, WithPrecision), got {:?}", def),
+            _ => panic!("expected Add(_, WithPrecision), got {:?}", inner),
         }
     }
 
@@ -527,9 +552,9 @@ mod tests {
 
     #[test]
     fn parse_as_unit_conversion() {
-        // "10 km as m" parses as Expr::As(Term(10 km), UnitTerm(m))
+        // "10 km as m" parses as Block([As(...)])
         let parsed = parse("10 km as m").unwrap();
-        assert!(matches!(parsed, ExprDef::As(_, _)));
+        assert!(matches!(parsed, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::As(_, _))));
         let q = run_numeric("10 km as m").unwrap();
         assert!((q.value() - 10_000.0).abs() < 1e-10);
         assert_eq!(q.unit().iter().next().map(|f| f.unit_name.as_str()), Some("m"));
@@ -572,13 +597,15 @@ mod tests {
     #[test]
     fn parse_if_then_else() {
         let parsed = parse("if 1 then 2 else 3").unwrap();
-        assert!(matches!(parsed, ExprDef::If(_, _, _)));
+        assert!(matches!(parsed, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::If(_, _, _))));
         let parsed = parse("if 1 < 2 then 10 else 20").unwrap();
-        assert!(matches!(parsed, ExprDef::If(_, _, _)));
-        if let ExprDef::If(cond, then_b, else_b) = &parsed {
-            assert!(matches!(cond.as_ref(), ExprDef::Lt(_, _)));
-            assert!(matches!(then_b.as_ref(), ExprDef::LitScalar(_) | ExprDef::Lit(_)));
-            assert!(matches!(else_b.as_ref(), ExprDef::LitScalar(_) | ExprDef::Lit(_)));
+        assert!(matches!(parsed, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::If(_, _, _))));
+        if let ExprDef::Block(ref v) = parsed {
+            if let ExprDef::If(cond, then_b, else_b) = &v[0] {
+                assert!(matches!(cond.as_ref(), ExprDef::Lt(_, _)));
+                assert!(matches!(then_b.as_ref(), ExprDef::LitScalar(_) | ExprDef::Lit(_)));
+                assert!(matches!(else_b.as_ref(), ExprDef::LitScalar(_) | ExprDef::Lit(_)));
+            }
         }
     }
 
@@ -652,17 +679,17 @@ mod tests {
     #[test]
     fn parse_comparison() {
         let parsed = parse("1 == 2").unwrap();
-        assert!(matches!(parsed, ExprDef::Eq(_, _)));
+        assert!(matches!(parsed, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Eq(_, _))));
         let parsed = parse("100 m < 1 kilometer").unwrap();
-        assert!(matches!(parsed, ExprDef::Lt(_, _)));
+        assert!(matches!(parsed, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Lt(_, _))));
         let parsed = parse("2 <= 3").unwrap();
-        assert!(matches!(parsed, ExprDef::Le(_, _)));
+        assert!(matches!(parsed, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Le(_, _))));
         let parsed = parse("3 > 2").unwrap();
-        assert!(matches!(parsed, ExprDef::Gt(_, _)));
+        assert!(matches!(parsed, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Gt(_, _))));
         let parsed = parse("4 >= 4").unwrap();
-        assert!(matches!(parsed, ExprDef::Ge(_, _)));
+        assert!(matches!(parsed, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Ge(_, _))));
         let parsed = parse("1 != 1").unwrap();
-        assert!(matches!(parsed, ExprDef::Ne(_, _)));
+        assert!(matches!(parsed, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Ne(_, _))));
     }
 
     #[test]
@@ -829,7 +856,7 @@ mod tests {
             Box::new(ExprDef::LitUnit("pi".to_string())),
             Box::new(ExprDef::LitUnit("rad".to_string())),
         );
-        assert_eq!(parsed, expected);
+        assert_eq!(parsed, block_one(expected));
         let q = run_numeric("pi rad").unwrap();
         assert!((q.value() - std::f64::consts::PI).abs() < 1e-10);
         assert_eq!(q.unit().iter().next().map(|f| f.unit_name.as_str()), Some("rad"));
@@ -846,9 +873,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_empty_is_error() {
-        assert!(parse("").is_err());
-        assert!(parse("   ").is_err());
+    fn parse_empty_returns_empty_block() {
+        // Empty input parses as Block([]); run returns Value::Undefined
+        let parsed = parse("").unwrap();
+        assert!(matches!(parsed, ExprDef::Block(ref v) if v.is_empty()));
+        let parsed = parse("   ").unwrap();
+        assert!(matches!(parsed, ExprDef::Block(ref v) if v.is_empty()));
     }
 
     #[test]
@@ -866,7 +896,83 @@ mod tests {
     #[test]
     fn run_parse_error_returns_err() {
         assert!(run("1 +").is_err());
-        assert!(run("").is_err());
+    }
+
+    #[test]
+    fn run_empty_returns_undefined() {
+        let v = run("").unwrap();
+        assert!(matches!(v, Value::Undefined));
+    }
+
+    #[test]
+    fn run_multiple_expressions_newline_last_wins() {
+        // Multiple expressions separated by newline; result is last expression
+        let v = run("1 + 1\n2 + 2").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 4.0).abs() < 1e-10);
+        let v = run("1\n2\n3").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_multiple_expressions_semicolon_last_wins() {
+        let v = run("1; 2; 3").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 3.0).abs() < 1e-10);
+        let v = run("1 + 1; 2 * 3").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 6.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_block_returns_last_expression() {
+        let v = run("{ 1; 2 }").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 2.0).abs() < 1e-10);
+        let v = run("{ 10\n20 }").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 20.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_empty_block_returns_undefined() {
+        let v = run("{}").unwrap();
+        assert!(matches!(v, Value::Undefined));
+    }
+
+    #[test]
+    fn run_numeric_and_run_scalar_empty_or_undefined_return_undefined_result() {
+        let e = run_numeric("").unwrap_err();
+        assert!(matches!(e, RunError::UndefinedResult));
+        let e = run_scalar("").unwrap_err();
+        assert!(matches!(e, RunError::UndefinedResult));
+        let e = run_numeric("{}").unwrap_err();
+        assert!(matches!(e, RunError::UndefinedResult));
+        let e = run_scalar("{}").unwrap_err();
+        assert!(matches!(e, RunError::UndefinedResult));
+    }
+
+    #[test]
+    fn run_block_as_expression() {
+        // Block is an expression; can be used in larger expressions
+        let v = run("2 * { 3; 4 }").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 8.0).abs() < 1e-10, "2 * 4 = 8");
+    }
+
+    #[test]
+    fn run_nested_blocks() {
+        let v = run("{ 1; { 2; 3 } }").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_blank_lines_allowed() {
+        let v = run("1\n\n2\n\n3").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 3.0).abs() < 1e-10);
     }
 
     #[test]
@@ -1125,7 +1231,11 @@ mod tests {
     #[test]
     fn parse_sin_call() {
         let e = parse("sin(1)").unwrap();
-        match &e {
+        let inner = match &e {
+            ExprDef::Block(v) if v.len() == 1 => &v[0],
+            _ => panic!("expected Block([Call]), got {:?}", e),
+        };
+        match inner {
             ExprDef::Call(name, args) => {
                 assert_eq!(name, "sin");
                 assert_eq!(args.len(), 1);
@@ -1134,14 +1244,18 @@ mod tests {
                     _ => panic!("expected positional arg"),
                 }
             }
-            _ => panic!("expected Call, got {:?}", e),
+            _ => panic!("expected Call, got {:?}", inner),
         }
     }
 
     #[test]
     fn parse_max_two_args() {
         let e = parse("max(1, 2)").unwrap();
-        match &e {
+        let inner = match &e {
+            ExprDef::Block(v) if v.len() == 1 => &v[0],
+            _ => panic!("expected Block([Call])"),
+        };
+        match inner {
             ExprDef::Call(name, args) => {
                 assert_eq!(name, "max");
                 assert_eq!(args.len(), 2);
@@ -1153,7 +1267,11 @@ mod tests {
     #[test]
     fn parse_max_named_args() {
         let e = parse("max(a: 1, b: 2)").unwrap();
-        match &e {
+        let inner = match &e {
+            ExprDef::Block(v) if v.len() == 1 => &v[0],
+            _ => panic!("expected Block([Call])"),
+        };
+        match inner {
             ExprDef::Call(name, args) => {
                 assert_eq!(name, "max");
                 assert_eq!(args.len(), 2);
@@ -1238,18 +1356,18 @@ mod tests {
     fn parse_vector_literal() {
         use crate::ir::ExprDef;
         let r = parse("[1]").unwrap();
-        assert!(matches!(r, ExprDef::VecLiteral(e) if e.len() == 1));
+        assert!(matches!(r, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::VecLiteral(e) if e.len() == 1)));
         let r = parse("[1, 2*3]").unwrap();
-        assert!(matches!(r, ExprDef::VecLiteral(e) if e.len() == 2));
+        assert!(matches!(r, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::VecLiteral(e) if e.len() == 2)));
         let r = parse("[]").unwrap();
-        assert!(matches!(r, ExprDef::VecLiteral(e) if e.is_empty()));
+        assert!(matches!(r, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::VecLiteral(e) if e.is_empty())));
     }
 
     #[test]
     fn parse_vector_transpose() {
         use crate::ir::ExprDef;
         let r = parse("[1, 2, 3]'").unwrap();
-        assert!(matches!(r, ExprDef::Transpose(ref b) if matches!(b.as_ref(), ExprDef::VecLiteral(e) if e.len() == 3)));
+        assert!(matches!(r, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Transpose(ref b) if matches!(b.as_ref(), ExprDef::VecLiteral(e) if e.len() == 3))));
     }
 
     #[test]
@@ -1516,10 +1634,13 @@ mod tests {
         let reg = default_si_registry();
         let root = parse("180 * degrees").unwrap();
         let resolved = resolve::resolve(root, &reg).unwrap();
-        // Should be Mul(Lit(180), Lit(1 degree)), not Mul(..., LitSymbol("degrees"))
+        // Root is Block([Mul(...)]); Mul should be Mul(Lit(180), Lit(1 degree)), not LitSymbol("degrees")
         let (l, r) = match &resolved {
-            ExprDef::Mul(a, b) => (a.as_ref(), b.as_ref()),
-            _ => panic!("expected Mul, got {resolved:?}"),
+            ExprDef::Block(v) if v.len() == 1 => match &v[0] {
+                ExprDef::Mul(a, b) => (a.as_ref(), b.as_ref()),
+                _ => panic!("expected Block([Mul]), got {resolved:?}"),
+            },
+            _ => panic!("expected Block([Mul]), got {resolved:?}"),
         };
         assert!(!matches!(l, ExprDef::LitSymbol(_)), "left should be Lit(180), got {l:?}");
         assert!(!matches!(r, ExprDef::LitSymbol(_)), "\"degrees\" must resolve as unit, got {r:?}");
@@ -1534,11 +1655,14 @@ mod tests {
         let resolved = resolve::resolve(root, &reg).unwrap();
         let simplified = cas::simplify_numeric(resolved, &reg, &sym_reg).unwrap();
         let arg = match &simplified {
-            ExprDef::Call(_, args) => match args.first() {
-                Some(CallArg::Positional(e)) => e.as_ref(),
-                _ => panic!("expected one positional arg"),
+            ExprDef::Block(v) if v.len() == 1 => match &v[0] {
+                ExprDef::Call(_, args) => match args.first() {
+                    Some(CallArg::Positional(e)) => e.as_ref(),
+                    _ => panic!("expected one positional arg"),
+                },
+                _ => panic!("expected Block([Call]), got {simplified:?}"),
             },
-            _ => panic!("expected Call, got {simplified:?}"),
+            _ => panic!("expected Block([Call]), got {simplified:?}"),
         };
         if let ExprDef::Lit(q) = arg {
             let rad = Unit::from_base_unit("rad");

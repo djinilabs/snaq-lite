@@ -35,6 +35,8 @@ pub enum Tok {
     RBracket,
     /// Postfix transpose: `'` (e.g. [1,2,3]')
     Apostrophe,
+    /// Variable binding: `=` (e.g. x = 10). Distinct from comparison `==`.
+    Assign,
     /// Comparison: `==`, `!=`, `<`, `<=`, `>`, `>=`
     Eq,
     Ne,
@@ -255,6 +257,7 @@ impl<'input> Iterator for Lexer<'input> {
             ':' => Tok::Colon,
             '\'' => Tok::Apostrophe,
             '~' => Tok::Tilde,
+            '=' => Tok::Assign,
             '<' => Tok::Lt,
             '>' => Tok::Gt,
             'a'..='z' | 'A'..='Z' | '_' => {

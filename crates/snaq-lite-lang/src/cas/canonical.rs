@@ -130,6 +130,7 @@ pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
             Box::new(rank(pool, *r)),
         ),
         ExprNode::Block(ids) => Rank::Block(ids.iter().map(|&i| rank(pool, i)).collect()),
+        ExprNode::Binding(_, rhs) => rank(pool, *rhs),
     }
 }
 
@@ -287,6 +288,10 @@ fn canonicalize_rec(
                 .map(|&id| canonicalize_rec(pool, out, id))
                 .collect();
             out.intern(ExprNode::Block(new_ids))
+        }
+        ExprNode::Binding(name, rhs) => {
+            let new_rhs = canonicalize_rec(pool, out, *rhs);
+            out.intern(ExprNode::Binding(name.clone(), new_rhs))
         }
     }
 }

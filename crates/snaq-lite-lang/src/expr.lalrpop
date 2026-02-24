@@ -31,6 +31,7 @@ extern {
         "," => Tok::Comma,
         ":" => Tok::Colon,
         "'" => Tok::Apostrophe,
+        "=" => Tok::Assign,
         "==" => Tok::Eq,
         "!=" => Tok::Ne,
         "<" => Tok::Lt,
@@ -53,10 +54,17 @@ pub Program: ExprDef = {
     <list:ExprList> => ExprDef::Block(list),
 };
 
-// Expression list for program root and block bodies: zero or more Expr, separated by ";" or Newline.
+// Block item: binding (Ident = BlockItem, allows chained A = B = 42) or expression. Single "=" is Assign, not "==" (Eq).
+// RHS of "=" is BlockItem so that assignment is right-associative: A = B = 42 => A = (B = 42).
+BlockItem: ExprDef = {
+    <name:Ident> "=" <rhs:BlockItem> => ExprDef::Binding(name, Box::new(rhs)),
+    <e:Expr> => e,
+};
+
+// Expression list for program root and block bodies: zero or more BlockItem, separated by ";" or Newline.
 ExprList: Vec<ExprDef> = {
     => vec![],
-    <first:Expr> <rest:ExprListRest> => {
+    <first:BlockItem> <rest:ExprListRest> => {
         let mut v = vec![first];
         v.extend(rest);
         v
@@ -65,12 +73,12 @@ ExprList: Vec<ExprDef> = {
 
 ExprListRest: Vec<ExprDef> = {
     => vec![],
-    ";" <e:Expr> <rest:ExprListRest> => {
+    ";" <e:BlockItem> <rest:ExprListRest> => {
         let mut r = rest;
         r.insert(0, e);
         r
     },
-    Newline <e:Expr> <rest:ExprListRest> => {
+    Newline <e:BlockItem> <rest:ExprListRest> => {
         let mut r = rest;
         r.insert(0, e);
         r

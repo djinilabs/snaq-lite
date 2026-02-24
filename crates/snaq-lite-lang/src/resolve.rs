@@ -25,14 +25,14 @@ pub fn resolve(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, RunErro
                 ))
             }
         }
-        ExprDef::LitUnit(ref name) => {
-            if let Some(unit) = registry.get_unit_with_prefix(name) {
-                Ok(ExprDef::Lit(Quantity::new(1.0, unit)))
-            } else {
-                Ok(ExprDef::LitSymbol(name.clone()))
-            }
-        }
+        // Bare identifier: keep as LitSymbol so evaluation can resolve scope-first, then unit, then symbolic.
+        // This allows variables to shadow unit names (e.g. DEF=3; DEF+2 works when DEF would otherwise match "da"+"F").
+        ExprDef::LitUnit(ref name) => Ok(ExprDef::LitSymbol(name.clone())),
         ExprDef::Lit(_) | ExprDef::LitFuzzyBool(_) | ExprDef::LitSymbol(_) => Ok(def),
+        ExprDef::Binding(name, rhs) => {
+            let rhs = resolve(*rhs, registry)?;
+            Ok(ExprDef::Binding(name, Box::new(rhs)))
+        }
         ExprDef::Add(l, r) => {
             let l = resolve(*l, registry)?;
             let r = resolve(*r, registry)?;

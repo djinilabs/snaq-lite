@@ -36,7 +36,7 @@ pub fn simplify_numeric(
     unit_registry: &UnitRegistry,
     symbol_registry: &SymbolRegistry,
 ) -> Result<ExprDef, RunError> {
-    let def = substitute_symbols(def, symbol_registry)?;
+    let def = substitute_symbols(def, symbol_registry, unit_registry)?;
     let mut pool = ExprInterner::new();
     let id = expr_def_to_interned(&def, &mut pool);
     let (cpool, croot) = canonicalize(&pool, id);

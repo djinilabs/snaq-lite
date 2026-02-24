@@ -41,6 +41,8 @@ pub enum ExprNode {
     WithPrecision(ExprId, ExprId),
     /// Block: sequence of expressions; value is the last, or undefined if empty. Order preserved in CAS.
     Block(Vec<ExprId>),
+    /// Variable binding (in block context): name = value_expr. Pass-through in CAS.
+    Binding(String, ExprId),
 }
 
 /// Central cache: same structure => same ExprId. New nodes are interned on construction.

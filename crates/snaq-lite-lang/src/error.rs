@@ -32,6 +32,8 @@ pub enum RunError {
     PrecisionMustBePositive,
     /// Result is undefined (e.g. empty block or empty program); cannot convert to quantity.
     UndefinedResult,
+    /// Variable binding RHS cannot be stored in scope (e.g. symbolic or vector in v1).
+    BindingValueNotSupported(String),
 }
 
 /// Parse error for expression strings.
@@ -109,6 +111,9 @@ impl std::fmt::Display for RunError {
             }
             RunError::UndefinedResult => {
                 write!(f, "result is undefined (e.g. empty block), cannot convert to quantity")
+            }
+            RunError::BindingValueNotSupported(msg) => {
+                write!(f, "variable binding: {msg}")
             }
         }
     }

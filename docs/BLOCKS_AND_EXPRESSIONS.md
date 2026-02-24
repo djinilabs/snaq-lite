@@ -50,5 +50,5 @@ When the result is **undefined** (e.g. empty program or empty block):
 ## Summary
 
 - **Separators:** newline or `;` between expressions; blank lines allowed.
-- **Program / block result:** last expression value, or **undefined** if there are no expressions.
+- **Program / block result:** last expression value, or the last binding’s value (RHS) if the last item is an assignment, or **undefined** if the block is empty.
 - **Blocks:** `{ ... }`; same rules inside; block is an expression.

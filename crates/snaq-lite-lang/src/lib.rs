@@ -12,6 +12,7 @@ pub mod prefix;
 pub mod quantity;
 pub mod queries;
 pub mod resolve;
+pub mod scope;
 pub mod symbol_registry;
 pub mod symbolic;
 pub mod unit;
@@ -23,6 +24,7 @@ pub use error::{ParseError, RunError};
 pub use quantity::{Quantity, QuantityError, SnaqNumber};
 pub use unit::Unit;
 pub use ir::{ExprDef, Expression, NumLiteral, ProgramDef};
+pub use scope::{empty_scope, Env, Scope, StoredValue};
 pub use parser::parse;
 pub use queries::{program, set_eval_registry, value, vector_into_stream};
 pub use symbol_registry::SymbolRegistry;
@@ -56,7 +58,7 @@ pub fn run_with_registry(input: &str, registry: &UnitRegistry) -> Result<Value, 
     let db = salsa::DatabaseImpl::new();
     let program_def = ProgramDef::new(&db, root_def);
     let root = program(&db, program_def);
-    value(&db, root)
+    value(&db, empty_scope(&db), root)
 }
 
 /// Recursively format a value for display. Vectors are shown as `[e1, e2, ...]` with nested
@@ -104,7 +106,7 @@ pub fn run_with_registry_format(input: &str, registry: &UnitRegistry) -> Result<
     let db = salsa::DatabaseImpl::new();
     let program_def = ProgramDef::new(&db, root_def);
     let root = program(&db, program_def);
-    let val = value(&db, root)?;
+    let val = value(&db, empty_scope(&db), root)?;
     format_value_for_display(&db, &val)
 }
 
@@ -128,7 +130,7 @@ pub fn run_numeric_with_registry(
     let db = salsa::DatabaseImpl::new();
     let program_def = ProgramDef::new(&db, root_def);
     let root = program(&db, program_def);
-    let v = value(&db, root)?;
+    let v = value(&db, empty_scope(&db), root)?;
     v.to_quantity(symbol_registry)
 }
 
@@ -740,7 +742,7 @@ mod tests {
         let db = DatabaseImpl::new();
         let program_def = ProgramDef::new(&db, root_def);
         let root = program(&db, program_def);
-        let v = value(&db, root).unwrap();
+        let v = value(&db, empty_scope(&db), root).unwrap();
         let Value::Vector(w) = v else { panic!("expected vector") };
         let stream = vector_into_stream(&db, w.inner.clone());
         let results: Vec<_> = futures::executor::block_on(async move {
@@ -770,7 +772,7 @@ mod tests {
         let db = DatabaseImpl::new();
         let program_def = ProgramDef::new(&db, root_def);
         let root = program(&db, program_def);
-        let v = value(&db, root).unwrap();
+        let v = value(&db, empty_scope(&db), root).unwrap();
         let Value::Vector(w) = v else { panic!("expected vector") };
         let stream = vector_into_stream(&db, w.inner.clone());
         let results: Vec<_> = futures::executor::block_on(async move {
@@ -902,6 +904,142 @@ mod tests {
     fn run_empty_returns_undefined() {
         let v = run("").unwrap();
         assert!(matches!(v, Value::Undefined));
+    }
+
+    #[test]
+    fn parse_binding() {
+        let def = parse("x = 10").unwrap();
+        let ExprDef::Block(items) = def else { panic!("expected block") };
+        assert_eq!(items.len(), 1);
+        let ExprDef::Binding(name, rhs) = &items[0] else { panic!("expected binding") };
+        assert_eq!(name, "x");
+        let ExprDef::LitScalar(_) = rhs.as_ref() else { panic!("expected lit in rhs") };
+    }
+
+    #[test]
+    fn parse_chained_assignment() {
+        let def = parse("A = B = 42").unwrap();
+        let ExprDef::Block(items) = def else { panic!("expected block") };
+        assert_eq!(items.len(), 1);
+        let ExprDef::Binding(a, rhs) = &items[0] else { panic!("expected binding") };
+        assert_eq!(a, "A");
+        let ExprDef::Binding(b, inner) = rhs.as_ref() else { panic!("expected inner binding") };
+        assert_eq!(b, "B");
+        let ExprDef::LitScalar(_) = inner.as_ref() else { panic!("expected lit in innermost rhs") };
+    }
+
+    #[test]
+    fn run_variable_shadows_unit_def() {
+        // "DEF" would parse as unit (da+F = decafarad); with scope-first, variable DEF wins.
+        let v = run("DEF=3;DEF + 2").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric, got {:?}", v) };
+        assert!((q.value() - 5.0).abs() < 1e-10, "DEF=3; DEF+2 => 5");
+    }
+
+    #[test]
+    fn run_numeric_variable_shadowing_unit_uses_scope() {
+        // substitute_symbols leaves names bound in the program as LitSymbol; value() resolves from scope.
+        // So run_numeric("DEF=3; DEF+2") yields 5 (variable DEF takes precedence over unit decafarad).
+        let q = run_numeric("DEF=3; DEF + 2").expect("run_numeric(DEF=3; DEF+2) should succeed");
+        assert!((q.value() - 5.0).abs() < 1e-10, "DEF=3; DEF+2 => 5");
+    }
+
+    #[test]
+    fn run_numeric_nested_block_shadowing() {
+        // Bound names are collected from the whole tree; inner block binding shadows outer. value() resolves from scope.
+        let q = run_numeric("m = 1; { m = 2; m }").expect("run_numeric(m=1; { m=2; m }) should succeed");
+        assert!((q.value() - 2.0).abs() < 1e-10, "inner m shadows => 2");
+    }
+
+    #[test]
+    fn run_numeric_unbound_unit_name_still_errors() {
+        // Without a binding, DEF is substituted as unit (decafarad); 2 + 1 DEF => dimension mismatch.
+        let e = run_numeric("DEF + 2");
+        assert!(e.is_err(), "run_numeric(DEF+2) without binding should error: {:?}", e);
+        let err = e.unwrap_err();
+        assert!(
+            matches!(err, RunError::DimensionMismatch { .. } | RunError::SymbolHasNoValue(_)),
+            "expected DimensionMismatch or SymbolHasNoValue, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn run_chained_assignment() {
+        let v = run("x = y = 42").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric, got {:?}", v) };
+        assert!((q.value() - 42.0).abs() < 1e-10);
+        let v = run("x = y = 42\nx + y").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric, got {:?}", v) };
+        assert!((q.value() - 84.0).abs() < 1e-10, "x and y both 42 => x + y = 84");
+    }
+
+    #[test]
+    fn run_binding_simple() {
+        // x = 10; x + 1 => 11
+        let v = run("x = 10\nx + 1").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric, got {:?}", v) };
+        assert!((q.value() - 11.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_binding_block() {
+        // { a = 2; b = 3; a * b } => 6
+        let v = run("{ a = 2; b = 3; a * b }").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric, got {:?}", v) };
+        assert!((q.value() - 6.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_binding_shadowing() {
+        // x = 1; { x = 2; x } => 2 (inner x shadows)
+        let v = run("x = 1\n{ x = 2; x }").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric, got {:?}", v) };
+        assert!((q.value() - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_block_only_bindings_returns_last_rhs() {
+        // Assignment is an expression: value is the RHS. Block of only bindings => last binding's value.
+        let v = run("x = 1\ny = 2").unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric (last RHS), got {:?}", v) };
+        assert!((q.value() - 2.0).abs() < 1e-10, "last binding y = 2 => 2");
+    }
+
+    #[test]
+    fn run_binding_through_full_pipeline() {
+        // Parse → resolve → simplify_symbolic → program → value: bindings preserved and evaluated
+        let registry = default_si_registry();
+        let root_def = parse("x = 10\nx + 1").unwrap();
+        let root_def = resolve::resolve(root_def, &registry).unwrap();
+        let root_def = cas::simplify_symbolic(root_def, &registry).unwrap();
+        set_eval_registry(registry.clone());
+        let db = salsa::DatabaseImpl::new();
+        let program_def = ProgramDef::new(&db, root_def);
+        let root = program(&db, program_def);
+        let v = value(&db, empty_scope(&db), root).unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric, got {:?}", v) };
+        assert!((q.value() - 11.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_binding_symbolic_returns_binding_value_not_supported() {
+        let err = run("x = 1 + pi").unwrap_err();
+        assert!(
+            matches!(err, RunError::BindingValueNotSupported(_)),
+            "binding symbolic value should return BindingValueNotSupported, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn run_binding_vector_returns_binding_value_not_supported() {
+        let err = run("x = [1, 2, 3]").unwrap_err();
+        assert!(
+            matches!(err, RunError::BindingValueNotSupported(_)),
+            "binding vector should return BindingValueNotSupported, got {:?}",
+            err
+        );
     }
 
     #[test]
@@ -1562,7 +1700,7 @@ mod tests {
         let db = DatabaseImpl::new();
         let program_def = ProgramDef::new(&db, root_def);
         let root = program(&db, program_def);
-        let v = value(&db, root).unwrap();
+        let v = value(&db, empty_scope(&db), root).unwrap();
         let lv = match &v {
             Value::Vector(v) => v.inner.clone(),
             _ => panic!("expected vector"),
@@ -1629,21 +1767,11 @@ mod tests {
 
     #[test]
     fn resolve_180_times_degrees_as_unit() {
-        // "degrees" must resolve as unit so 180 * degrees = 180 degree
-        use crate::ir::ExprDef;
-        let reg = default_si_registry();
-        let root = parse("180 * degrees").unwrap();
-        let resolved = resolve::resolve(root, &reg).unwrap();
-        // Root is Block([Mul(...)]); Mul should be Mul(Lit(180), Lit(1 degree)), not LitSymbol("degrees")
-        let (l, r) = match &resolved {
-            ExprDef::Block(v) if v.len() == 1 => match &v[0] {
-                ExprDef::Mul(a, b) => (a.as_ref(), b.as_ref()),
-                _ => panic!("expected Block([Mul]), got {resolved:?}"),
-            },
-            _ => panic!("expected Block([Mul]), got {resolved:?}"),
-        };
-        assert!(!matches!(l, ExprDef::LitSymbol(_)), "left should be Lit(180), got {l:?}");
-        assert!(!matches!(r, ExprDef::LitSymbol(_)), "\"degrees\" must resolve as unit, got {r:?}");
+        // Identifiers stay as LitSymbol after resolve; unit lookup happens at eval/substitute time.
+        // So 180 * degrees still evaluates to 180 degree via substitute_symbols (unit registry).
+        let q = run_numeric("180 * degrees").unwrap();
+        assert!((q.value() - 180.0).abs() < 1e-10);
+        assert_eq!(q.unit().iter().next().map(|f| f.unit_name.as_str()), Some("degree"));
     }
 
     #[test]
@@ -1786,7 +1914,7 @@ mod tests {
         let program_def = ProgramDef::new(&db, resolved);
         let root = program(&db, program_def);
         assert_eq!(
-            value(&db, root).unwrap().to_quantity(&sym).unwrap().value(),
+            value(&db, empty_scope(&db), root).unwrap().to_quantity(&sym).unwrap().value(),
             3.0
         );
         let parsed2 = parse("10 + 2").unwrap();
@@ -1794,7 +1922,7 @@ mod tests {
         let program_def2 = ProgramDef::new(&db, resolved2);
         let root2 = program(&db, program_def2);
         assert_eq!(
-            value(&db, root2).unwrap().to_quantity(&sym).unwrap().value(),
+            value(&db, empty_scope(&db), root2).unwrap().to_quantity(&sym).unwrap().value(),
             12.0
         );
     }

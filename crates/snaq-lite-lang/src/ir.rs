@@ -102,6 +102,8 @@ pub enum ExprDef {
     WithPrecision(Box<ExprDef>, Box<ExprDef>),
     /// Block: sequence of expressions; value is the last expression, or undefined if empty.
     Block(Vec<ExprDef>),
+    /// Variable binding (in block context): name = value_expr. Extends scope for subsequent items.
+    Binding(String, Box<ExprDef>),
 }
 
 /// Input that holds the root expression definition.
@@ -149,4 +151,6 @@ pub enum ExprData<'db> {
     WithPrecision(Expression<'db>, Expression<'db>),
     /// Block: sequence of expressions; value is the last, or undefined if empty.
     Block(Vec<Expression<'db>>),
+    /// Variable binding (in block context): name = value_expr.
+    Binding(String, Expression<'db>),
 }

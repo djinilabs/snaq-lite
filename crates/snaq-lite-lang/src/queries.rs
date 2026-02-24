@@ -7,6 +7,7 @@
 use crate::error::RunError;
 use crate::functions;
 use crate::ir::{CallArg, ExprData, ExprDef, Expression, ProgramDef};
+use crate::scope::{Scope, StoredValue};
 use crate::quantity::Quantity;
 use crate::stat_compare::{
     comparison_probability, probability_to_fuzzy_bool, ComparisonKind, CONFIDENCE_THRESHOLD,
@@ -709,82 +710,120 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
                 .collect();
             ExprData::Block(exprs)
         }
+        ExprDef::Binding(name, rhs) => {
+            let rhs_expr = build_expression(db, *rhs);
+            ExprData::Binding(name, rhs_expr)
+        }
     };
     Expression::new(db, data)
 }
 
+/// Evaluate a (possibly chained) binding and return the value and the scope after all bindings in the chain.
+/// For non-binding expressions, returns (value, scope unchanged).
+fn eval_binding_chain<'db>(
+    db: &'db dyn salsa::Database,
+    scope: Scope<'db>,
+    expr: Expression<'db>,
+) -> Result<(Value, Scope<'db>), RunError> {
+    match expr.data(db) {
+        ExprData::Binding(name, rhs) => {
+            let (v, inner_scope) = eval_binding_chain(db, scope, *rhs)?;
+            let stored = StoredValue::from_value(&v)?;
+            let new_env = inner_scope.env(db).clone().extend(name.clone(), stored);
+            let new_scope = Scope::new(db, new_env);
+            Ok((v, new_scope))
+        }
+        _ => {
+            let v = value(db, scope, expr)?;
+            Ok((v, scope))
+        }
+    }
+}
+
 /// Evaluate an expression to a Value (Numeric or Symbolic). Uses the registry set by run() (thread-local).
-///
-/// Memoized per `expr`; when any child's value changes,
-/// only dependent entries are recomputed.
+/// Scope is passed so variable lookups and block bindings are memoized per (scope, expr).
 #[salsa::tracked]
-pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, RunError> {
+pub fn value<'db>(
+    db: &'db dyn salsa::Database,
+    scope: Scope<'db>,
+    expr: Expression<'db>,
+) -> Result<Value, RunError> {
     let data = expr.data(db);
+    let env = scope.env(db);
     with_registry(|registry| match data {
         ExprData::Lit(q) => Ok(Value::Numeric(q.clone())),
         ExprData::LitFuzzyBool(f) => Ok(Value::FuzzyBool(f.clone())),
-        ExprData::LitSymbol(name) => Ok(Value::Symbolic(SymbolicQuantity::new(
-            SymbolicExpr::symbol(name),
-            Unit::scalar(),
-        ))),
+        ExprData::LitSymbol(name) => {
+            // Scope first (variables shadow units), then unit (1 in that unit), then symbolic.
+            if let Some(stored) = env.get(name) {
+                Ok(stored.to_value())
+            } else if let Some(unit) = registry.get_unit_with_prefix(name) {
+                Ok(Value::Numeric(Quantity::new(1.0, unit)))
+            } else {
+                Ok(Value::Symbolic(SymbolicQuantity::new(
+                    SymbolicExpr::symbol(name.clone()),
+                    Unit::scalar(),
+                )))
+            }
+        }
         ExprData::Add(l, r) => {
-            let left = value(db, *l)?;
-            let right = value(db, *r)?;
+            let left = value(db, scope, *l)?;
+            let right = value(db, scope, *r)?;
             add_values(&left, &right, registry, Some(db))
         }
         ExprData::Sub(l, r) => {
-            let left = value(db, *l)?;
-            let right = value(db, *r)?;
+            let left = value(db, scope, *l)?;
+            let right = value(db, scope, *r)?;
             sub_values(&left, &right, registry, Some(db))
         }
         ExprData::Mul(l, r) => {
-            let left = value(db, *l)?;
-            let right = value(db, *r)?;
+            let left = value(db, scope, *l)?;
+            let right = value(db, scope, *r)?;
             mul_values(&left, &right, registry, Some(db))
         }
         ExprData::Div(l, r) => {
-            let left = value(db, *l)?;
-            let right = value(db, *r)?;
+            let left = value(db, scope, *l)?;
+            let right = value(db, scope, *r)?;
             div_values(&left, &right, registry, Some(db))
         }
         ExprData::Eq(l, r) => {
-            let left = value(db, *l)?;
-            let right = value(db, *r)?;
+            let left = value(db, scope, *l)?;
+            let right = value(db, scope, *r)?;
             cmp_values(CmpOp::Eq, &left, &right, registry, Some(db))
         }
         ExprData::Ne(l, r) => {
-            let left = value(db, *l)?;
-            let right = value(db, *r)?;
+            let left = value(db, scope, *l)?;
+            let right = value(db, scope, *r)?;
             cmp_values(CmpOp::Ne, &left, &right, registry, Some(db))
         }
         ExprData::Lt(l, r) => {
-            let left = value(db, *l)?;
-            let right = value(db, *r)?;
+            let left = value(db, scope, *l)?;
+            let right = value(db, scope, *r)?;
             cmp_values(CmpOp::Lt, &left, &right, registry, Some(db))
         }
         ExprData::Le(l, r) => {
-            let left = value(db, *l)?;
-            let right = value(db, *r)?;
+            let left = value(db, scope, *l)?;
+            let right = value(db, scope, *r)?;
             cmp_values(CmpOp::Le, &left, &right, registry, Some(db))
         }
         ExprData::Gt(l, r) => {
-            let left = value(db, *l)?;
-            let right = value(db, *r)?;
+            let left = value(db, scope, *l)?;
+            let right = value(db, scope, *r)?;
             cmp_values(CmpOp::Gt, &left, &right, registry, Some(db))
         }
         ExprData::Ge(l, r) => {
-            let left = value(db, *l)?;
-            let right = value(db, *r)?;
+            let left = value(db, scope, *l)?;
+            let right = value(db, scope, *r)?;
             cmp_values(CmpOp::Ge, &left, &right, registry, Some(db))
         }
         ExprData::Neg(inner) => {
-            let v = value(db, *inner)?;
+            let v = value(db, scope, *inner)?;
             neg_value(&v)
         }
-        ExprData::Call(name, args) => eval_call(db, name, args, registry),
+        ExprData::Call(name, args) => eval_call(db, scope, name, args, registry),
         ExprData::As(left, right) => {
-            let left_val = value(db, *left)?;
-            let right_val = value(db, *right)?;
+            let left_val = value(db, scope, *left)?;
+            let right_val = value(db, scope, *right)?;
             let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
             let target_quantity = right_val.to_quantity(&sym_reg).map_err(|_| {
                 RunError::UnknownUnit(
@@ -824,22 +863,22 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
             // creating tracked structs from outside). Store results for lazy streaming.
             let results: Vec<Result<Option<Value>, RunError>> = exprs
                 .iter()
-                .map(|e| value(db, *e).map(Some))
+                .map(|e| value(db, scope, *e).map(Some))
                 .collect();
             Ok(Value::Vector(VectorValue::column(LazyVector::from_evaluated(
                 results,
             ))))
         }
         ExprData::Transpose(inner) => {
-            let v = value(db, *inner)?;
+            let v = value(db, scope, *inner)?;
             match v {
                 Value::Vector(v) => Ok(Value::Vector(v.transpose())),
                 _ => Err(RunError::ExpectedVector),
             }
         }
         ExprData::WithPrecision(left, right) => {
-            let left_val = value(db, *left)?;
-            let right_val = value(db, *right)?;
+            let left_val = value(db, scope, *left)?;
+            let right_val = value(db, scope, *right)?;
             let left_q = match &left_val {
                 Value::Numeric(q) => q.clone(),
                 _ => return Err(RunError::TildeRequiresNumeric),
@@ -858,17 +897,39 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
                 left_q.unit().clone(),
             )))
         }
-        ExprData::If(cond_expr, then_expr, else_expr) => eval_if(db, *cond_expr, *then_expr, *else_expr, registry),
+        ExprData::If(cond_expr, then_expr, else_expr) => {
+            eval_if(db, scope, *cond_expr, *then_expr, *else_expr, registry)
+        }
         ExprData::Block(exprs) => {
             if exprs.is_empty() {
                 Ok(Value::Undefined)
             } else {
-                let mut last = value(db, exprs[0])?;
-                for e in &exprs[1..] {
-                    last = value(db, *e)?;
+                let mut current_scope = scope;
+                let n = exprs.len();
+                for (i, e) in exprs.iter().enumerate() {
+                    match e.data(db) {
+                        ExprData::Binding(_, _) => {
+                            let (v, new_scope) =
+                                eval_binding_chain(db, current_scope, *e)?;
+                            current_scope = new_scope;
+                            if i == n - 1 {
+                                return Ok(v);
+                            }
+                        }
+                        _ => {
+                            let val = value(db, current_scope, *e)?;
+                            if i == n - 1 {
+                                return Ok(val);
+                            }
+                        }
+                    }
                 }
-                Ok(last)
+                Ok(Value::Undefined)
             }
+        }
+        ExprData::Binding(_, _) => {
+            let (v, _) = eval_binding_chain(db, scope, expr)?;
+            Ok(v)
         }
     })
 }
@@ -959,6 +1020,10 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
                 .map(|e| expression_to_def(db, *e))
                 .collect(),
         ),
+        ExprData::Binding(name, rhs) => ExprDef::Binding(
+            name.clone(),
+            Box::new(expression_to_def(db, *rhs)),
+        ),
     }
 }
 
@@ -966,6 +1031,7 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
 /// Numeric blend converts both branches to a common unit before blending mean and variance.
 fn eval_if(
     db: &dyn salsa::Database,
+    scope: Scope,
     cond_expr: Expression<'_>,
     then_expr: Expression<'_>,
     else_expr: Expression<'_>,
@@ -974,21 +1040,21 @@ fn eval_if(
     use crate::fuzzy::FuzzyBool;
     use crate::quantity::SnaqNumber;
 
-    let cond_val = value(db, cond_expr)?;
+    let cond_val = value(db, scope, cond_expr)?;
     let fuzzy = match &cond_val {
         Value::FuzzyBool(f) => f.clone(),
         _ => return Err(RunError::ExpectedCondition),
     };
 
     match &fuzzy {
-        FuzzyBool::True => return value(db, then_expr),
-        FuzzyBool::False => return value(db, else_expr),
+        FuzzyBool::True => return value(db, scope, then_expr),
+        FuzzyBool::False => return value(db, scope, else_expr),
         FuzzyBool::Uncertain(_) => {}
     }
 
     let p = fuzzy.uncertain_probability().unwrap();
-    let then_val = value(db, then_expr)?;
-    let else_val = value(db, else_expr)?;
+    let then_val = value(db, scope, then_expr)?;
+    let else_val = value(db, scope, else_expr)?;
 
     if matches!(&then_val, Value::FuzzyBool(_) | Value::Vector(_))
         || matches!(&else_val, Value::FuzzyBool(_) | Value::Vector(_))
@@ -1059,6 +1125,7 @@ fn eval_if(
 /// Bind call args (positional + named) to param names and evaluate.
 fn eval_call(
     db: &dyn salsa::Database,
+    scope: Scope,
     name: &str,
     args: &[(Option<String>, Expression<'_>)],
     registry: &UnitRegistry,
@@ -1067,7 +1134,7 @@ fn eval_call(
         .ok_or_else(|| RunError::UnknownFunction(name.to_string()))?;
     let mut bound: HashMap<String, Value> = HashMap::new();
     for (i, (opt_name, expr)) in args.iter().enumerate() {
-        let v = value(db, *expr)?;
+        let v = value(db, scope, *expr)?;
         let param = match opt_name {
             Some(n) => {
                 if !param_names.contains(&n.as_str()) {

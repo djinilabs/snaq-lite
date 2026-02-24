@@ -194,6 +194,10 @@ fn rewrite_rec(
                 .collect::<Result<Vec<_>, RunError>>()?;
             Ok(out.intern(ExprNode::Block(new_ids)))
         }
+        ExprNode::Binding(name, rhs) => {
+            let new_rhs = rewrite_rec(pool, out, *rhs, registry)?;
+            Ok(out.intern(ExprNode::Binding(name.clone(), new_rhs)))
+        }
     }
 }
 

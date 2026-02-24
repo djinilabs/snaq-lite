@@ -100,6 +100,6 @@ pub struct Scope {
 }
 
 /// Canonical empty scope (all callers get the same interned id).
-pub fn empty_scope(db: &dyn salsa::Database) -> Scope {
+pub fn empty_scope(db: &dyn salsa::Database) -> Scope<'_> {
     Scope::new(db, Env::empty())
 }

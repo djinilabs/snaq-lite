@@ -3,19 +3,24 @@
 
 use crate::error::RunError;
 use crate::ir::{CallArg, ExprDef};
-use crate::quantity::Quantity;
+use crate::quantity::{Quantity, SnaqNumber};
+use crate::unit::Unit;
 use crate::unit_registry::UnitRegistry;
 
 /// Convert parsed ExprDef (with LitScalar, LitWithUnit, LitUnit) to fully resolved ExprDef (Lit(Quantity), LitSymbol, or compound).
 pub fn resolve(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, RunError> {
     match def {
-        ExprDef::LitScalar(n) => Ok(ExprDef::Lit(Quantity::from_scalar(n.0))),
+        ExprDef::LitScalar(n) => Ok(ExprDef::Lit(Quantity::with_number(
+            SnaqNumber::new(n.value_f64(), n.implicit_variance()),
+            Unit::scalar(),
+        ))),
         ExprDef::LitWithUnit(n, ref name) => {
+            let number = SnaqNumber::new(n.value_f64(), n.implicit_variance());
             if let Some(unit) = registry.get_unit_with_prefix(name) {
-                Ok(ExprDef::Lit(Quantity::new(n.0, unit)))
+                Ok(ExprDef::Lit(Quantity::with_number(number, unit)))
             } else {
                 Ok(ExprDef::Mul(
-                    Box::new(ExprDef::Lit(Quantity::from_scalar(n.0))),
+                    Box::new(ExprDef::Lit(Quantity::with_number(number, Unit::scalar()))),
                     Box::new(ExprDef::LitSymbol(name.clone())),
                 ))
             }
@@ -115,6 +120,11 @@ pub fn resolve(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, RunErro
             let then_b = resolve(*then_b, registry)?;
             let else_b = resolve(*else_b, registry)?;
             Ok(ExprDef::If(Box::new(cond), Box::new(then_b), Box::new(else_b)))
+        }
+        ExprDef::WithPrecision(l, r) => {
+            let l = resolve(*l, registry)?;
+            let r = resolve(*r, registry)?;
+            Ok(ExprDef::WithPrecision(Box::new(l), Box::new(r)))
         }
     }
 }

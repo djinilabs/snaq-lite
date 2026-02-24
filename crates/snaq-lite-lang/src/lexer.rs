@@ -1,6 +1,7 @@
 //! Custom lexer: produces Ident or FuncIdent (identifier followed by "(") so the grammar
 //! can distinguish sin(1) from sin as a symbol.
 
+use crate::ir::NumLiteral;
 use ordered_float::OrderedFloat;
 use std::str::FromStr;
 
@@ -8,7 +9,7 @@ pub type Spanned<Tok, Loc, Error> = Result<(Loc, Tok, Loc), Error>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tok {
-    Num(OrderedFloat<f64>),
+    Num(NumLiteral),
     Ident(String),
     /// Identifier that is immediately followed by "(" (function call).
     FuncIdent(String),
@@ -41,6 +42,8 @@ pub enum Tok {
     Le,
     Gt,
     Ge,
+    /// Explicit precision/error bound: `~` (e.g. 10 ~ 2 => value 10 with ±2 error).
+    Tilde,
 }
 
 #[derive(Clone, Debug)]
@@ -107,7 +110,7 @@ impl<'input> Lexer<'input> {
         }
     }
 
-    fn take_num(&mut self) -> Option<Result<OrderedFloat<f64>, LexicalError>> {
+    fn take_num(&mut self) -> Option<Result<NumLiteral, LexicalError>> {
         let rest = &self.input[self.pos..];
         let mut end = 0;
         let bytes = rest.as_bytes();
@@ -146,11 +149,14 @@ impl<'input> Lexer<'input> {
                 end = exp_start; // no exponent, rewind
             }
         }
-        let s = &rest[..end];
+        let raw = rest[..end].to_string();
         self.pos += end;
-        match f64::from_str(s) {
-            Ok(v) => Some(Ok(OrderedFloat::from(v))),
-            Err(_) => Some(Err(LexicalError::InvalidFloat(s.to_string()))),
+        match f64::from_str(&raw) {
+            Ok(v) => Some(Ok(NumLiteral {
+                raw,
+                value: OrderedFloat::from(v),
+            })),
+            Err(_) => Some(Err(LexicalError::InvalidFloat(raw))),
         }
     }
 }
@@ -225,6 +231,7 @@ impl<'input> Iterator for Lexer<'input> {
             ',' => Tok::Comma,
             ':' => Tok::Colon,
             '\'' => Tok::Apostrophe,
+            '~' => Tok::Tilde,
             '<' => Tok::Lt,
             '>' => Tok::Gt,
             'a'..='z' | 'A'..='Z' | '_' => {
@@ -243,7 +250,7 @@ impl<'input> Iterator for Lexer<'input> {
             '0'..='9' | '.' => {
                 self.pos -= c.len_utf8();
                 match self.take_num()? {
-                    Ok(n) => Tok::Num(n),
+                    Ok(lit) => Tok::Num(lit),
                     Err(e) => return Some(Err(e)),
                 }
             }

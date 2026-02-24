@@ -37,6 +37,8 @@ pub enum ExprNode {
     Ge(ExprId, ExprId),
     /// Conditional: if condition then then_branch else else_branch.
     If(ExprId, ExprId, ExprId),
+    /// Explicit precision: left ~ right (variance = right.value()²).
+    WithPrecision(ExprId, ExprId),
 }
 
 /// Central cache: same structure => same ExprId. New nodes are interned on construction.

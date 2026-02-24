@@ -26,6 +26,10 @@ pub enum RunError {
     ExpectedCondition,
     /// Both branches of if/then/else must be numeric or symbolic (blendable); got boolean or vector.
     IfBranchTypeMismatch,
+    /// Both sides of ~ (explicit precision) must be numeric (not symbolic, boolean, or vector).
+    TildeRequiresNumeric,
+    /// Right-hand side of ~ (explicit precision) must be strictly positive.
+    PrecisionMustBePositive,
 }
 
 /// Parse error for expression strings.
@@ -94,6 +98,12 @@ impl std::fmt::Display for RunError {
             }
             RunError::IfBranchTypeMismatch => {
                 write!(f, "if branches must both be numeric or symbolic (cannot blend boolean or vector)")
+            }
+            RunError::TildeRequiresNumeric => {
+                write!(f, "both sides of ~ (explicit precision) must be numeric")
+            }
+            RunError::PrecisionMustBePositive => {
+                write!(f, "precision (right side of ~) must be strictly positive")
             }
         }
     }

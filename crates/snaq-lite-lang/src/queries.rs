@@ -697,6 +697,11 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
             let else_expr = build_expression(db, *else_b);
             ExprData::If(cond_expr, then_expr, else_expr)
         }
+        ExprDef::WithPrecision(l, r) => {
+            let left = build_expression(db, *l);
+            let right = build_expression(db, *r);
+            ExprData::WithPrecision(left, right)
+        }
     };
     Expression::new(db, data)
 }
@@ -824,6 +829,27 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
                 _ => Err(RunError::ExpectedVector),
             }
         }
+        ExprData::WithPrecision(left, right) => {
+            let left_val = value(db, *left)?;
+            let right_val = value(db, *right)?;
+            let left_q = match &left_val {
+                Value::Numeric(q) => q.clone(),
+                _ => return Err(RunError::TildeRequiresNumeric),
+            };
+            let right_central = match &right_val {
+                Value::Numeric(rq) => rq.value(),
+                _ => return Err(RunError::TildeRequiresNumeric),
+            };
+            if right_central <= 0.0 || !right_central.is_finite() {
+                return Err(RunError::PrecisionMustBePositive);
+            }
+            let variance = right_central * right_central;
+            let number = crate::quantity::SnaqNumber::new(left_q.value(), variance);
+            Ok(Value::Numeric(crate::quantity::Quantity::with_number(
+                number,
+                left_q.unit().clone(),
+            )))
+        }
         ExprData::If(cond_expr, then_expr, else_expr) => eval_if(db, *cond_expr, *then_expr, *else_expr, registry),
     })
 }
@@ -899,6 +925,10 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
                 .collect(),
         ),
         ExprData::Transpose(inner) => ExprDef::Transpose(Box::new(expression_to_def(db, *inner))),
+        ExprData::WithPrecision(l, r) => ExprDef::WithPrecision(
+            Box::new(expression_to_def(db, *l)),
+            Box::new(expression_to_def(db, *r)),
+        ),
         ExprData::If(c, t, e) => ExprDef::If(
             Box::new(expression_to_def(db, *c)),
             Box::new(expression_to_def(db, *t)),

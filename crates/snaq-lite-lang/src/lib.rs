@@ -22,7 +22,7 @@ pub mod vector;
 pub use error::{ParseError, RunError};
 pub use quantity::{Quantity, QuantityError, SnaqNumber};
 pub use unit::Unit;
-pub use ir::{ExprDef, Expression, ProgramDef};
+pub use ir::{ExprDef, Expression, NumLiteral, ProgramDef};
 pub use parser::parse;
 pub use queries::{program, set_eval_registry, value, vector_into_stream};
 pub use symbol_registry::SymbolRegistry;
@@ -36,6 +36,8 @@ pub use unit_registry::{default_si_registry, UnitRegistry};
 /// Supports float literals, quantity literals (e.g. `100 m`), symbols (e.g. `pi`, `π`, `e`),
 /// implicit multiplication, division as `/` or `per`, unit conversion with `as` (e.g. `10 km as m`),
 /// vector literals `[ expr, ... ]`, and postfix transpose `'` on vectors (e.g. `[1,2,3]'`).
+/// Numeric literals get implicit uncertainty from decimal places (e.g. `10.5` has variance 0.0025);
+/// use the tilde operator for explicit error: `value ~ error` (e.g. `10 ~ 2` gives mean 10, variance 4).
 /// Uses the default unit registry.
 pub fn run(input: &str) -> Result<Value, RunError> {
     run_with_registry(input, &default_si_registry())
@@ -141,25 +143,32 @@ pub fn run_scalar(input: &str) -> Result<f64, RunError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{CallArg, ExprDef};
-    use ordered_float::OrderedFloat;
+    use crate::ir::{CallArg, ExprDef, NumLiteral};
 
     fn lit_scalar(n: f64) -> ExprDef {
-        ExprDef::LitScalar(OrderedFloat::from(n))
+        ExprDef::LitScalar(NumLiteral::from_f64(n))
     }
 
     #[test]
     fn parse_lit() {
+        // Cases where parser raw matches from_f64
         assert_eq!(parse("1").unwrap(), lit_scalar(1.0));
         assert_eq!(parse("42").unwrap(), lit_scalar(42.0));
         assert_eq!(parse("0").unwrap(), lit_scalar(0.0));
         assert_eq!(parse("1.5").unwrap(), lit_scalar(1.5));
-        assert_eq!(parse(".5").unwrap(), lit_scalar(0.5));
-        assert_eq!(parse("2e1").unwrap(), lit_scalar(20.0));
-        assert_eq!(
-            parse("9223372036854775807").unwrap(),
-            lit_scalar(9223372036854775807.0)
-        );
+        // Parser preserves source form (".5", "2e1") so compare value only
+        match parse(".5").unwrap() {
+            ExprDef::LitScalar(n) => assert_eq!(n.value_f64(), 0.5),
+            _ => panic!("expected LitScalar"),
+        }
+        match parse("2e1").unwrap() {
+            ExprDef::LitScalar(n) => assert_eq!(n.value_f64(), 20.0),
+            _ => panic!("expected LitScalar"),
+        }
+        match parse("9223372036854775807").unwrap() {
+            ExprDef::LitScalar(n) => assert_eq!(n.value_f64(), 9223372036854775807.0),
+            _ => panic!("expected LitScalar"),
+        }
     }
 
     #[test]
@@ -231,7 +240,7 @@ mod tests {
         assert_eq!(
             parse("1 percent").unwrap(),
             ExprDef::Mul(
-                Box::new(ExprDef::LitScalar(OrderedFloat::from(1.0))),
+                Box::new(ExprDef::LitScalar(NumLiteral::from_f64(1.0))),
                 Box::new(ExprDef::LitUnit("percent".to_string()))
             )
         );
@@ -287,14 +296,14 @@ mod tests {
         assert_eq!(
             parse("100 m").unwrap(),
             ExprDef::Mul(
-                Box::new(ExprDef::LitScalar(OrderedFloat::from(100.0))),
+                Box::new(ExprDef::LitScalar(NumLiteral::from_f64(100.0))),
                 Box::new(ExprDef::LitUnit("m".to_string()))
             )
         );
         assert_eq!(
             parse("10 m").unwrap(),
             ExprDef::Mul(
-                Box::new(ExprDef::LitScalar(OrderedFloat::from(10.0))),
+                Box::new(ExprDef::LitScalar(NumLiteral::from_f64(10.0))),
                 Box::new(ExprDef::LitUnit("m".to_string()))
             )
         );
@@ -302,7 +311,7 @@ mod tests {
         assert_eq!(
             parse("1.5 * km").unwrap(),
             ExprDef::Mul(
-                Box::new(ExprDef::LitScalar(OrderedFloat::from(1.5))),
+                Box::new(ExprDef::LitScalar(NumLiteral::from_f64(1.5))),
                 Box::new(ExprDef::LitUnit("km".to_string()))
             )
         );
@@ -315,7 +324,7 @@ mod tests {
         let parsed = parse("2 pi rad").unwrap();
         let expected = ExprDef::Mul(
             Box::new(ExprDef::Mul(
-                Box::new(ExprDef::LitScalar(OrderedFloat::from(2.0))),
+                Box::new(ExprDef::LitScalar(NumLiteral::from_f64(2.0))),
                 Box::new(ExprDef::LitUnit("pi".to_string())),
             )),
             Box::new(ExprDef::LitUnit("rad".to_string())),
@@ -331,6 +340,104 @@ mod tests {
         assert_eq!(run_scalar("1").unwrap(), 1.0);
         assert_eq!(run_scalar("42").unwrap(), 42.0);
         assert_eq!(run_scalar("1.5").unwrap(), 1.5);
+    }
+
+    #[test]
+    fn num_literal_implicit_variance_from_decimal_places() {
+        use crate::ir::NumLiteral;
+        // No decimal point → abs_err 0.5, variance 0.25
+        let n = NumLiteral { raw: "10".to_string(), value: ordered_float::OrderedFloat::from(10.0) };
+        assert_eq!(n.implicit_absolute_error(), 0.5);
+        assert_eq!(n.implicit_variance(), 0.25);
+        // One decimal place → 5e-2, variance 0.0025
+        let n = NumLiteral { raw: "10.5".to_string(), value: ordered_float::OrderedFloat::from(10.5) };
+        assert!((n.implicit_absolute_error() - 0.05).abs() < 1e-15);
+        assert!((n.implicit_variance() - 0.0025).abs() < 1e-15);
+        // Two decimal places → 5e-3, variance 0.000025
+        let n = NumLiteral { raw: "10.50".to_string(), value: ordered_float::OrderedFloat::from(10.5) };
+        assert!((n.implicit_absolute_error() - 0.005).abs() < 1e-15);
+        assert!((n.implicit_variance() - 0.000025).abs() < 1e-15);
+        // Scientific notation: count decimals in mantissa only
+        let n = NumLiteral { raw: "1.23e4".to_string(), value: ordered_float::OrderedFloat::from(12300.0) };
+        assert_eq!(n.decimal_places_after(), Some(2));
+        assert!((n.implicit_absolute_error() - 0.005).abs() < 1e-15);
+    }
+
+    #[test]
+    fn run_literal_implicit_variance_preserved() {
+        // "10" (no decimal) → variance 0.25
+        let q = run_numeric("10").unwrap();
+        assert!((q.value() - 10.0).abs() < 1e-10);
+        assert!((q.variance() - 0.25).abs() < 1e-10);
+        // "10.5" (1 decimal) → variance 0.0025
+        let q = run_numeric("10.5").unwrap();
+        assert!((q.variance() - 0.0025).abs() < 1e-10);
+        // "10.50" (2 decimals) → variance 0.000025
+        let q = run_numeric("10.50").unwrap();
+        assert!((q.variance() - 0.000025).abs() < 1e-10);
+    }
+
+    #[test]
+    fn parse_tilde_precedence() {
+        // "5 + 10 ~ 2" => 5 + (10 ~ 2), not (5 + 10) ~ 2
+        let def = parse("5 + 10 ~ 2").unwrap();
+        match &def {
+            ExprDef::Add(l, r) => {
+                assert!(matches!(l.as_ref(), ExprDef::LitScalar(_) | ExprDef::Lit(_)));
+                assert!(matches!(r.as_ref(), ExprDef::WithPrecision(_, _)));
+            }
+            _ => panic!("expected Add(_, WithPrecision), got {:?}", def),
+        }
+    }
+
+    #[test]
+    fn run_tilde_explicit_variance() {
+        // 10 ~ 2 => mean 10, variance 4 (error 2)
+        let q = run_numeric("10 ~ 2").unwrap();
+        assert!((q.value() - 10.0).abs() < 1e-10);
+        assert!((q.variance() - 4.0).abs() < 1e-10);
+        // 5 + 10 ~ 2 => 15 with variance 0.25 + 4 = 4.25 (Add sums variances)
+        let q = run_numeric("5 + 10 ~ 2").unwrap();
+        assert!((q.value() - 15.0).abs() < 1e-10);
+        assert!((q.variance() - 4.25).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_tilde_negative_error_returns_err() {
+        let e = run_numeric("10 ~ -1").unwrap_err();
+        assert!(matches!(e, RunError::PrecisionMustBePositive));
+    }
+
+    #[test]
+    fn run_tilde_zero_error_returns_err() {
+        let e = run_numeric("10 ~ 0").unwrap_err();
+        assert!(matches!(e, RunError::PrecisionMustBePositive));
+    }
+
+    #[test]
+    fn run_tilde_rhs_variance_discarded() {
+        // 10 ~ (2 ~ 0.5): RHS evaluates to value 2 (variance 0.25); we use only central value 2 => variance 4
+        let q = run_numeric("10 ~ (2 ~ 0.5)").unwrap();
+        assert!((q.value() - 10.0).abs() < 1e-10);
+        assert!((q.variance() - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_tilde_requires_numeric_operands() {
+        // Symbolic LHS: pi ~ 2 cannot be evaluated in numeric context; run() still evaluates and returns err
+        let e = run_with_registry("pi ~ 2", &default_si_registry()).unwrap_err();
+        assert!(matches!(e, RunError::TildeRequiresNumeric));
+    }
+
+    #[test]
+    fn run_literal_decimal_places_affect_variance() {
+        // "10.5" (1 decimal) vs "10.50" (2 decimals) => different variances
+        let q5 = run_numeric("10.5").unwrap();
+        let q50 = run_numeric("10.50").unwrap();
+        assert_eq!(q5.value(), q50.value());
+        assert!((q5.variance() - 0.0025).abs() < 1e-12);
+        assert!((q50.variance() - 0.000025).abs() < 1e-12);
+        assert!(q50.variance() < q5.variance());
     }
 
     #[test]
@@ -477,16 +584,16 @@ mod tests {
 
     #[test]
     fn run_if_crisp_then() {
-        // Condition 1 < 2 constant-folds to True, only then branch is evaluated.
-        let v = run_with_registry("if 1 < 2 then 10 else 20", &default_si_registry()).unwrap();
+        // Condition 1.0 < 2.0 constant-folds to True (decimal literals => low variance => crisp).
+        let v = run_with_registry("if 1.0 < 2.0 then 10 else 20", &default_si_registry()).unwrap();
         let Value::Numeric(q) = v else { panic!("expected numeric") };
         assert!((q.value() - 10.0).abs() < 1e-10);
     }
 
     #[test]
     fn run_if_crisp_else() {
-        // Condition 1 > 2 constant-folds to False, only else branch is evaluated.
-        let v = run_with_registry("if 1 > 2 then 10 else 20", &default_si_registry()).unwrap();
+        // Condition 1.0 > 2.0 constant-folds to False (decimal literals => low variance => crisp).
+        let v = run_with_registry("if 1.0 > 2.0 then 10 else 20", &default_si_registry()).unwrap();
         let Value::Numeric(q) = v else { panic!("expected numeric") };
         assert!((q.value() - 20.0).abs() < 1e-10);
     }
@@ -560,20 +667,20 @@ mod tests {
 
     #[test]
     fn run_comparison_scalar_numeric() {
-        // Result is Value::FuzzyBool (crisp for exact literals)
-        let v = run_with_registry("1 == 2", &default_si_registry()).unwrap();
+        // Result is Value::FuzzyBool (crisp when literals have low variance, e.g. decimals)
+        let v = run_with_registry("1.0 == 2.0", &default_si_registry()).unwrap();
         assert!(matches!(v, Value::FuzzyBool(FuzzyBool::False)));
-        let v = run_with_registry("1 == 1", &default_si_registry()).unwrap();
+        let v = run_with_registry("1.0 == 1.0", &default_si_registry()).unwrap();
         assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True)));
         let v = run_with_registry("100 m < 1 kilometer", &default_si_registry()).unwrap();
         assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True))); // 100 < 1000
-        let v = run_with_registry("2 <= 3", &default_si_registry()).unwrap();
+        let v = run_with_registry("2.0 <= 3.0", &default_si_registry()).unwrap();
         assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True)));
-        let v = run_with_registry("3 > 2", &default_si_registry()).unwrap();
+        let v = run_with_registry("3.0 > 2.0", &default_si_registry()).unwrap();
         assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True)));
-        let v = run_with_registry("4 >= 4", &default_si_registry()).unwrap();
+        let v = run_with_registry("4.0 >= 4.0", &default_si_registry()).unwrap();
         assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True)));
-        let v = run_with_registry("1 != 2", &default_si_registry()).unwrap();
+        let v = run_with_registry("1.0 != 2.0", &default_si_registry()).unwrap();
         assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True)));
     }
 
@@ -599,7 +706,7 @@ mod tests {
         use salsa::DatabaseImpl;
 
         let registry = default_si_registry();
-        let root_def = parse("[1 m, 2 m] < 1.5 m").unwrap();
+        let root_def = parse("[1.0 m, 2.0 m] < 1.5 m").unwrap();
         let root_def = resolve::resolve(root_def, &registry).unwrap();
         let root_def = cas::simplify_symbolic(root_def, &registry).unwrap();
         set_eval_registry(registry.clone());
@@ -615,8 +722,9 @@ mod tests {
         assert_eq!(results.len(), 2);
         let v0 = results[0].as_ref().unwrap().as_ref().unwrap();
         let v1 = results[1].as_ref().unwrap().as_ref().unwrap();
-        assert!(matches!(v0, Value::FuzzyBool(FuzzyBool::True)), "1 m < 1.5 m => true");
-        assert!(matches!(v1, Value::FuzzyBool(FuzzyBool::False)), "2 m < 1.5 m => false");
+        // Use decimal literals so variance is small and comparisons are crisp
+        assert!(matches!(v0, Value::FuzzyBool(FuzzyBool::True)), "1.0 m < 1.5 m => true");
+        assert!(matches!(v1, Value::FuzzyBool(FuzzyBool::False)), "2.0 m < 1.5 m => false");
     }
 
     #[test]
@@ -659,9 +767,9 @@ mod tests {
 
     #[test]
     fn run_comparison_format() {
-        // Comparison results display as "true" or "false"
-        assert_eq!(run_format("1 < 2").unwrap(), "true");
-        assert_eq!(run_format("1 == 2").unwrap(), "false");
+        // Comparison results display as "true" or "false" (use decimal literals for crisp)
+        assert_eq!(run_format("1.0 < 2.0").unwrap(), "true");
+        assert_eq!(run_format("1.0 == 2.0").unwrap(), "false");
         assert_eq!(run_format("100 m < 1 kilometer").unwrap(), "true");
     }
 
@@ -682,16 +790,16 @@ mod tests {
             Value::FuzzyBool(FuzzyBool::False) | Value::FuzzyBool(FuzzyBool::Uncertain(_)) => {}
             _ => panic!("3 m < 3 m should be False or Uncertain, got {:?}", v),
         }
-        // [1, 2]' < [0, 4] => 3 < 4 => true (crisp: 3 and 4 exact)
-        let v = run_with_registry("[1, 2]' < [0, 4]", &default_si_registry()).unwrap();
+        // [1.0, 2.0]' < [0.0, 4.0] => 3 < 4 => true (crisp: decimal literals => low variance)
+        let v = run_with_registry("[1.0, 2.0]' < [0.0, 4.0]", &default_si_registry()).unwrap();
         assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True)), "3 < 4 => true");
     }
 
     #[test]
     fn run_format_vector_of_booleans() {
-        // Vector of comparison results displays as [true, false, ...]
-        assert_eq!(run_format("[1 < 2, 1 == 2]").unwrap(), "[true, false]");
-        assert_eq!(run_format("[2 <= 3, 3 > 4]").unwrap(), "[true, false]");
+        // Vector of comparison results displays as [true, false, ...] (decimal literals for crisp)
+        assert_eq!(run_format("[1.0 < 2.0, 1.0 == 2.0]").unwrap(), "[true, false]");
+        assert_eq!(run_format("[2.0 <= 3.0, 3.0 > 4.0]").unwrap(), "[true, false]");
     }
 
     #[test]

@@ -182,6 +182,11 @@ fn rewrite_rec(
             }
             Ok(out.intern(ExprNode::If(new_cond, new_then, new_else)))
         }
+        ExprNode::WithPrecision(l, r) => {
+            let new_l = rewrite_rec(pool, out, *l, registry)?;
+            let new_r = rewrite_rec(pool, out, *r, registry)?;
+            Ok(out.intern(ExprNode::WithPrecision(new_l, new_r)))
+        }
     }
 }
 

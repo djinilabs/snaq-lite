@@ -4,6 +4,52 @@ use crate::fuzzy::FuzzyBool;
 use crate::quantity::Quantity;
 use ordered_float::OrderedFloat;
 
+/// Numeric literal with raw string for implicit significant-figure variance.
+/// Variance is derived from the number of decimal places in the source (mantissa only).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct NumLiteral {
+    /// Exact string as typed (preserves trailing zeros and decimal places).
+    pub raw: String,
+    /// Parsed value (central value for the distribution).
+    pub value: OrderedFloat<f64>,
+}
+
+impl NumLiteral {
+    /// Number of digits after the decimal point in the mantissa (before any 'e' or 'E').
+    pub fn decimal_places_after(&self) -> Option<usize> {
+        let mantissa = self.raw.split_once(|c| ['e', 'E'].contains(&c)).map(|(m, _)| m).unwrap_or(self.raw.as_str());
+        let dot = mantissa.find('.')?;
+        Some(mantissa[dot + 1..].chars().filter(|c| c.is_ascii_digit()).count())
+    }
+
+    /// Implicit absolute error from significant figures: no decimal point → 0.5; N decimals → 5×10^−(N+1).
+    pub fn implicit_absolute_error(&self) -> f64 {
+        match self.decimal_places_after() {
+            None => 0.5,
+            Some(n) => 5.0 * 10.0_f64.powi(-(n as i32 + 1)),
+        }
+    }
+
+    /// Variance = (implicit absolute error)².
+    pub fn implicit_variance(&self) -> f64 {
+        let err = self.implicit_absolute_error();
+        err * err
+    }
+
+    /// Numeric value as f64.
+    pub fn value_f64(&self) -> f64 {
+        self.value.0
+    }
+
+    /// Build a NumLiteral from an f64 (e.g. for tests or programmatic construction). Raw string is format!("{x}").
+    pub fn from_f64(x: f64) -> Self {
+        Self {
+            raw: format!("{x}"),
+            value: OrderedFloat::from(x),
+        }
+    }
+}
+
 /// A single argument in a function call: either positional or named.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum CallArg {
@@ -17,10 +63,10 @@ pub enum CallArg {
 /// Parser produces LitScalar, LitWithUnit, LitUnit, Call; after resolve() only Lit(Quantity) | LitSymbol | Add | Sub | Mul | Div | Call remain.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum ExprDef {
-    /// Parsed: bare number (scalar).
-    LitScalar(OrderedFloat<f64>),
-    /// Parsed: number and unit identifier (e.g. "100 m").
-    LitWithUnit(OrderedFloat<f64>, String),
+    /// Parsed: bare number (scalar). Carries raw string for implicit variance.
+    LitScalar(NumLiteral),
+    /// Parsed: number and unit identifier (e.g. "100 m"). Number carries raw string for implicit variance.
+    LitWithUnit(NumLiteral, String),
     /// Parsed: unit only (e.g. "hour" = 1 hour).
     LitUnit(String),
     /// Resolved: quantity (value + unit).
@@ -52,6 +98,8 @@ pub enum ExprDef {
     Transpose(Box<ExprDef>),
     /// Conditional: if condition then expression else expression. Condition must evaluate to FuzzyBool.
     If(Box<ExprDef>, Box<ExprDef>, Box<ExprDef>),
+    /// Explicit precision: left ~ right => value from left with variance = (right.value())². Right must be > 0; right's variance is discarded.
+    WithPrecision(Box<ExprDef>, Box<ExprDef>),
 }
 
 /// Input that holds the root expression definition.
@@ -95,4 +143,6 @@ pub enum ExprData<'db> {
     Transpose(Expression<'db>),
     /// Conditional: condition, then_branch, else_branch.
     If(Expression<'db>, Expression<'db>, Expression<'db>),
+    /// Explicit precision: left ~ right (use right's value as absolute error; variance = error²).
+    WithPrecision(Expression<'db>, Expression<'db>),
 }

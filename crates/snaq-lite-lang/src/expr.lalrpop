@@ -37,7 +37,8 @@ extern {
         "<=" => Tok::Le,
         ">" => Tok::Gt,
         ">=" => Tok::Ge,
-        Num => Tok::Num(<ordered_float::OrderedFloat<f64>>),
+        "~" => Tok::Tilde,
+        Num => Tok::Num(<crate::ir::NumLiteral>),
         Ident => Tok::Ident(<String>),
         FuncIdent => Tok::FuncIdent(<String>),
     }
@@ -117,12 +118,18 @@ PiIdents: ExprDef = {
     ),
 };
 
-Term: ExprDef = {
-    <l:Term> "*" <r:PostfixFactor> => ExprDef::Mul(Box::new(l), Box::new(r)),
-    <l:Term> "/" <r:PostfixFactor> => ExprDef::Div(Box::new(l), Box::new(r)),
-    <l:Term> "per" <r:PostfixFactor> => ExprDef::Div(Box::new(l), Box::new(r)),
-    <l:Term> <r:ImplicitMulRight> => ExprDef::Mul(Box::new(l), Box::new(r)),
+// Tilde binds tighter than * / per implicit mul: "5 + 10 ~ 2" => 5 + (10 ~ 2).
+TildeBound: ExprDef = {
+    <l:TildeBound> "~" <r:PostfixFactor> => ExprDef::WithPrecision(Box::new(l), Box::new(r)),
     PostfixFactor,
+};
+
+Term: ExprDef = {
+    <l:Term> "*" <r:TildeBound> => ExprDef::Mul(Box::new(l), Box::new(r)),
+    <l:Term> "/" <r:TildeBound> => ExprDef::Div(Box::new(l), Box::new(r)),
+    <l:Term> "per" <r:TildeBound> => ExprDef::Div(Box::new(l), Box::new(r)),
+    <l:Term> <r:ImplicitMulRight> => ExprDef::Mul(Box::new(l), Box::new(r)),
+    TildeBound,
 };
 
 // Factor with optional postfix transpose(s): [1,2,3]', [1,2,3]'', (expr)', etc.

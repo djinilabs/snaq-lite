@@ -90,6 +90,12 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
             let rid = expr_def_to_interned(r, pool);
             pool.intern(ExprNode::Ge(lid, rid))
         }
+        ExprDef::If(cond, then_b, else_b) => {
+            let cid = expr_def_to_interned(cond, pool);
+            let tid = expr_def_to_interned(then_b, pool);
+            let eid = expr_def_to_interned(else_b, pool);
+            pool.intern(ExprNode::If(cid, tid, eid))
+        }
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved ExprDef: resolve() must be called before CAS")
         }
@@ -159,6 +165,11 @@ pub fn interned_to_expr_def(pool: &ExprInterner, id: ExprId) -> ExprDef {
         ExprNode::Ge(l, r) => ExprDef::Ge(
             Box::new(interned_to_expr_def(pool, *l)),
             Box::new(interned_to_expr_def(pool, *r)),
+        ),
+        ExprNode::If(c, t, e) => ExprDef::If(
+            Box::new(interned_to_expr_def(pool, *c)),
+            Box::new(interned_to_expr_def(pool, *t)),
+            Box::new(interned_to_expr_def(pool, *e)),
         ),
     }
 }

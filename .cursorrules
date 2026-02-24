@@ -70,3 +70,11 @@ After completing a task (or significant step), you must:
 - Think of fixes and improvements that should be done.
 - Create a plan for such improvements.
 - Implement the plan
+
+## Document language capabilities and syntax
+
+7. There should be end user documentation as markdown files in /docs.
+Whenever you create or change the language syntax and capabilities, you should complete the docs with the new information and details. Do not give technical details of how it's implemented. Instead:
+- focus on the syntax and semantics
+- show use cases
+- clarify important edge cases

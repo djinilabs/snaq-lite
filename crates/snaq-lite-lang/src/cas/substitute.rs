@@ -84,6 +84,11 @@ pub fn substitute_symbols(def: ExprDef, registry: &SymbolRegistry) -> Result<Exp
             Box::new(substitute_symbols(*l, registry)?),
             Box::new(substitute_symbols(*r, registry)?),
         )),
+        ExprDef::If(cond, then_b, else_b) => Ok(ExprDef::If(
+            Box::new(substitute_symbols(*cond, registry)?),
+            Box::new(substitute_symbols(*then_b, registry)?),
+            Box::new(substitute_symbols(*else_b, registry)?),
+        )),
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved ExprDef: resolve() must be called before substitute_symbols")
         }

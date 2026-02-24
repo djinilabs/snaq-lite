@@ -50,6 +50,8 @@ pub enum ExprDef {
     VecLiteral(Vec<ExprDef>),
     /// Postfix transpose: `expr'` (e.g. [1,2,3]'). Inner must evaluate to a vector.
     Transpose(Box<ExprDef>),
+    /// Conditional: if condition then expression else expression. Condition must evaluate to FuzzyBool.
+    If(Box<ExprDef>, Box<ExprDef>, Box<ExprDef>),
 }
 
 /// Input that holds the root expression definition.
@@ -91,4 +93,6 @@ pub enum ExprData<'db> {
     VecLiteral(Vec<Expression<'db>>),
     /// Postfix transpose: inner must evaluate to a vector.
     Transpose(Expression<'db>),
+    /// Conditional: condition, then_branch, else_branch.
+    If(Expression<'db>, Expression<'db>, Expression<'db>),
 }

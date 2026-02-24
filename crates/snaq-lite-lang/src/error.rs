@@ -22,6 +22,10 @@ pub enum RunError {
     VectorLengthMismatch { left_len: usize, right_len: usize },
     /// Result is boolean (e.g. comparison); cannot convert to quantity.
     BooleanResult,
+    /// If condition must evaluate to a boolean (FuzzyBool), not a number or symbolic.
+    ExpectedCondition,
+    /// Both branches of if/then/else must be numeric or symbolic (blendable); got boolean or vector.
+    IfBranchTypeMismatch,
 }
 
 /// Parse error for expression strings.
@@ -84,6 +88,12 @@ impl std::fmt::Display for RunError {
             }
             RunError::BooleanResult => {
                 write!(f, "result is boolean (e.g. comparison), cannot convert to quantity")
+            }
+            RunError::ExpectedCondition => {
+                write!(f, "if condition must evaluate to true, false, or uncertain (got number or symbolic)")
+            }
+            RunError::IfBranchTypeMismatch => {
+                write!(f, "if branches must both be numeric or symbolic (cannot blend boolean or vector)")
             }
         }
     }

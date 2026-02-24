@@ -24,6 +24,9 @@ extern {
         "/" => Tok::Slash,
         "per" => Tok::Per,
         "as" => Tok::As,
+        "if" => Tok::If,
+        "then" => Tok::Then,
+        "else" => Tok::Else,
         "π" => Tok::Pi,
         "," => Tok::Comma,
         ":" => Tok::Colon,
@@ -40,8 +43,9 @@ extern {
     }
 }
 
-// Top level: comparison (weakest) then additive. So "1 + 2 < 3 + 4" => (1+2) < (3+4).
+// Top level: conditional, comparison, then additive. So "if a < b then 1 else 0" parses as If(cond, then, else).
 pub Expr: ExprDef = {
+    <if_expr:IfExpr> => if_expr,
     <l:AddExpr> "==" <r:Expr> => ExprDef::Eq(Box::new(l), Box::new(r)),
     <l:AddExpr> "!=" <r:Expr> => ExprDef::Ne(Box::new(l), Box::new(r)),
     <l:AddExpr> "<" <r:Expr> => ExprDef::Lt(Box::new(l), Box::new(r)),
@@ -49,6 +53,11 @@ pub Expr: ExprDef = {
     <l:AddExpr> ">" <r:Expr> => ExprDef::Gt(Box::new(l), Box::new(r)),
     <l:AddExpr> ">=" <r:Expr> => ExprDef::Ge(Box::new(l), Box::new(r)),
     AddExpr,
+};
+
+// Conditional: if condition then expression else expression (condition and branches are full Expr).
+IfExpr: ExprDef = {
+    "if" <cond:Expr> "then" <then_b:Expr> "else" <else_b:Expr> => ExprDef::If(Box::new(cond), Box::new(then_b), Box::new(else_b)),
 };
 
 AddExpr: ExprDef = {

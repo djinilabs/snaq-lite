@@ -11,6 +11,7 @@ lalrpop_mod!(
     #[allow(clippy::empty_line_after_outer_attr)]
     #[allow(clippy::uninlined_format_args)]
     #[allow(clippy::type_complexity)]
+    #[allow(clippy::cognitive_complexity)] // generated token match grows with grammar
     #[allow(dead_code)]
     #[allow(unused_imports)] // generated code imports Tok; type is used via full path in extern enum
     expr

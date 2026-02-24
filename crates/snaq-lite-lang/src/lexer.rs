@@ -21,6 +21,10 @@ pub enum Tok {
     Per,
     /// "as" keyword for unit conversion (e.g. "10 km as m").
     As,
+    /// "if" / "then" / "else" for conditional expressions.
+    If,
+    Then,
+    Else,
     Pi,
     Comma,
     Colon,
@@ -170,6 +174,18 @@ impl<'input> Iterator for Lexer<'input> {
         if rest.starts_with("per") && !rest[3..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
             self.pos += 3;
             return Some(Ok((start, Tok::Per, self.pos)));
+        }
+        if rest.starts_with("if") && !rest[2..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            self.pos += 2;
+            return Some(Ok((start, Tok::If, self.pos)));
+        }
+        if rest.starts_with("then") && !rest[4..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            self.pos += 4;
+            return Some(Ok((start, Tok::Then, self.pos)));
+        }
+        if rest.starts_with("else") && !rest[4..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            self.pos += 4;
+            return Some(Ok((start, Tok::Else, self.pos)));
         }
         if rest.starts_with("π") {
             self.pos += "π".len();

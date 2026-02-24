@@ -691,6 +691,12 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
             let inner_expr = build_expression(db, *inner);
             ExprData::Transpose(inner_expr)
         }
+        ExprDef::If(cond, then_b, else_b) => {
+            let cond_expr = build_expression(db, *cond);
+            let then_expr = build_expression(db, *then_b);
+            let else_expr = build_expression(db, *else_b);
+            ExprData::If(cond_expr, then_expr, else_expr)
+        }
     };
     Expression::new(db, data)
 }
@@ -818,6 +824,7 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
                 _ => Err(RunError::ExpectedVector),
             }
         }
+        ExprData::If(cond_expr, then_expr, else_expr) => eval_if(db, *cond_expr, *then_expr, *else_expr, registry),
     })
 }
 
@@ -892,7 +899,106 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
                 .collect(),
         ),
         ExprData::Transpose(inner) => ExprDef::Transpose(Box::new(expression_to_def(db, *inner))),
+        ExprData::If(c, t, e) => ExprDef::If(
+            Box::new(expression_to_def(db, *c)),
+            Box::new(expression_to_def(db, *t)),
+            Box::new(expression_to_def(db, *e)),
+        ),
     }
+}
+
+/// Evaluate if/then/else: crisp branch when condition is True/False, superposition when Uncertain(p).
+/// Numeric blend converts both branches to a common unit before blending mean and variance.
+fn eval_if(
+    db: &dyn salsa::Database,
+    cond_expr: Expression<'_>,
+    then_expr: Expression<'_>,
+    else_expr: Expression<'_>,
+    registry: &UnitRegistry,
+) -> Result<Value, RunError> {
+    use crate::fuzzy::FuzzyBool;
+    use crate::quantity::SnaqNumber;
+
+    let cond_val = value(db, cond_expr)?;
+    let fuzzy = match &cond_val {
+        Value::FuzzyBool(f) => f.clone(),
+        _ => return Err(RunError::ExpectedCondition),
+    };
+
+    match &fuzzy {
+        FuzzyBool::True => return value(db, then_expr),
+        FuzzyBool::False => return value(db, else_expr),
+        FuzzyBool::Uncertain(_) => {}
+    }
+
+    let p = fuzzy.uncertain_probability().unwrap();
+    let then_val = value(db, then_expr)?;
+    let else_val = value(db, else_expr)?;
+
+    if matches!(&then_val, Value::FuzzyBool(_) | Value::Vector(_))
+        || matches!(&else_val, Value::FuzzyBool(_) | Value::Vector(_))
+    {
+        return Err(RunError::IfBranchTypeMismatch);
+    }
+
+    if let (Value::Numeric(qa), Value::Numeric(qb)) = (&then_val, &else_val) {
+        if !registry.same_dimension(qa.unit(), qb.unit()).unwrap_or(false) {
+            return Err(RunError::DimensionMismatch {
+                left: qa.unit().clone(),
+                right: qb.unit().clone(),
+            });
+        }
+        let result_unit = Quantity::smaller_unit(registry, qa.unit(), qb.unit())
+            .cloned()
+            .unwrap_or_else(|| qa.unit().clone());
+        let qa_c = qa.clone().convert_to(registry, &result_unit).map_err(|e| match e {
+            crate::quantity::QuantityError::DimensionMismatch { left, right }
+            | crate::quantity::QuantityError::IncompatibleUnits(left, right) => {
+                RunError::DimensionMismatch { left, right }
+            }
+            _ => RunError::DivisionByZero,
+        })?;
+        let qb_c = qb.clone().convert_to(registry, &result_unit).map_err(|e| match e {
+            crate::quantity::QuantityError::DimensionMismatch { left, right }
+            | crate::quantity::QuantityError::IncompatibleUnits(left, right) => {
+                RunError::DimensionMismatch { left, right }
+            }
+            _ => RunError::DivisionByZero,
+        })?;
+        let mean_a = qa_c.value();
+        let var_a = qa_c.variance();
+        let mean_b = qb_c.value();
+        let var_b = qb_c.variance();
+        let blended_mean = p * mean_a + (1.0 - p) * mean_b;
+        let inner_var = p * var_a + (1.0 - p) * var_b;
+        let between_var = p * (1.0 - p) * (mean_a - mean_b).powi(2);
+        let blended_var = inner_var + between_var;
+        let q = Quantity::with_number(
+            SnaqNumber::new(blended_mean, blended_var),
+            result_unit,
+        );
+        return Ok(Value::Numeric(q));
+    }
+
+    // Build weighted sum as SymbolicExpr (cannot create temp DB inside Salsa query).
+    let (ea, ua) = value_to_expr_unit(&then_val);
+    let (eb, ub) = value_to_expr_unit(&else_val);
+    if !registry.same_dimension(&ua, &ub).unwrap_or(false) {
+        return Err(RunError::DimensionMismatch {
+            left: ua.clone(),
+            right: ub.clone(),
+        });
+    }
+    let result_unit = Quantity::smaller_unit(registry, &ua, &ub)
+        .cloned()
+        .unwrap_or_else(|| ua.clone());
+    let ea_scaled = scale_expr_to_unit(&then_val, &ea, &ua, &result_unit, registry)?;
+    let eb_scaled = scale_expr_to_unit(&else_val, &eb, &ub, &result_unit, registry)?;
+    let weighted = SymbolicExpr::add(
+        &SymbolicExpr::mul(&SymbolicExpr::Number(p), &ea_scaled),
+        &SymbolicExpr::mul(&SymbolicExpr::Number(1.0 - p), &eb_scaled),
+    );
+    Ok(Value::Symbolic(SymbolicQuantity::new(weighted, result_unit)))
 }
 
 /// Bind call args (positional + named) to param names and evaluate.

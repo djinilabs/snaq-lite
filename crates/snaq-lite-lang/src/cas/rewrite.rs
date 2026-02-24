@@ -170,6 +170,18 @@ fn rewrite_rec(
             }
             Ok(out.intern(ExprNode::Ge(new_l, new_r)))
         }
+        ExprNode::If(cond_id, then_id, else_id) => {
+            let new_cond = rewrite_rec(pool, out, *cond_id, registry)?;
+            let new_then = rewrite_rec(pool, out, *then_id, registry)?;
+            let new_else = rewrite_rec(pool, out, *else_id, registry)?;
+            // Constant-fold: if condition is LitFuzzyBool(True) or LitFuzzyBool(False), return single branch.
+            match out.get(new_cond) {
+                ExprNode::LitFuzzyBool(FuzzyBool::True) => return Ok(new_then),
+                ExprNode::LitFuzzyBool(FuzzyBool::False) => return Ok(new_else),
+                _ => {}
+            }
+            Ok(out.intern(ExprNode::If(new_cond, new_then, new_else)))
+        }
     }
 }
 

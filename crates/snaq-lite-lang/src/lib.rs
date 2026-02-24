@@ -463,6 +463,86 @@ mod tests {
     }
 
     #[test]
+    fn parse_if_then_else() {
+        let parsed = parse("if 1 then 2 else 3").unwrap();
+        assert!(matches!(parsed, ExprDef::If(_, _, _)));
+        let parsed = parse("if 1 < 2 then 10 else 20").unwrap();
+        assert!(matches!(parsed, ExprDef::If(_, _, _)));
+        if let ExprDef::If(cond, then_b, else_b) = &parsed {
+            assert!(matches!(cond.as_ref(), ExprDef::Lt(_, _)));
+            assert!(matches!(then_b.as_ref(), ExprDef::LitScalar(_) | ExprDef::Lit(_)));
+            assert!(matches!(else_b.as_ref(), ExprDef::LitScalar(_) | ExprDef::Lit(_)));
+        }
+    }
+
+    #[test]
+    fn run_if_crisp_then() {
+        // Condition 1 < 2 constant-folds to True, only then branch is evaluated.
+        let v = run_with_registry("if 1 < 2 then 10 else 20", &default_si_registry()).unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_if_crisp_else() {
+        // Condition 1 > 2 constant-folds to False, only else branch is evaluated.
+        let v = run_with_registry("if 1 > 2 then 10 else 20", &default_si_registry()).unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 20.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_if_superposition_numeric() {
+        // 1 > 1 gives Uncertain(0.5); both branches numeric => blended mean 0.5*10 + 0.5*20 = 15.
+        let v = run_with_registry("if 1 > 1 then 10 else 20", &default_si_registry()).unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 15.0).abs() < 1e-10, "blended mean should be 15");
+    }
+
+    #[test]
+    fn run_if_superposition_symbolic() {
+        // Uncertain condition with symbolic branches yields symbolic weighted sum (simplified).
+        let v = run_with_registry("if 1 > 1 then pi else 2 * pi", &default_si_registry()).unwrap();
+        let Value::Symbolic(sq) = v else { panic!("expected symbolic") };
+        let s = format!("{}", sq);
+        assert!(s.contains("π") || s.contains("pi"), "result should contain pi symbol");
+    }
+
+    #[test]
+    fn run_if_branch_type_mismatch() {
+        // Uncertain condition forces both branches evaluated; one numeric, one vector => IfBranchTypeMismatch.
+        let e = run_with_registry("if 1 > 1 then 10 else [1, 2]", &default_si_registry()).unwrap_err();
+        assert!(matches!(e, RunError::IfBranchTypeMismatch));
+    }
+
+    #[test]
+    fn run_if_expected_condition() {
+        // Condition must be boolean; a number is not valid.
+        let e = run_with_registry("if 1 then 10 else 20", &default_si_registry()).unwrap_err();
+        assert!(matches!(e, RunError::ExpectedCondition));
+    }
+
+    #[test]
+    fn run_if_superposition_numeric_different_units() {
+        // Same dimension, different units: blend after converting to common unit.
+        let v = run_with_registry("if 1 > 1 then 10 m else 20 m", &default_si_registry()).unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 15.0).abs() < 1e-10, "blended mean 15 m");
+        assert!(!q.unit().is_scalar(), "result should have length unit (m)");
+        // 1 km and 1000 m: result in common unit (m), 0.5*1000 + 0.5*1000 = 1000 m
+        let v2 = run_with_registry("if 1 > 1 then 1 km else 1000 m", &default_si_registry()).unwrap();
+        let Value::Numeric(q2) = v2 else { panic!("expected numeric") };
+        assert!((q2.value() - 1000.0).abs() < 1e-6, "1 km and 1000 m blend to 1000 m");
+    }
+
+    #[test]
+    fn run_if_superposition_dimension_mismatch() {
+        // Uncertain condition but branches have different dimensions => DimensionMismatch.
+        let e = run_with_registry("if 1 > 1 then 10 m else 10 s", &default_si_registry()).unwrap_err();
+        assert!(matches!(e, RunError::DimensionMismatch { .. }));
+    }
+
+    #[test]
     fn parse_comparison() {
         let parsed = parse("1 == 2").unwrap();
         assert!(matches!(parsed, ExprDef::Eq(_, _)));

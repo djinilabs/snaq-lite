@@ -4,10 +4,11 @@
 //! Display is intentionally `"<vector>"` for all vectors (orientation not shown); transpose flips
 //! orientation, and element-wise Map preserves the operand's orientation.
 //!
-//! **Vector–vector binary ops** (add, sub, mul, div) depend on orientation: column×column or
-//! row×row → element-wise ([ZipMap](LazyVector::ZipMap)), result column or row respectively;
-//! column×row → outer product ([Outer](LazyVector::Outer)), result = vector of column vectors
-//! (N×M matrix); row×column → dot product (mul) or sum(left) op sum(right) (add/sub), scalar.
+//! **Vector–vector binary ops** (add, sub, mul, div, and comparison ==, !=, <, <=, >, >=) depend on
+//! orientation: column×column or row×row → element-wise ([ZipMap](LazyVector::ZipMap)), result
+//! column or row (comparisons yield bool per element); column×row → outer product ([Outer](LazyVector::Outer)),
+//! result = vector of column vectors (N×M matrix; comparisons yield bool per cell); row×column →
+//! dot product (mul), sum(left) op sum(right) (add/sub), or compare(sum(left), sum(right)) (comparisons), scalar.
 
 use crate::error::RunError;
 use crate::ir::ExprDef;
@@ -92,6 +93,13 @@ pub enum VectorMapOp {
     Neg,
     /// Unary built-in by name (e.g. "sin", "cos", "tan")
     UnaryFunc(String),
+    /// Comparison: elem == scalar, etc. Result FuzzyBool per element (Value::FuzzyBool).
+    Eq(Box<Value>),
+    Ne(Box<Value>),
+    Lt(Box<Value>),
+    Le(Box<Value>),
+    Gt(Box<Value>),
+    Ge(Box<Value>),
 }
 
 /// Binary operation for vector–vector (zip element-wise or outer product).
@@ -102,6 +110,12 @@ pub enum VectorBinaryOp {
     Sub,
     Mul,
     Div,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 /// Lazy vector: produces a stream of elements on demand (async).

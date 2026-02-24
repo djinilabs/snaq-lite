@@ -1,5 +1,6 @@
 //! Hash-consing interner for CAS expression nodes.
 
+use crate::fuzzy::FuzzyBool;
 use crate::quantity::Quantity;
 use std::collections::HashMap;
 
@@ -13,6 +14,7 @@ pub struct ExprId(pub u32);
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum ExprNode {
     Lit(Quantity),
+    LitFuzzyBool(FuzzyBool),
     LitSymbol(String),
     Add(Vec<ExprId>),
     Mul(Vec<ExprId>),
@@ -26,6 +28,13 @@ pub enum ExprNode {
     VecLiteral(Vec<ExprId>),
     /// Postfix transpose: inner must evaluate to a vector. Pass-through in CAS.
     Transpose(ExprId),
+    /// Comparison: ==, !=, <, <=, >, >=. Result is FuzzyBool (LitFuzzyBool when constant-folded).
+    Eq(ExprId, ExprId),
+    Ne(ExprId, ExprId),
+    Lt(ExprId, ExprId),
+    Le(ExprId, ExprId),
+    Gt(ExprId, ExprId),
+    Ge(ExprId, ExprId),
 }
 
 /// Central cache: same structure => same ExprId. New nodes are interned on construction.

@@ -3,6 +3,7 @@
 //! Value is the unified result type (Numeric or Symbolic).
 
 use crate::error::RunError;
+use crate::fuzzy::FuzzyBool;
 use crate::quantity::Quantity;
 use crate::symbol_registry::SymbolRegistry;
 use crate::unit::Unit;
@@ -27,6 +28,13 @@ pub enum SymbolicExpr {
     Div(Box<SymbolicExpr>, Box<SymbolicExpr>),
     /// Function call (e.g. sin(x)); displayed as "name(args...)", substitute may evaluate when all args numeric.
     Call(String, Vec<SymbolicExpr>),
+    /// Comparison: result type is boolean. Displayed as "a == b", etc.
+    Eq(Box<SymbolicExpr>, Box<SymbolicExpr>),
+    Ne(Box<SymbolicExpr>, Box<SymbolicExpr>),
+    Lt(Box<SymbolicExpr>, Box<SymbolicExpr>),
+    Le(Box<SymbolicExpr>, Box<SymbolicExpr>),
+    Gt(Box<SymbolicExpr>, Box<SymbolicExpr>),
+    Ge(Box<SymbolicExpr>, Box<SymbolicExpr>),
 }
 
 impl SymbolicExpr {
@@ -36,6 +44,19 @@ impl SymbolicExpr {
 
     pub fn symbol(name: impl Into<String>) -> Self {
         SymbolicExpr::Symbol(name.into())
+    }
+
+    /// True if this expression is a comparison (==, !=, <, <=, >, >=); result type is boolean.
+    pub fn is_comparison(&self) -> bool {
+        matches!(
+            self,
+            SymbolicExpr::Eq(..)
+                | SymbolicExpr::Ne(..)
+                | SymbolicExpr::Lt(..)
+                | SymbolicExpr::Le(..)
+                | SymbolicExpr::Gt(..)
+                | SymbolicExpr::Ge(..)
+        )
     }
 
     /// Convert this expr to "sum form": (constant, list of (coef, symbol_list)).
@@ -64,6 +85,12 @@ impl SymbolicExpr {
                 Vec::new(),
                 vec![SymbolicExpr::Call(name.clone(), args.clone())],
             ),
+            SymbolicExpr::Eq(a, b) => (0.0, Vec::new(), vec![SymbolicExpr::Eq(a.clone(), b.clone())]),
+            SymbolicExpr::Ne(a, b) => (0.0, Vec::new(), vec![SymbolicExpr::Ne(a.clone(), b.clone())]),
+            SymbolicExpr::Lt(a, b) => (0.0, Vec::new(), vec![SymbolicExpr::Lt(a.clone(), b.clone())]),
+            SymbolicExpr::Le(a, b) => (0.0, Vec::new(), vec![SymbolicExpr::Le(a.clone(), b.clone())]),
+            SymbolicExpr::Gt(a, b) => (0.0, Vec::new(), vec![SymbolicExpr::Gt(a.clone(), b.clone())]),
+            SymbolicExpr::Ge(a, b) => (0.0, Vec::new(), vec![SymbolicExpr::Ge(a.clone(), b.clone())]),
         }
     }
 
@@ -136,6 +163,7 @@ impl SymbolicExpr {
             SymbolicExpr::Symbol(s) => Some((1.0, vec![s.clone()])),
             SymbolicExpr::Product { coef, symbols } => Some((*coef, symbols.clone())),
             SymbolicExpr::Sum { .. } | SymbolicExpr::Neg(..) | SymbolicExpr::Div(..) | SymbolicExpr::Call(..) => None,
+            SymbolicExpr::Eq(..) | SymbolicExpr::Ne(..) | SymbolicExpr::Lt(..) | SymbolicExpr::Le(..) | SymbolicExpr::Gt(..) | SymbolicExpr::Ge(..) => None,
         }
     }
 
@@ -282,6 +310,36 @@ impl SymbolicExpr {
                 }
             }
             SymbolicExpr::Call(..) => None,
+            SymbolicExpr::Eq(a, b) => {
+                let av = a.substitute(registry)?;
+                let bv = b.substitute(registry)?;
+                Some(if av == bv { 1.0 } else { 0.0 })
+            }
+            SymbolicExpr::Ne(a, b) => {
+                let av = a.substitute(registry)?;
+                let bv = b.substitute(registry)?;
+                Some(if av != bv { 1.0 } else { 0.0 })
+            }
+            SymbolicExpr::Lt(a, b) => {
+                let av = a.substitute(registry)?;
+                let bv = b.substitute(registry)?;
+                Some(if av < bv { 1.0 } else { 0.0 })
+            }
+            SymbolicExpr::Le(a, b) => {
+                let av = a.substitute(registry)?;
+                let bv = b.substitute(registry)?;
+                Some(if av <= bv { 1.0 } else { 0.0 })
+            }
+            SymbolicExpr::Gt(a, b) => {
+                let av = a.substitute(registry)?;
+                let bv = b.substitute(registry)?;
+                Some(if av > bv { 1.0 } else { 0.0 })
+            }
+            SymbolicExpr::Ge(a, b) => {
+                let av = a.substitute(registry)?;
+                let bv = b.substitute(registry)?;
+                Some(if av >= bv { 1.0 } else { 0.0 })
+            }
         }
     }
 
@@ -336,6 +394,36 @@ impl SymbolicExpr {
                 }
             }
             SymbolicExpr::Call(name, _) => Err(format!("cannot substitute symbolic call {name}(...)")),
+            SymbolicExpr::Eq(a, b) => {
+                let av = a.substitute_or_err(registry)?;
+                let bv = b.substitute_or_err(registry)?;
+                Ok(if av == bv { 1.0 } else { 0.0 })
+            }
+            SymbolicExpr::Ne(a, b) => {
+                let av = a.substitute_or_err(registry)?;
+                let bv = b.substitute_or_err(registry)?;
+                Ok(if av != bv { 1.0 } else { 0.0 })
+            }
+            SymbolicExpr::Lt(a, b) => {
+                let av = a.substitute_or_err(registry)?;
+                let bv = b.substitute_or_err(registry)?;
+                Ok(if av < bv { 1.0 } else { 0.0 })
+            }
+            SymbolicExpr::Le(a, b) => {
+                let av = a.substitute_or_err(registry)?;
+                let bv = b.substitute_or_err(registry)?;
+                Ok(if av <= bv { 1.0 } else { 0.0 })
+            }
+            SymbolicExpr::Gt(a, b) => {
+                let av = a.substitute_or_err(registry)?;
+                let bv = b.substitute_or_err(registry)?;
+                Ok(if av > bv { 1.0 } else { 0.0 })
+            }
+            SymbolicExpr::Ge(a, b) => {
+                let av = a.substitute_or_err(registry)?;
+                let bv = b.substitute_or_err(registry)?;
+                Ok(if av >= bv { 1.0 } else { 0.0 })
+            }
         }
     }
 }
@@ -409,6 +497,12 @@ impl fmt::Display for SymbolicExpr {
                 }
                 write!(f, ")")
             }
+            SymbolicExpr::Eq(a, b) => write!(f, "({a}) == ({b})"),
+            SymbolicExpr::Ne(a, b) => write!(f, "({a}) != ({b})"),
+            SymbolicExpr::Lt(a, b) => write!(f, "({a}) < ({b})"),
+            SymbolicExpr::Le(a, b) => write!(f, "({a}) <= ({b})"),
+            SymbolicExpr::Gt(a, b) => write!(f, "({a}) > ({b})"),
+            SymbolicExpr::Ge(a, b) => write!(f, "({a}) >= ({b})"),
         }
     }
 }
@@ -489,14 +583,17 @@ impl fmt::Display for SymbolicQuantity {
     }
 }
 
-/// Result of evaluation: either a numeric quantity, a symbolic expression (with optional unit), or a vector.
+/// Result of evaluation: numeric quantity, symbolic expression (with optional unit), boolean, or vector.
 ///
-/// Use [Value::to_string] for display (e.g. `"6 + π"` or `"1000 + π m"`). Use [Value::to_quantity]
-/// with a [crate::SymbolRegistry] to substitute symbols and get a single [crate::Quantity].
+/// Use [Value::to_string] for display (e.g. `"6 + π"` or `"true"`). Use [Value::to_quantity]
+/// with a [crate::SymbolRegistry] to substitute symbols and get a single [crate::Quantity];
+/// returns [RunError::BooleanResult] for boolean/fuzzy boolean results (e.g. comparisons).
 #[derive(Clone, PartialEq, Debug)]
 pub enum Value {
     Numeric(Quantity),
     Symbolic(SymbolicQuantity),
+    /// Result of comparison (==, !=, <, <=, >, >=): True, False, or Uncertain(prob).
+    FuzzyBool(FuzzyBool),
     /// Vector with orientation (column by default, row after transpose). Elements streamed on demand.
     Vector(crate::vector::VectorValue),
 }
@@ -512,10 +609,17 @@ impl Value {
 
     /// Substitute all symbols and return a single Quantity. Errors if any symbol has no value.
     /// Returns [RunError::UnsupportedVectorOperation] for vectors.
+    /// Returns [RunError::BooleanResult] for boolean values or symbolic comparison expressions.
     pub fn to_quantity(&self, registry: &SymbolRegistry) -> Result<Quantity, RunError> {
         match self {
             Value::Numeric(q) => Ok(q.clone()),
-            Value::Symbolic(sq) => sq.substitute_or_err(registry),
+            Value::Symbolic(sq) => {
+                if sq.expr.is_comparison() {
+                    return Err(RunError::BooleanResult);
+                }
+                sq.substitute_or_err(registry)
+            }
+            Value::FuzzyBool(_) => Err(RunError::BooleanResult),
             Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
         }
     }
@@ -538,6 +642,7 @@ impl fmt::Display for Value {
         match self {
             Value::Numeric(q) => write!(f, "{q}"),
             Value::Symbolic(sq) => write!(f, "{sq}"),
+            Value::FuzzyBool(fb) => write!(f, "{fb}"),
             Value::Vector(v) => write!(f, "{v}"),
         }
     }

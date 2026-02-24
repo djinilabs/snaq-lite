@@ -3,6 +3,7 @@
 pub mod cas;
 pub mod dimension;
 pub mod error;
+pub mod fuzzy;
 pub mod functions;
 pub mod ir;
 pub mod lexer;
@@ -14,6 +15,7 @@ pub mod resolve;
 pub mod symbol_registry;
 pub mod symbolic;
 pub mod unit;
+pub mod stat_compare;
 pub mod unit_registry;
 pub mod vector;
 
@@ -24,6 +26,7 @@ pub use ir::{ExprDef, Expression, ProgramDef};
 pub use parser::parse;
 pub use queries::{program, set_eval_registry, value, vector_into_stream};
 pub use symbol_registry::SymbolRegistry;
+pub use fuzzy::FuzzyBool;
 pub use symbolic::{SymbolicQuantity, SymbolicExpr, Value};
 pub use vector::{LazyVector, VectorOrientation, VectorValue};
 pub use unit_registry::{default_si_registry, UnitRegistry};
@@ -56,6 +59,7 @@ fn format_value_for_display(db: &dyn salsa::Database, value: &Value) -> Result<S
     match value {
         Value::Numeric(q) => Ok(format!("{q}")),
         Value::Symbolic(sq) => Ok(format!("{sq}")),
+        Value::FuzzyBool(fb) => Ok(format!("{fb}")),
         Value::Vector(v) => {
             let stream = vector_into_stream(db, v.inner.clone());
             let results: Vec<_> = futures::executor::block_on(async move {
@@ -456,6 +460,171 @@ mod tests {
         // "10 km + 5 m as m" => (10 km + 5 m) as m
         let q = run_numeric("10 km + 5 m as m").unwrap();
         assert!((q.value() - 10_005.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn parse_comparison() {
+        let parsed = parse("1 == 2").unwrap();
+        assert!(matches!(parsed, ExprDef::Eq(_, _)));
+        let parsed = parse("100 m < 1 kilometer").unwrap();
+        assert!(matches!(parsed, ExprDef::Lt(_, _)));
+        let parsed = parse("2 <= 3").unwrap();
+        assert!(matches!(parsed, ExprDef::Le(_, _)));
+        let parsed = parse("3 > 2").unwrap();
+        assert!(matches!(parsed, ExprDef::Gt(_, _)));
+        let parsed = parse("4 >= 4").unwrap();
+        assert!(matches!(parsed, ExprDef::Ge(_, _)));
+        let parsed = parse("1 != 1").unwrap();
+        assert!(matches!(parsed, ExprDef::Ne(_, _)));
+    }
+
+    #[test]
+    fn run_comparison_scalar_numeric() {
+        // Result is Value::FuzzyBool (crisp for exact literals)
+        let v = run_with_registry("1 == 2", &default_si_registry()).unwrap();
+        assert!(matches!(v, Value::FuzzyBool(FuzzyBool::False)));
+        let v = run_with_registry("1 == 1", &default_si_registry()).unwrap();
+        assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True)));
+        let v = run_with_registry("100 m < 1 kilometer", &default_si_registry()).unwrap();
+        assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True))); // 100 < 1000
+        let v = run_with_registry("2 <= 3", &default_si_registry()).unwrap();
+        assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True)));
+        let v = run_with_registry("3 > 2", &default_si_registry()).unwrap();
+        assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True)));
+        let v = run_with_registry("4 >= 4", &default_si_registry()).unwrap();
+        assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True)));
+        let v = run_with_registry("1 != 2", &default_si_registry()).unwrap();
+        assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True)));
+    }
+
+    #[test]
+    fn run_comparison_precedence() {
+        // 1 + 2 < 3 + 4 => (1+2) < (3+4) => 3 < 7 => true
+        let v = run_with_registry("1 + 2 < 3 + 4", &default_si_registry()).unwrap();
+        assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True)));
+    }
+
+    #[test]
+    fn run_comparison_dimension_mismatch() {
+        let e = run_with_registry("1 m < 1 s", &default_si_registry()).unwrap_err();
+        assert!(matches!(e, RunError::DimensionMismatch { .. }));
+    }
+
+    #[test]
+    fn run_comparison_vector_scalar() {
+        use crate::queries::{program, set_eval_registry, value, vector_into_stream};
+        use crate::resolve;
+        use crate::cas;
+        use futures::stream::StreamExt;
+        use salsa::DatabaseImpl;
+
+        let registry = default_si_registry();
+        let root_def = parse("[1 m, 2 m] < 1.5 m").unwrap();
+        let root_def = resolve::resolve(root_def, &registry).unwrap();
+        let root_def = cas::simplify_symbolic(root_def, &registry).unwrap();
+        set_eval_registry(registry.clone());
+        let db = DatabaseImpl::new();
+        let program_def = ProgramDef::new(&db, root_def);
+        let root = program(&db, program_def);
+        let v = value(&db, root).unwrap();
+        let Value::Vector(w) = v else { panic!("expected vector") };
+        let stream = vector_into_stream(&db, w.inner.clone());
+        let results: Vec<_> = futures::executor::block_on(async move {
+            stream.collect().await
+        });
+        assert_eq!(results.len(), 2);
+        let v0 = results[0].as_ref().unwrap().as_ref().unwrap();
+        let v1 = results[1].as_ref().unwrap().as_ref().unwrap();
+        assert!(matches!(v0, Value::FuzzyBool(FuzzyBool::True)), "1 m < 1.5 m => true");
+        assert!(matches!(v1, Value::FuzzyBool(FuzzyBool::False)), "2 m < 1.5 m => false");
+    }
+
+    #[test]
+    fn run_comparison_vector_vector_element_wise() {
+        use crate::queries::{program, set_eval_registry, value, vector_into_stream};
+        use crate::resolve;
+        use crate::cas;
+        use futures::stream::StreamExt;
+        use salsa::DatabaseImpl;
+
+        let registry = default_si_registry();
+        let root_def = parse("[1, 2, 3] == [1, 0, 3]").unwrap();
+        let root_def = resolve::resolve(root_def, &registry).unwrap();
+        let root_def = cas::simplify_symbolic(root_def, &registry).unwrap();
+        set_eval_registry(registry.clone());
+        let db = DatabaseImpl::new();
+        let program_def = ProgramDef::new(&db, root_def);
+        let root = program(&db, program_def);
+        let v = value(&db, root).unwrap();
+        let Value::Vector(w) = v else { panic!("expected vector") };
+        let stream = vector_into_stream(&db, w.inner.clone());
+        let results: Vec<_> = futures::executor::block_on(async move {
+            stream.collect().await
+        });
+        assert_eq!(results.len(), 3);
+        let v0 = results[0].as_ref().unwrap().as_ref().unwrap();
+        let v1 = results[1].as_ref().unwrap().as_ref().unwrap();
+        let v2 = results[2].as_ref().unwrap().as_ref().unwrap();
+        assert!(matches!(v0, Value::FuzzyBool(FuzzyBool::True)));
+        assert!(matches!(v1, Value::FuzzyBool(FuzzyBool::False)));
+        assert!(matches!(v2, Value::FuzzyBool(FuzzyBool::True)));
+    }
+
+    #[test]
+    fn run_comparison_cas_fold() {
+        // 1 < 2 constant-folds to LitFuzzyBool(True); run_numeric returns BooleanResult
+        let e = run_numeric("1 < 2").unwrap_err();
+        assert!(matches!(e, RunError::BooleanResult));
+    }
+
+    #[test]
+    fn run_comparison_format() {
+        // Comparison results display as "true" or "false"
+        assert_eq!(run_format("1 < 2").unwrap(), "true");
+        assert_eq!(run_format("1 == 2").unwrap(), "false");
+        assert_eq!(run_format("100 m < 1 kilometer").unwrap(), "true");
+    }
+
+    #[test]
+    fn run_comparison_symbolic_display() {
+        // Symbolic comparison displays as (expr) op (expr)
+        let s = run_format("1 + pi < 3").unwrap();
+        assert!(s.contains('<'), "symbolic comparison should contain <");
+        assert!(s.contains('π') || s.contains("pi"), "should contain pi symbol");
+    }
+
+    #[test]
+    fn run_comparison_row_column_reduce() {
+        // row×column: compare(sum(left), sum(right)) → one Value::FuzzyBool
+        // [1 m, 2 m]' < [2 m, 1 m] => sum 3 m < 3 m. With variance, can be False or Uncertain (not True).
+        let v = run_with_registry("[1 m, 2 m]' < [2 m, 1 m]", &default_si_registry()).unwrap();
+        match &v {
+            Value::FuzzyBool(FuzzyBool::False) | Value::FuzzyBool(FuzzyBool::Uncertain(_)) => {}
+            _ => panic!("3 m < 3 m should be False or Uncertain, got {:?}", v),
+        }
+        // [1, 2]' < [0, 4] => 3 < 4 => true (crisp: 3 and 4 exact)
+        let v = run_with_registry("[1, 2]' < [0, 4]", &default_si_registry()).unwrap();
+        assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True)), "3 < 4 => true");
+    }
+
+    #[test]
+    fn run_format_vector_of_booleans() {
+        // Vector of comparison results displays as [true, false, ...]
+        assert_eq!(run_format("[1 < 2, 1 == 2]").unwrap(), "[true, false]");
+        assert_eq!(run_format("[2 <= 3, 3 > 4]").unwrap(), "[true, false]");
+    }
+
+    #[test]
+    fn run_format_fuzzy_bool_uncertain() {
+        // FuzzyBool::Uncertain displays as "uncertain(prob)"
+        use ordered_float::OrderedFloat;
+        let v = Value::FuzzyBool(FuzzyBool::Uncertain(OrderedFloat::from(0.5)));
+        let s = v.to_string();
+        assert!(
+            s.contains("uncertain"),
+            "Uncertain should display as uncertain(...), got {}",
+            s
+        );
     }
 
     #[test]

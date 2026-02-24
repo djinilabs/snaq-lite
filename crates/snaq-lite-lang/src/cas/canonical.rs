@@ -17,6 +17,12 @@ pub enum Rank {
     As(Box<Rank>, Box<Rank>),
     VecLiteral(Vec<Rank>),
     Transpose(Box<Rank>),
+    Eq(Box<Rank>, Box<Rank>),
+    Ne(Box<Rank>, Box<Rank>),
+    Lt(Box<Rank>, Box<Rank>),
+    Le(Box<Rank>, Box<Rank>),
+    Gt(Box<Rank>, Box<Rank>),
+    Ge(Box<Rank>, Box<Rank>),
 }
 
 fn tag_order(r: &Rank) -> u8 {
@@ -32,6 +38,12 @@ fn tag_order(r: &Rank) -> u8 {
         Rank::As(..) => 8,
         Rank::VecLiteral(_) => 9,
         Rank::Transpose(_) => 10,
+        Rank::Eq(..) => 11,
+        Rank::Ne(..) => 12,
+        Rank::Lt(..) => 13,
+        Rank::Le(..) => 14,
+        Rank::Gt(..) => 15,
+        Rank::Ge(..) => 16,
     }
 }
 
@@ -59,6 +71,12 @@ impl Ord for Rank {
             (Rank::As(a1, a2), Rank::As(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::VecLiteral(a), Rank::VecLiteral(b)) => a.cmp(b),
             (Rank::Transpose(a), Rank::Transpose(b)) => a.cmp(b),
+            (Rank::Eq(a1, a2), Rank::Eq(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
+            (Rank::Ne(a1, a2), Rank::Ne(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
+            (Rank::Lt(a1, a2), Rank::Lt(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
+            (Rank::Le(a1, a2), Rank::Le(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
+            (Rank::Gt(a1, a2), Rank::Gt(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
+            (Rank::Ge(a1, a2), Rank::Ge(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             _ => Ordering::Equal,
         }
     }
@@ -74,6 +92,7 @@ fn rank_is_vector_valued(r: &Rank) -> bool {
 pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
     match pool.get(id) {
         ExprNode::Lit(_) => Rank::Constant,
+        ExprNode::LitFuzzyBool(_) => Rank::Constant,
         ExprNode::LitSymbol(s) => Rank::Symbol(s.clone()),
         ExprNode::Neg(inner) => Rank::Neg(Box::new(rank(pool, *inner))),
         ExprNode::Add(ids) => Rank::Add(ids.iter().map(|&i| rank(pool, i)).collect()),
@@ -86,6 +105,12 @@ pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
         ExprNode::As(l, r) => Rank::As(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
         ExprNode::VecLiteral(ids) => Rank::VecLiteral(ids.iter().map(|&i| rank(pool, i)).collect()),
         ExprNode::Transpose(inner) => Rank::Transpose(Box::new(rank(pool, *inner))),
+        ExprNode::Eq(l, r) => Rank::Eq(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
+        ExprNode::Ne(l, r) => Rank::Ne(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
+        ExprNode::Lt(l, r) => Rank::Lt(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
+        ExprNode::Le(l, r) => Rank::Le(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
+        ExprNode::Gt(l, r) => Rank::Gt(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
+        ExprNode::Ge(l, r) => Rank::Ge(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
     }
 }
 
@@ -132,6 +157,7 @@ fn canonicalize_rec(
 ) -> ExprId {
     match pool.get(id) {
         ExprNode::Lit(q) => out.intern(ExprNode::Lit(q.clone())),
+        ExprNode::LitFuzzyBool(f) => out.intern(ExprNode::LitFuzzyBool(f.clone())),
         ExprNode::LitSymbol(s) => out.intern(ExprNode::LitSymbol(s.clone())),
         ExprNode::Neg(inner) => {
             let new_inner = canonicalize_rec(pool, out, *inner);
@@ -194,6 +220,36 @@ fn canonicalize_rec(
         ExprNode::Transpose(inner) => {
             let new_inner = canonicalize_rec(pool, out, *inner);
             out.intern(ExprNode::Transpose(new_inner))
+        }
+        ExprNode::Eq(l, r) => {
+            let new_l = canonicalize_rec(pool, out, *l);
+            let new_r = canonicalize_rec(pool, out, *r);
+            out.intern(ExprNode::Eq(new_l, new_r))
+        }
+        ExprNode::Ne(l, r) => {
+            let new_l = canonicalize_rec(pool, out, *l);
+            let new_r = canonicalize_rec(pool, out, *r);
+            out.intern(ExprNode::Ne(new_l, new_r))
+        }
+        ExprNode::Lt(l, r) => {
+            let new_l = canonicalize_rec(pool, out, *l);
+            let new_r = canonicalize_rec(pool, out, *r);
+            out.intern(ExprNode::Lt(new_l, new_r))
+        }
+        ExprNode::Le(l, r) => {
+            let new_l = canonicalize_rec(pool, out, *l);
+            let new_r = canonicalize_rec(pool, out, *r);
+            out.intern(ExprNode::Le(new_l, new_r))
+        }
+        ExprNode::Gt(l, r) => {
+            let new_l = canonicalize_rec(pool, out, *l);
+            let new_r = canonicalize_rec(pool, out, *r);
+            out.intern(ExprNode::Gt(new_l, new_r))
+        }
+        ExprNode::Ge(l, r) => {
+            let new_l = canonicalize_rec(pool, out, *l);
+            let new_r = canonicalize_rec(pool, out, *r);
+            out.intern(ExprNode::Ge(new_l, new_r))
         }
     }
 }

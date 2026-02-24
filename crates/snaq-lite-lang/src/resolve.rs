@@ -27,7 +27,7 @@ pub fn resolve(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, RunErro
                 Ok(ExprDef::LitSymbol(name.clone()))
             }
         }
-        ExprDef::Lit(_) | ExprDef::LitSymbol(_) => Ok(def),
+        ExprDef::Lit(_) | ExprDef::LitFuzzyBool(_) | ExprDef::LitSymbol(_) => Ok(def),
         ExprDef::Add(l, r) => {
             let l = resolve(*l, registry)?;
             let r = resolve(*r, registry)?;
@@ -47,6 +47,36 @@ pub fn resolve(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, RunErro
             let l = resolve(*l, registry)?;
             let r = resolve(*r, registry)?;
             Ok(ExprDef::Div(Box::new(l), Box::new(r)))
+        }
+        ExprDef::Eq(l, r) => {
+            let l = resolve(*l, registry)?;
+            let r = resolve(*r, registry)?;
+            Ok(ExprDef::Eq(Box::new(l), Box::new(r)))
+        }
+        ExprDef::Ne(l, r) => {
+            let l = resolve(*l, registry)?;
+            let r = resolve(*r, registry)?;
+            Ok(ExprDef::Ne(Box::new(l), Box::new(r)))
+        }
+        ExprDef::Lt(l, r) => {
+            let l = resolve(*l, registry)?;
+            let r = resolve(*r, registry)?;
+            Ok(ExprDef::Lt(Box::new(l), Box::new(r)))
+        }
+        ExprDef::Le(l, r) => {
+            let l = resolve(*l, registry)?;
+            let r = resolve(*r, registry)?;
+            Ok(ExprDef::Le(Box::new(l), Box::new(r)))
+        }
+        ExprDef::Gt(l, r) => {
+            let l = resolve(*l, registry)?;
+            let r = resolve(*r, registry)?;
+            Ok(ExprDef::Gt(Box::new(l), Box::new(r)))
+        }
+        ExprDef::Ge(l, r) => {
+            let l = resolve(*l, registry)?;
+            let r = resolve(*r, registry)?;
+            Ok(ExprDef::Ge(Box::new(l), Box::new(r)))
         }
         ExprDef::Neg(inner) => {
             let inner = resolve(*inner, registry)?;
@@ -104,7 +134,7 @@ fn resolve_unit_expr(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, R
             Ok(ExprDef::Div(Box::new(l), Box::new(r)))
         }
         ExprDef::Lit(_) => Ok(def),
-        ExprDef::VecLiteral(..) | ExprDef::Transpose(..) => Err(RunError::UnknownUnit(
+        ExprDef::LitFuzzyBool(_) | ExprDef::VecLiteral(..) | ExprDef::Transpose(..) => Err(RunError::UnknownUnit(
             "as: right side must be a unit or composed units (e.g. m, meters per second)".to_string(),
         )),
         _ => Err(RunError::UnknownUnit(

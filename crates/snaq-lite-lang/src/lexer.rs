@@ -30,6 +30,13 @@ pub enum Tok {
     RBracket,
     /// Postfix transpose: `'` (e.g. [1,2,3]')
     Apostrophe,
+    /// Comparison: `==`, `!=`, `<`, `<=`, `>`, `>=`
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 #[derive(Clone, Debug)]
@@ -168,6 +175,23 @@ impl<'input> Iterator for Lexer<'input> {
             self.pos += "π".len();
             return Some(Ok((start, Tok::Pi, self.pos)));
         }
+        // Two-char comparison tokens before single '<' or '>'
+        if rest.starts_with("==") {
+            self.pos += 2;
+            return Some(Ok((start, Tok::Eq, self.pos)));
+        }
+        if rest.starts_with("!=") {
+            self.pos += 2;
+            return Some(Ok((start, Tok::Ne, self.pos)));
+        }
+        if rest.starts_with("<=") {
+            self.pos += 2;
+            return Some(Ok((start, Tok::Le, self.pos)));
+        }
+        if rest.starts_with(">=") {
+            self.pos += 2;
+            return Some(Ok((start, Tok::Ge, self.pos)));
+        }
 
         let mut it = rest.chars();
         let c = it.next()?;
@@ -185,6 +209,8 @@ impl<'input> Iterator for Lexer<'input> {
             ',' => Tok::Comma,
             ':' => Tok::Colon,
             '\'' => Tok::Apostrophe,
+            '<' => Tok::Lt,
+            '>' => Tok::Gt,
             'a'..='z' | 'A'..='Z' | '_' => {
                 self.pos -= c.len_utf8(); // put back
                 if let Some(s) = self.take_ident() {

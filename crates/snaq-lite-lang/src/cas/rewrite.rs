@@ -2,7 +2,11 @@
 
 use crate::cas::{ExprId, ExprInterner, ExprNode};
 use crate::error::RunError;
-use crate::quantity::{Quantity, QuantityError};
+use crate::fuzzy::FuzzyBool;
+use crate::quantity::{Quantity, QuantityError, SnaqNumber};
+use crate::stat_compare::{
+    comparison_probability, probability_to_fuzzy_bool, ComparisonKind, CONFIDENCE_THRESHOLD,
+};
 use crate::unit_registry::UnitRegistry;
 use std::collections::BTreeMap;
 use std::ops::Neg;
@@ -27,6 +31,7 @@ fn rewrite_rec(
 ) -> Result<ExprId, RunError> {
     match pool.get(id) {
         ExprNode::Lit(q) => Ok(out.intern(ExprNode::Lit(q.clone()))),
+        ExprNode::LitFuzzyBool(f) => Ok(out.intern(ExprNode::LitFuzzyBool(f.clone()))),
         ExprNode::LitSymbol(s) => Ok(out.intern(ExprNode::LitSymbol(s.clone()))),
         ExprNode::Neg(inner) => {
             let new_inner = rewrite_rec(pool, out, *inner, registry)?;
@@ -111,7 +116,99 @@ fn rewrite_rec(
             let new_inner = rewrite_rec(pool, out, *inner, registry)?;
             Ok(out.intern(ExprNode::Transpose(new_inner)))
         }
+        ExprNode::Eq(l, r) => {
+            let new_l = rewrite_rec(pool, out, *l, registry)?;
+            let new_r = rewrite_rec(pool, out, *r, registry)?;
+            if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
+                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Eq)?;
+                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy)));
+            }
+            Ok(out.intern(ExprNode::Eq(new_l, new_r)))
+        }
+        ExprNode::Ne(l, r) => {
+            let new_l = rewrite_rec(pool, out, *l, registry)?;
+            let new_r = rewrite_rec(pool, out, *r, registry)?;
+            if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
+                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Ne)?;
+                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy)));
+            }
+            Ok(out.intern(ExprNode::Ne(new_l, new_r)))
+        }
+        ExprNode::Lt(l, r) => {
+            let new_l = rewrite_rec(pool, out, *l, registry)?;
+            let new_r = rewrite_rec(pool, out, *r, registry)?;
+            if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
+                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Lt)?;
+                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy)));
+            }
+            Ok(out.intern(ExprNode::Lt(new_l, new_r)))
+        }
+        ExprNode::Le(l, r) => {
+            let new_l = rewrite_rec(pool, out, *l, registry)?;
+            let new_r = rewrite_rec(pool, out, *r, registry)?;
+            if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
+                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Le)?;
+                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy)));
+            }
+            Ok(out.intern(ExprNode::Le(new_l, new_r)))
+        }
+        ExprNode::Gt(l, r) => {
+            let new_l = rewrite_rec(pool, out, *l, registry)?;
+            let new_r = rewrite_rec(pool, out, *r, registry)?;
+            if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
+                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Gt)?;
+                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy)));
+            }
+            Ok(out.intern(ExprNode::Gt(new_l, new_r)))
+        }
+        ExprNode::Ge(l, r) => {
+            let new_l = rewrite_rec(pool, out, *l, registry)?;
+            let new_r = rewrite_rec(pool, out, *r, registry)?;
+            if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
+                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Ge)?;
+                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy)));
+            }
+            Ok(out.intern(ExprNode::Ge(new_l, new_r)))
+        }
     }
+}
+
+/// Convert two quantities to the same unit and return their SnaqNumbers. Errors on dimension mismatch.
+fn cmp_lit_numbers(
+    ql: &Quantity,
+    qr: &Quantity,
+    registry: &UnitRegistry,
+) -> Result<(SnaqNumber, SnaqNumber), RunError> {
+    if !registry.same_dimension(ql.unit(), qr.unit()).unwrap_or(false) {
+        return Err(RunError::DimensionMismatch {
+            left: ql.unit().clone(),
+            right: qr.unit().clone(),
+        });
+    }
+    let result_unit = Quantity::smaller_unit(registry, ql.unit(), qr.unit())
+        .cloned()
+        .unwrap_or_else(|| ql.unit().clone());
+    let qa = ql
+        .clone()
+        .convert_to(registry, &result_unit)
+        .map_err(quantity_to_run_error)?;
+    let qb = qr
+        .clone()
+        .convert_to(registry, &result_unit)
+        .map_err(quantity_to_run_error)?;
+    Ok((qa.number, qb.number))
+}
+
+/// Compute FuzzyBool for a comparison of two literal quantities with the given comparison kind.
+fn cmp_lit_fuzzy_with_kind(
+    ql: &Quantity,
+    qr: &Quantity,
+    registry: &UnitRegistry,
+    kind: ComparisonKind,
+) -> Result<FuzzyBool, RunError> {
+    let (na, nb) = cmp_lit_numbers(ql, qr, registry)?;
+    let prob = comparison_probability(kind, na, nb);
+    Ok(probability_to_fuzzy_bool(prob, CONFIDENCE_THRESHOLD))
 }
 
 fn quantity_to_run_error(e: QuantityError) -> RunError {

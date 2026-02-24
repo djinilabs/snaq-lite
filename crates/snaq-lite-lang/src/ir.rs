@@ -1,5 +1,6 @@
 //! IR: inputs and tracked expression graph for the reactive computation.
 
+use crate::fuzzy::FuzzyBool;
 use crate::quantity::Quantity;
 use ordered_float::OrderedFloat;
 
@@ -24,12 +25,21 @@ pub enum ExprDef {
     LitUnit(String),
     /// Resolved: quantity (value + unit).
     Lit(Quantity),
+    /// Resolved: fuzzy boolean (e.g. from constant-folded statistical comparison).
+    LitFuzzyBool(FuzzyBool),
     /// Resolved: bare symbol (e.g. pi, e). Identifier not found in unit registry.
     LitSymbol(String),
     Add(Box<ExprDef>, Box<ExprDef>),
     Sub(Box<ExprDef>, Box<ExprDef>),
     Mul(Box<ExprDef>, Box<ExprDef>),
     Div(Box<ExprDef>, Box<ExprDef>),
+    /// Comparison: ==, !=, <, <=, >, >=. Result is FuzzyBool (Value::FuzzyBool).
+    Eq(Box<ExprDef>, Box<ExprDef>),
+    Ne(Box<ExprDef>, Box<ExprDef>),
+    Lt(Box<ExprDef>, Box<ExprDef>),
+    Le(Box<ExprDef>, Box<ExprDef>),
+    Gt(Box<ExprDef>, Box<ExprDef>),
+    Ge(Box<ExprDef>, Box<ExprDef>),
     /// Unary minus (e.g. "-1", "-(2 * 3)").
     Neg(Box<ExprDef>),
     /// Function call (e.g. sin(x), max(1, 2)). Name and args; args are positional or named.
@@ -60,11 +70,18 @@ pub struct Expression<'db> {
 #[derive(Clone, PartialEq, Eq, Hash, Debug, salsa::Update)]
 pub enum ExprData<'db> {
     Lit(Quantity),
+    LitFuzzyBool(FuzzyBool),
     LitSymbol(String),
     Add(Expression<'db>, Expression<'db>),
     Sub(Expression<'db>, Expression<'db>),
     Mul(Expression<'db>, Expression<'db>),
     Div(Expression<'db>, Expression<'db>),
+    Eq(Expression<'db>, Expression<'db>),
+    Ne(Expression<'db>, Expression<'db>),
+    Lt(Expression<'db>, Expression<'db>),
+    Le(Expression<'db>, Expression<'db>),
+    Gt(Expression<'db>, Expression<'db>),
+    Ge(Expression<'db>, Expression<'db>),
     Neg(Expression<'db>),
     /// Function call: name and args as (param name if named, expression).
     Call(String, Vec<(Option<String>, Expression<'db>)>),

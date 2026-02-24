@@ -28,16 +28,33 @@ extern {
         "," => Tok::Comma,
         ":" => Tok::Colon,
         "'" => Tok::Apostrophe,
+        "==" => Tok::Eq,
+        "!=" => Tok::Ne,
+        "<" => Tok::Lt,
+        "<=" => Tok::Le,
+        ">" => Tok::Gt,
+        ">=" => Tok::Ge,
         Num => Tok::Num(<ordered_float::OrderedFloat<f64>>),
         Ident => Tok::Ident(<String>),
         FuncIdent => Tok::FuncIdent(<String>),
     }
 }
 
+// Top level: comparison (weakest) then additive. So "1 + 2 < 3 + 4" => (1+2) < (3+4).
 pub Expr: ExprDef = {
-    <l:Expr> "+" <r:Term> => ExprDef::Add(Box::new(l), Box::new(r)),
-    <l:Expr> "-" <r:Term> => ExprDef::Sub(Box::new(l), Box::new(r)),
-    <e:Expr> "as" <u:UnitTerm> => ExprDef::As(Box::new(e), Box::new(u)),
+    <l:AddExpr> "==" <r:Expr> => ExprDef::Eq(Box::new(l), Box::new(r)),
+    <l:AddExpr> "!=" <r:Expr> => ExprDef::Ne(Box::new(l), Box::new(r)),
+    <l:AddExpr> "<" <r:Expr> => ExprDef::Lt(Box::new(l), Box::new(r)),
+    <l:AddExpr> "<=" <r:Expr> => ExprDef::Le(Box::new(l), Box::new(r)),
+    <l:AddExpr> ">" <r:Expr> => ExprDef::Gt(Box::new(l), Box::new(r)),
+    <l:AddExpr> ">=" <r:Expr> => ExprDef::Ge(Box::new(l), Box::new(r)),
+    AddExpr,
+};
+
+AddExpr: ExprDef = {
+    <l:AddExpr> "+" <r:Term> => ExprDef::Add(Box::new(l), Box::new(r)),
+    <l:AddExpr> "-" <r:Term> => ExprDef::Sub(Box::new(l), Box::new(r)),
+    <e:AddExpr> "as" <u:UnitTerm> => ExprDef::As(Box::new(e), Box::new(u)),
     Term,
 };
 

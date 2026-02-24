@@ -8,6 +8,9 @@ use crate::error::RunError;
 use crate::functions;
 use crate::ir::{CallArg, ExprData, ExprDef, Expression, ProgramDef};
 use crate::quantity::Quantity;
+use crate::stat_compare::{
+    comparison_probability, probability_to_fuzzy_bool, ComparisonKind, CONFIDENCE_THRESHOLD,
+};
 use crate::symbolic::{SymbolicExpr, SymbolicQuantity, Value};
 use crate::unit::Unit;
 use crate::unit_registry::UnitRegistry;
@@ -404,6 +407,12 @@ fn apply_binary_op(
         VectorBinaryOp::Sub => sub_values(&a, &b, registry, None)?,
         VectorBinaryOp::Mul => mul_values(&a, &b, registry, None)?,
         VectorBinaryOp::Div => div_values(&a, &b, registry, None)?,
+        VectorBinaryOp::Eq => cmp_values(CmpOp::Eq, &a, &b, registry, None)?,
+        VectorBinaryOp::Ne => cmp_values(CmpOp::Ne, &a, &b, registry, None)?,
+        VectorBinaryOp::Lt => cmp_values(CmpOp::Lt, &a, &b, registry, None)?,
+        VectorBinaryOp::Le => cmp_values(CmpOp::Le, &a, &b, registry, None)?,
+        VectorBinaryOp::Gt => cmp_values(CmpOp::Gt, &a, &b, registry, None)?,
+        VectorBinaryOp::Ge => cmp_values(CmpOp::Ge, &a, &b, registry, None)?,
     };
     Ok(Some(result))
 }
@@ -457,6 +466,12 @@ fn apply_map_op(
         VectorMapOp::DivLhs(scalar) => div_values(scalar, &v, registry, None)?,
         VectorMapOp::Neg => neg_value(&v)?,
         VectorMapOp::UnaryFunc(name) => apply_unary_builtin(name, &v, registry)?,
+        VectorMapOp::Eq(scalar) => cmp_values(CmpOp::Eq, &v, scalar, registry, None)?,
+        VectorMapOp::Ne(scalar) => cmp_values(CmpOp::Ne, &v, scalar, registry, None)?,
+        VectorMapOp::Lt(scalar) => cmp_values(CmpOp::Lt, &v, scalar, registry, None)?,
+        VectorMapOp::Le(scalar) => cmp_values(CmpOp::Le, &v, scalar, registry, None)?,
+        VectorMapOp::Gt(scalar) => cmp_values(CmpOp::Gt, &v, scalar, registry, None)?,
+        VectorMapOp::Ge(scalar) => cmp_values(CmpOp::Ge, &v, scalar, registry, None)?,
     };
     Ok(Some(result))
 }
@@ -591,6 +606,7 @@ pub fn program(db: &dyn salsa::Database, program_def: ProgramDef) -> Expression<
 fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
     let data = match def {
         ExprDef::Lit(q) => ExprData::Lit(q),
+        ExprDef::LitFuzzyBool(f) => ExprData::LitFuzzyBool(f.clone()),
         ExprDef::LitSymbol(name) => ExprData::LitSymbol(name),
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved expression: resolve() must be called before building the graph")
@@ -614,6 +630,36 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
             let left = build_expression(db, *l);
             let right = build_expression(db, *r);
             ExprData::Div(left, right)
+        }
+        ExprDef::Eq(l, r) => {
+            let left = build_expression(db, *l);
+            let right = build_expression(db, *r);
+            ExprData::Eq(left, right)
+        }
+        ExprDef::Ne(l, r) => {
+            let left = build_expression(db, *l);
+            let right = build_expression(db, *r);
+            ExprData::Ne(left, right)
+        }
+        ExprDef::Lt(l, r) => {
+            let left = build_expression(db, *l);
+            let right = build_expression(db, *r);
+            ExprData::Lt(left, right)
+        }
+        ExprDef::Le(l, r) => {
+            let left = build_expression(db, *l);
+            let right = build_expression(db, *r);
+            ExprData::Le(left, right)
+        }
+        ExprDef::Gt(l, r) => {
+            let left = build_expression(db, *l);
+            let right = build_expression(db, *r);
+            ExprData::Gt(left, right)
+        }
+        ExprDef::Ge(l, r) => {
+            let left = build_expression(db, *l);
+            let right = build_expression(db, *r);
+            ExprData::Ge(left, right)
         }
         ExprDef::Neg(inner) => {
             let inner_expr = build_expression(db, *inner);
@@ -658,6 +704,7 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
     let data = expr.data(db);
     with_registry(|registry| match data {
         ExprData::Lit(q) => Ok(Value::Numeric(q.clone())),
+        ExprData::LitFuzzyBool(f) => Ok(Value::FuzzyBool(f.clone())),
         ExprData::LitSymbol(name) => Ok(Value::Symbolic(SymbolicQuantity::new(
             SymbolicExpr::symbol(name),
             Unit::scalar(),
@@ -682,6 +729,36 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
             let right = value(db, *r)?;
             div_values(&left, &right, registry, Some(db))
         }
+        ExprData::Eq(l, r) => {
+            let left = value(db, *l)?;
+            let right = value(db, *r)?;
+            cmp_values(CmpOp::Eq, &left, &right, registry, Some(db))
+        }
+        ExprData::Ne(l, r) => {
+            let left = value(db, *l)?;
+            let right = value(db, *r)?;
+            cmp_values(CmpOp::Ne, &left, &right, registry, Some(db))
+        }
+        ExprData::Lt(l, r) => {
+            let left = value(db, *l)?;
+            let right = value(db, *r)?;
+            cmp_values(CmpOp::Lt, &left, &right, registry, Some(db))
+        }
+        ExprData::Le(l, r) => {
+            let left = value(db, *l)?;
+            let right = value(db, *r)?;
+            cmp_values(CmpOp::Le, &left, &right, registry, Some(db))
+        }
+        ExprData::Gt(l, r) => {
+            let left = value(db, *l)?;
+            let right = value(db, *r)?;
+            cmp_values(CmpOp::Gt, &left, &right, registry, Some(db))
+        }
+        ExprData::Ge(l, r) => {
+            let left = value(db, *l)?;
+            let right = value(db, *r)?;
+            cmp_values(CmpOp::Ge, &left, &right, registry, Some(db))
+        }
         ExprData::Neg(inner) => {
             let v = value(db, *inner)?;
             neg_value(&v)
@@ -698,6 +775,7 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
             })?;
             let target_unit = target_quantity.unit().clone();
             match &left_val {
+                Value::FuzzyBool(_) => Err(RunError::BooleanResult),
                 Value::Numeric(q) => {
                     let converted = q.clone().convert_to(registry, &target_unit).map_err(|e| {
                         match e {
@@ -748,6 +826,7 @@ pub fn value(db: &dyn salsa::Database, expr: Expression<'_>) -> Result<Value, Ru
 fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef {
     match expr.data(db) {
         ExprData::Lit(q) => ExprDef::Lit(q.clone()),
+        ExprData::LitFuzzyBool(f) => ExprDef::LitFuzzyBool(f.clone()),
         ExprData::LitSymbol(name) => ExprDef::LitSymbol(name.clone()),
         ExprData::Add(l, r) => ExprDef::Add(
             Box::new(expression_to_def(db, *l)),
@@ -762,6 +841,30 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
             Box::new(expression_to_def(db, *r)),
         ),
         ExprData::Div(l, r) => ExprDef::Div(
+            Box::new(expression_to_def(db, *l)),
+            Box::new(expression_to_def(db, *r)),
+        ),
+        ExprData::Eq(l, r) => ExprDef::Eq(
+            Box::new(expression_to_def(db, *l)),
+            Box::new(expression_to_def(db, *r)),
+        ),
+        ExprData::Ne(l, r) => ExprDef::Ne(
+            Box::new(expression_to_def(db, *l)),
+            Box::new(expression_to_def(db, *r)),
+        ),
+        ExprData::Lt(l, r) => ExprDef::Lt(
+            Box::new(expression_to_def(db, *l)),
+            Box::new(expression_to_def(db, *r)),
+        ),
+        ExprData::Le(l, r) => ExprDef::Le(
+            Box::new(expression_to_def(db, *l)),
+            Box::new(expression_to_def(db, *r)),
+        ),
+        ExprData::Gt(l, r) => ExprDef::Gt(
+            Box::new(expression_to_def(db, *l)),
+            Box::new(expression_to_def(db, *r)),
+        ),
+        ExprData::Ge(l, r) => ExprDef::Ge(
             Box::new(expression_to_def(db, *l)),
             Box::new(expression_to_def(db, *r)),
         ),
@@ -930,6 +1033,7 @@ fn value_to_symbolic_expr(v: &Value) -> SymbolicExpr {
     match v {
         Value::Numeric(q) => SymbolicExpr::number(q.value()),
         Value::Symbolic(sq) => sq.expr.clone(),
+        Value::FuzzyBool(_) => panic!("value_to_symbolic_expr: fuzzy boolean not supported"),
         Value::Vector(_) => panic!("value_to_symbolic_expr: vector not supported"),
     }
 }
@@ -947,6 +1051,177 @@ fn sum_vector_elements(
         }
     }
     Ok(acc)
+}
+
+/// Comparison operator used by [cmp_values].
+#[derive(Clone, Copy, Debug)]
+enum CmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+fn cmp_op_to_map_op(op: CmpOp, scalar: &Value) -> VectorMapOp {
+    match op {
+        CmpOp::Eq => VectorMapOp::Eq(Box::new(scalar.clone())),
+        CmpOp::Ne => VectorMapOp::Ne(Box::new(scalar.clone())),
+        CmpOp::Lt => VectorMapOp::Lt(Box::new(scalar.clone())),
+        CmpOp::Le => VectorMapOp::Le(Box::new(scalar.clone())),
+        CmpOp::Gt => VectorMapOp::Gt(Box::new(scalar.clone())),
+        CmpOp::Ge => VectorMapOp::Ge(Box::new(scalar.clone())),
+    }
+}
+
+fn cmp_op_to_binary_op(op: CmpOp) -> VectorBinaryOp {
+    match op {
+        CmpOp::Eq => VectorBinaryOp::Eq,
+        CmpOp::Ne => VectorBinaryOp::Ne,
+        CmpOp::Lt => VectorBinaryOp::Lt,
+        CmpOp::Le => VectorBinaryOp::Le,
+        CmpOp::Gt => VectorBinaryOp::Gt,
+        CmpOp::Ge => VectorBinaryOp::Ge,
+    }
+}
+
+/// Compare two values with the same dimension; returns `Value::FuzzyBool`.
+/// Vector×scalar → broadcast (Map); vector×vector → element-wise (ZipMap), outer (Outer), or
+/// row×column reduce-then-compare; scalar×scalar → Bool or Symbolic comparison expr.
+fn cmp_values(
+    op: CmpOp,
+    a: &Value,
+    b: &Value,
+    registry: &UnitRegistry,
+    db: Option<&dyn salsa::Database>,
+) -> Result<Value, RunError> {
+    match (a, b) {
+        (Value::Vector(v), scalar) | (scalar, Value::Vector(v))
+            if !matches!(scalar, Value::Vector(_)) =>
+        {
+            Ok(Value::Vector(VectorValue {
+                inner: LazyVector::Map {
+                    source: Box::new(v.inner.clone()),
+                    op: cmp_op_to_map_op(op, scalar),
+                },
+                orientation: v.orientation,
+            }))
+        }
+        (Value::Vector(left), Value::Vector(right)) => {
+            let db = db.ok_or(RunError::UnsupportedVectorOperation)?;
+            let bin_op = cmp_op_to_binary_op(op);
+            match (left.orientation, right.orientation) {
+                (VectorOrientation::Column, VectorOrientation::Column) => Ok(Value::Vector(
+                    VectorValue {
+                        inner: LazyVector::ZipMap {
+                            left: Box::new(left.inner.clone()),
+                            right: Box::new(right.inner.clone()),
+                            op: bin_op,
+                        },
+                        orientation: VectorOrientation::Column,
+                    },
+                )),
+                (VectorOrientation::Row, VectorOrientation::Row) => Ok(Value::Vector(
+                    VectorValue {
+                        inner: LazyVector::ZipMap {
+                            left: Box::new(left.inner.clone()),
+                            right: Box::new(right.inner.clone()),
+                            op: bin_op,
+                        },
+                        orientation: VectorOrientation::Row,
+                    },
+                )),
+                (VectorOrientation::Column, VectorOrientation::Row) => Ok(Value::Vector(
+                    VectorValue {
+                        inner: LazyVector::Outer {
+                            left: Box::new(left.inner.clone()),
+                            right: Box::new(right.inner.clone()),
+                            op: bin_op,
+                        },
+                        orientation: VectorOrientation::Column,
+                    },
+                )),
+                (VectorOrientation::Row, VectorOrientation::Column) => {
+                    let left_elems = collect_vector_stream(db, left.inner.clone());
+                    let right_elems = collect_vector_stream(db, right.inner.clone());
+                    if left_elems.len() != right_elems.len() {
+                        return Err(RunError::VectorLengthMismatch {
+                            left_len: left_elems.len(),
+                            right_len: right_elems.len(),
+                        });
+                    }
+                    let sum_left = sum_vector_elements(&left_elems, registry)?;
+                    let sum_right = sum_vector_elements(&right_elems, registry)?;
+                    cmp_values(op, &sum_left, &sum_right, registry, None)
+                }
+            }
+        }
+        (Value::Numeric(qa), Value::Numeric(qb)) => {
+            if !registry.same_dimension(qa.unit(), qb.unit()).unwrap_or(false) {
+                return Err(RunError::DimensionMismatch {
+                    left: qa.unit().clone(),
+                    right: qb.unit().clone(),
+                });
+            }
+            let result_unit = Quantity::smaller_unit(registry, qa.unit(), qb.unit())
+                .cloned()
+                .unwrap_or_else(|| qa.unit().clone());
+            let qa_c = qa.clone().convert_to(registry, &result_unit).map_err(|e| match e {
+                crate::quantity::QuantityError::DimensionMismatch { left, right } => {
+                    RunError::DimensionMismatch { left, right }
+                }
+                _ => RunError::DivisionByZero,
+            })?;
+            let qb_c = qb.clone().convert_to(registry, &result_unit).map_err(|e| match e {
+                crate::quantity::QuantityError::DimensionMismatch { left, right } => {
+                    RunError::DimensionMismatch { left, right }
+                }
+                _ => RunError::DivisionByZero,
+            })?;
+            let na = qa_c.number;
+            let nb = qb_c.number;
+            let kind = match op {
+                CmpOp::Eq => ComparisonKind::Eq,
+                CmpOp::Ne => ComparisonKind::Ne,
+                CmpOp::Lt => ComparisonKind::Lt,
+                CmpOp::Le => ComparisonKind::Le,
+                CmpOp::Gt => ComparisonKind::Gt,
+                CmpOp::Ge => ComparisonKind::Ge,
+            };
+            let prob = comparison_probability(kind, na, nb);
+            let fuzzy = probability_to_fuzzy_bool(prob, CONFIDENCE_THRESHOLD);
+            Ok(Value::FuzzyBool(fuzzy))
+        }
+        (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
+        _ => {
+            let (ea, ua) = value_to_expr_unit(a);
+            let (eb, ub) = value_to_expr_unit(b);
+            if !registry.same_dimension(&ua, &ub).unwrap_or(false) {
+                return Err(RunError::DimensionMismatch {
+                    left: ua.clone(),
+                    right: ub.clone(),
+                });
+            }
+            let result_unit = Quantity::smaller_unit(registry, &ua, &ub)
+                .cloned()
+                .unwrap_or_else(|| ua.clone());
+            let ea_scaled = scale_expr_to_unit(a, &ea, &ua, &result_unit, registry)?;
+            let eb_scaled = scale_expr_to_unit(b, &eb, &ub, &result_unit, registry)?;
+            let cmp_expr = match op {
+                CmpOp::Eq => SymbolicExpr::Eq(Box::new(ea_scaled), Box::new(eb_scaled)),
+                CmpOp::Ne => SymbolicExpr::Ne(Box::new(ea_scaled), Box::new(eb_scaled)),
+                CmpOp::Lt => SymbolicExpr::Lt(Box::new(ea_scaled), Box::new(eb_scaled)),
+                CmpOp::Le => SymbolicExpr::Le(Box::new(ea_scaled), Box::new(eb_scaled)),
+                CmpOp::Gt => SymbolicExpr::Gt(Box::new(ea_scaled), Box::new(eb_scaled)),
+                CmpOp::Ge => SymbolicExpr::Ge(Box::new(ea_scaled), Box::new(eb_scaled)),
+            };
+            Ok(Value::Symbolic(SymbolicQuantity::new(
+                cmp_expr,
+                Unit::scalar(),
+            )))
+        }
+    }
 }
 
 /// Dot product of two collected vectors (row×column mul). Returns scalar.
@@ -1049,6 +1324,7 @@ fn add_values(
                 }
                 _ => RunError::DivisionByZero,
             }),
+        (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
@@ -1154,6 +1430,7 @@ fn sub_values(
                 }
                 _ => RunError::DivisionByZero,
             }),
+        (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
@@ -1235,6 +1512,7 @@ fn mul_values(
             }
         }
         (Value::Numeric(qa), Value::Numeric(qb)) => Ok(Value::Numeric(qa.clone() * qb.clone())),
+        (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
@@ -1314,6 +1592,7 @@ fn div_values(
         (Value::Numeric(qa), Value::Numeric(qb)) => (qa.clone() / qb.clone())
             .map(Value::Numeric)
             .map_err(|_| RunError::DivisionByZero),
+        (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
@@ -1328,6 +1607,7 @@ fn div_values(
 
 fn neg_value(v: &Value) -> Result<Value, RunError> {
     match v {
+        Value::FuzzyBool(_) => Err(RunError::BooleanResult),
         Value::Vector(v) => Ok(Value::Vector(VectorValue {
             inner: LazyVector::Map {
                 source: Box::new(v.inner.clone()),
@@ -1347,6 +1627,7 @@ fn value_to_expr_unit(v: &Value) -> (SymbolicExpr, Unit) {
     match v {
         Value::Numeric(q) => (SymbolicExpr::number(q.value()), q.unit().clone()),
         Value::Symbolic(sq) => (sq.expr.clone(), sq.unit.clone()),
+        Value::FuzzyBool(_) => panic!("value_to_expr_unit: fuzzy boolean not supported"),
         Value::Vector(_) => panic!("value_to_expr_unit: vector not supported"),
     }
 }
@@ -1390,6 +1671,7 @@ fn scale_expr_to_unit(
             Ok(SymbolicExpr::number(converted.value()))
         }
         Value::Symbolic(_) => Ok(SymbolicExpr::mul(expr, &SymbolicExpr::number(ratio))),
+        Value::FuzzyBool(_) => Err(RunError::BooleanResult),
         Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
     }
 }

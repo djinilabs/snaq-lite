@@ -20,6 +20,8 @@ pub enum RunError {
     ExpectedVector,
     /// Vector operation (element-wise or dot) requires same length; left and right lengths differ.
     VectorLengthMismatch { left_len: usize, right_len: usize },
+    /// Result is boolean (e.g. comparison); cannot convert to quantity.
+    BooleanResult,
 }
 
 /// Parse error for expression strings.
@@ -79,6 +81,9 @@ impl std::fmt::Display for RunError {
                     f,
                     "vector length mismatch: left has {left_len} elements, right has {right_len}"
                 )
+            }
+            RunError::BooleanResult => {
+                write!(f, "result is boolean (e.g. comparison), cannot convert to quantity")
             }
         }
     }

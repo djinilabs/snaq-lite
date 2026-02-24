@@ -10,6 +10,7 @@ use crate::symbol_registry::SymbolRegistry;
 pub fn substitute_symbols(def: ExprDef, registry: &SymbolRegistry) -> Result<ExprDef, RunError> {
     match def {
         ExprDef::Lit(q) => Ok(ExprDef::Lit(q)),
+        ExprDef::LitFuzzyBool(f) => Ok(ExprDef::LitFuzzyBool(f)),
         ExprDef::LitSymbol(name) => {
             let value = registry.get(&name).ok_or(RunError::SymbolHasNoValue(name))?;
             Ok(ExprDef::Lit(Quantity::from_scalar(value)))
@@ -59,6 +60,30 @@ pub fn substitute_symbols(def: ExprDef, registry: &SymbolRegistry) -> Result<Exp
             Ok(ExprDef::VecLiteral(elems))
         }
         ExprDef::Transpose(inner) => Ok(ExprDef::Transpose(Box::new(substitute_symbols(*inner, registry)?))),
+        ExprDef::Eq(l, r) => Ok(ExprDef::Eq(
+            Box::new(substitute_symbols(*l, registry)?),
+            Box::new(substitute_symbols(*r, registry)?),
+        )),
+        ExprDef::Ne(l, r) => Ok(ExprDef::Ne(
+            Box::new(substitute_symbols(*l, registry)?),
+            Box::new(substitute_symbols(*r, registry)?),
+        )),
+        ExprDef::Lt(l, r) => Ok(ExprDef::Lt(
+            Box::new(substitute_symbols(*l, registry)?),
+            Box::new(substitute_symbols(*r, registry)?),
+        )),
+        ExprDef::Le(l, r) => Ok(ExprDef::Le(
+            Box::new(substitute_symbols(*l, registry)?),
+            Box::new(substitute_symbols(*r, registry)?),
+        )),
+        ExprDef::Gt(l, r) => Ok(ExprDef::Gt(
+            Box::new(substitute_symbols(*l, registry)?),
+            Box::new(substitute_symbols(*r, registry)?),
+        )),
+        ExprDef::Ge(l, r) => Ok(ExprDef::Ge(
+            Box::new(substitute_symbols(*l, registry)?),
+            Box::new(substitute_symbols(*r, registry)?),
+        )),
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved ExprDef: resolve() must be called before substitute_symbols")
         }

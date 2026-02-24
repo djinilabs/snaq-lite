@@ -8,6 +8,7 @@ use crate::ir::{CallArg, ExprDef};
 pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
     match def {
         ExprDef::Lit(q) => pool.intern(ExprNode::Lit(q.clone())),
+        ExprDef::LitFuzzyBool(f) => pool.intern(ExprNode::LitFuzzyBool(f.clone())),
         ExprDef::LitSymbol(s) => pool.intern(ExprNode::LitSymbol(s.clone())),
         ExprDef::Add(l, r) => {
             let lid = expr_def_to_interned(l, pool);
@@ -59,6 +60,36 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
             let id = expr_def_to_interned(inner, pool);
             pool.intern(ExprNode::Transpose(id))
         }
+        ExprDef::Eq(l, r) => {
+            let lid = expr_def_to_interned(l, pool);
+            let rid = expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Eq(lid, rid))
+        }
+        ExprDef::Ne(l, r) => {
+            let lid = expr_def_to_interned(l, pool);
+            let rid = expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Ne(lid, rid))
+        }
+        ExprDef::Lt(l, r) => {
+            let lid = expr_def_to_interned(l, pool);
+            let rid = expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Lt(lid, rid))
+        }
+        ExprDef::Le(l, r) => {
+            let lid = expr_def_to_interned(l, pool);
+            let rid = expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Le(lid, rid))
+        }
+        ExprDef::Gt(l, r) => {
+            let lid = expr_def_to_interned(l, pool);
+            let rid = expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Gt(lid, rid))
+        }
+        ExprDef::Ge(l, r) => {
+            let lid = expr_def_to_interned(l, pool);
+            let rid = expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Ge(lid, rid))
+        }
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved ExprDef: resolve() must be called before CAS")
         }
@@ -69,6 +100,7 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
 pub fn interned_to_expr_def(pool: &ExprInterner, id: ExprId) -> ExprDef {
     match pool.get(id) {
         ExprNode::Lit(q) => ExprDef::Lit(q.clone()),
+        ExprNode::LitFuzzyBool(f) => ExprDef::LitFuzzyBool(f.clone()),
         ExprNode::LitSymbol(s) => ExprDef::LitSymbol(s.clone()),
         ExprNode::Add(ids) => binaryize_add(pool, ids),
         ExprNode::Mul(ids) => binaryize_mul(pool, ids),
@@ -104,6 +136,30 @@ pub fn interned_to_expr_def(pool: &ExprInterner, id: ExprId) -> ExprDef {
                 .collect(),
         ),
         ExprNode::Transpose(inner) => ExprDef::Transpose(Box::new(interned_to_expr_def(pool, *inner))),
+        ExprNode::Eq(l, r) => ExprDef::Eq(
+            Box::new(interned_to_expr_def(pool, *l)),
+            Box::new(interned_to_expr_def(pool, *r)),
+        ),
+        ExprNode::Ne(l, r) => ExprDef::Ne(
+            Box::new(interned_to_expr_def(pool, *l)),
+            Box::new(interned_to_expr_def(pool, *r)),
+        ),
+        ExprNode::Lt(l, r) => ExprDef::Lt(
+            Box::new(interned_to_expr_def(pool, *l)),
+            Box::new(interned_to_expr_def(pool, *r)),
+        ),
+        ExprNode::Le(l, r) => ExprDef::Le(
+            Box::new(interned_to_expr_def(pool, *l)),
+            Box::new(interned_to_expr_def(pool, *r)),
+        ),
+        ExprNode::Gt(l, r) => ExprDef::Gt(
+            Box::new(interned_to_expr_def(pool, *l)),
+            Box::new(interned_to_expr_def(pool, *r)),
+        ),
+        ExprNode::Ge(l, r) => ExprDef::Ge(
+            Box::new(interned_to_expr_def(pool, *l)),
+            Box::new(interned_to_expr_def(pool, *r)),
+        ),
     }
 }
 

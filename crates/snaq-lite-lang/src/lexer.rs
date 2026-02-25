@@ -63,15 +63,29 @@ pub enum Tok {
     Newline,
 }
 
+/// Lexer error with optional byte span (start, end) for source snippet.
 #[derive(Clone, Debug)]
 pub enum LexicalError {
-    InvalidFloat(String),
+    InvalidFloat {
+        snippet: String,
+        start: usize,
+        end: usize,
+    },
+}
+
+impl LexicalError {
+    /// Byte span for this error, if any.
+    pub fn span(&self) -> Option<(usize, usize)> {
+        match self {
+            LexicalError::InvalidFloat { start, end, .. } => Some((*start, *end)),
+        }
+    }
 }
 
 impl std::fmt::Display for LexicalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LexicalError::InvalidFloat(s) => write!(f, "invalid float: {s}"),
+            LexicalError::InvalidFloat { snippet, .. } => write!(f, "invalid float: {snippet}"),
         }
     }
 }
@@ -177,13 +191,18 @@ impl<'input> Lexer<'input> {
             }
         }
         let raw = rest[..end].to_string();
+        let start = self.pos;
         self.pos += end;
         match f64::from_str(&raw) {
             Ok(v) => Some(Ok(NumLiteral {
                 raw,
                 value: OrderedFloat::from(v),
             })),
-            Err(_) => Some(Err(LexicalError::InvalidFloat(raw))),
+            Err(_) => Some(Err(LexicalError::InvalidFloat {
+                snippet: raw,
+                start,
+                end: self.pos,
+            })),
         }
     }
 }
@@ -364,9 +383,13 @@ impl<'input> Iterator for Lexer<'input> {
                 }
             }
             _ => {
-                return Some(Err(LexicalError::InvalidFloat(
-                    rest.chars().take(5).collect::<String>(),
-                )));
+                let error_start = self.pos - c.len_utf8();
+                let snippet = rest.chars().take(5).collect::<String>();
+                return Some(Err(LexicalError::InvalidFloat {
+                    snippet,
+                    start: error_start,
+                    end: self.pos,
+                }));
             }
         };
         self.last_was_number = matches!(&tok, Tok::Num(_));

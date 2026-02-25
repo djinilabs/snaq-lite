@@ -1,222 +1,351 @@
 //! Resolve parsed expression (LitScalar, LitWithUnit, LitUnit) to Lit(Quantity) or LitSymbol.
 //! Identifiers that are units resolve to quantities; others resolve to symbols.
+//! Preserves source spans through resolution.
 
-use crate::error::RunError;
-use crate::ir::{CallArg, ExprDef};
+use crate::error::{RunError, RunErrorKind};
+use crate::ir::{SpannedCallArg, SpannedExprDef, SpannedExprDefKind};
 use crate::quantity::{Quantity, SnaqNumber};
 use crate::unit::Unit;
 use crate::unit_registry::UnitRegistry;
 
-/// Convert parsed ExprDef (with LitScalar, LitWithUnit, LitUnit) to fully resolved ExprDef (Lit(Quantity), LitSymbol, or compound).
-pub fn resolve(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, RunError> {
-    match def {
-        ExprDef::LitScalar(n) => Ok(ExprDef::Lit(Quantity::with_number(
-            SnaqNumber::new(n.value_f64(), n.implicit_variance()),
-            Unit::scalar(),
-        ))),
-        ExprDef::LitWithUnit(n, ref name) => {
+/// Convert parsed SpannedExprDef (with LitScalar, LitWithUnit, LitUnit) to fully resolved SpannedExprDef (Lit(Quantity), LitSymbol, or compound).
+/// Spans are preserved on each node.
+pub fn resolve(def: SpannedExprDef, registry: &UnitRegistry) -> Result<SpannedExprDef, RunError> {
+    let span = def.span;
+    match def.value {
+        SpannedExprDefKind::LitScalar(n) => Ok(SpannedExprDef {
+            span,
+            value: SpannedExprDefKind::Lit(Quantity::with_number(
+                SnaqNumber::new(n.value_f64(), n.implicit_variance()),
+                Unit::scalar(),
+            )),
+        }),
+        SpannedExprDefKind::LitWithUnit(n, ref name) => {
             let number = SnaqNumber::new(n.value_f64(), n.implicit_variance());
             if let Some(unit) = registry.get_unit_with_prefix(name) {
-                Ok(ExprDef::Lit(Quantity::with_number(number, unit)))
+                Ok(SpannedExprDef {
+                    span,
+                    value: SpannedExprDefKind::Lit(Quantity::with_number(number, unit)),
+                })
             } else {
-                Ok(ExprDef::Mul(
-                    Box::new(ExprDef::Lit(Quantity::with_number(number, Unit::scalar()))),
-                    Box::new(ExprDef::LitSymbol(name.clone())),
-                ))
+                Ok(SpannedExprDef {
+                    span,
+                    value: SpannedExprDefKind::Mul(
+                        Box::new(SpannedExprDef {
+                            span,
+                            value: SpannedExprDefKind::Lit(Quantity::with_number(
+                                number,
+                                Unit::scalar(),
+                            )),
+                        }),
+                        Box::new(SpannedExprDef {
+                            span,
+                            value: SpannedExprDefKind::LitSymbol(name.clone()),
+                        }),
+                    ),
+                })
             }
         }
-        // Bare identifier: keep as LitSymbol so evaluation can resolve scope-first, then unit, then symbolic.
-        // This allows variables to shadow unit names (e.g. DEF=3; DEF+2 works when DEF would otherwise match "da"+"F").
-        ExprDef::LitUnit(ref name) => Ok(ExprDef::LitSymbol(name.clone())),
-        ExprDef::Lit(_) | ExprDef::LitFuzzyBool(_) | ExprDef::LitSymbol(_) => Ok(def),
-        ExprDef::Binding(name, rhs) => {
+        SpannedExprDefKind::LitUnit(ref name) => Ok(SpannedExprDef {
+            span,
+            value: SpannedExprDefKind::LitSymbol(name.clone()),
+        }),
+        SpannedExprDefKind::Lit(_)
+        | SpannedExprDefKind::LitFuzzyBool(_)
+        | SpannedExprDefKind::LitSymbol(_) => Ok(SpannedExprDef { span, value: def.value }),
+        SpannedExprDefKind::Binding(name, rhs) => {
             let rhs = resolve(*rhs, registry)?;
-            Ok(ExprDef::Binding(name, Box::new(rhs)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Binding(name, Box::new(rhs)),
+            })
         }
-        ExprDef::Add(l, r) => {
+        SpannedExprDefKind::Add(l, r) => {
             let l = resolve(*l, registry)?;
             let r = resolve(*r, registry)?;
-            Ok(ExprDef::Add(Box::new(l), Box::new(r)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Add(Box::new(l), Box::new(r)),
+            })
         }
-        ExprDef::Sub(l, r) => {
+        SpannedExprDefKind::Sub(l, r) => {
             let l = resolve(*l, registry)?;
             let r = resolve(*r, registry)?;
-            Ok(ExprDef::Sub(Box::new(l), Box::new(r)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Sub(Box::new(l), Box::new(r)),
+            })
         }
-        ExprDef::Mul(l, r) => {
+        SpannedExprDefKind::Mul(l, r) => {
             let l = resolve(*l, registry)?;
             let r = resolve(*r, registry)?;
-            Ok(ExprDef::Mul(Box::new(l), Box::new(r)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Mul(Box::new(l), Box::new(r)),
+            })
         }
-        ExprDef::Div(l, r) => {
+        SpannedExprDefKind::Div(l, r) => {
             let l = resolve(*l, registry)?;
             let r = resolve(*r, registry)?;
-            Ok(ExprDef::Div(Box::new(l), Box::new(r)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Div(Box::new(l), Box::new(r)),
+            })
         }
-        ExprDef::Eq(l, r) => {
+        SpannedExprDefKind::Eq(l, r) => {
             let l = resolve(*l, registry)?;
             let r = resolve(*r, registry)?;
-            Ok(ExprDef::Eq(Box::new(l), Box::new(r)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Eq(Box::new(l), Box::new(r)),
+            })
         }
-        ExprDef::Ne(l, r) => {
+        SpannedExprDefKind::Ne(l, r) => {
             let l = resolve(*l, registry)?;
             let r = resolve(*r, registry)?;
-            Ok(ExprDef::Ne(Box::new(l), Box::new(r)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Ne(Box::new(l), Box::new(r)),
+            })
         }
-        ExprDef::Lt(l, r) => {
+        SpannedExprDefKind::Lt(l, r) => {
             let l = resolve(*l, registry)?;
             let r = resolve(*r, registry)?;
-            Ok(ExprDef::Lt(Box::new(l), Box::new(r)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Lt(Box::new(l), Box::new(r)),
+            })
         }
-        ExprDef::Le(l, r) => {
+        SpannedExprDefKind::Le(l, r) => {
             let l = resolve(*l, registry)?;
             let r = resolve(*r, registry)?;
-            Ok(ExprDef::Le(Box::new(l), Box::new(r)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Le(Box::new(l), Box::new(r)),
+            })
         }
-        ExprDef::Gt(l, r) => {
+        SpannedExprDefKind::Gt(l, r) => {
             let l = resolve(*l, registry)?;
             let r = resolve(*r, registry)?;
-            Ok(ExprDef::Gt(Box::new(l), Box::new(r)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Gt(Box::new(l), Box::new(r)),
+            })
         }
-        ExprDef::Ge(l, r) => {
+        SpannedExprDefKind::Ge(l, r) => {
             let l = resolve(*l, registry)?;
             let r = resolve(*r, registry)?;
-            Ok(ExprDef::Ge(Box::new(l), Box::new(r)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Ge(Box::new(l), Box::new(r)),
+            })
         }
-        ExprDef::Neg(inner) => {
+        SpannedExprDefKind::Neg(inner) => {
             let inner = resolve(*inner, registry)?;
-            Ok(ExprDef::Neg(Box::new(inner)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Neg(Box::new(inner)),
+            })
         }
-        ExprDef::Call(name, args) => {
+        SpannedExprDefKind::Call(name, args) => {
             let args = args
                 .into_iter()
                 .map(|arg| {
-                    Ok::<CallArg, RunError>(match arg {
-                        CallArg::Positional(e) => CallArg::Positional(Box::new(resolve(*e, registry)?)),
-                        CallArg::Named(n, e) => CallArg::Named(n, Box::new(resolve(*e, registry)?)),
+                    Ok::<SpannedCallArg, RunError>(match arg {
+                        SpannedCallArg::Positional(e) => {
+                            SpannedCallArg::Positional(Box::new(resolve(*e, registry)?))
+                        }
+                        SpannedCallArg::Named(n, e) => {
+                            SpannedCallArg::Named(n, Box::new(resolve(*e, registry)?))
+                        }
                     })
                 })
                 .collect::<Result<Vec<_>, RunError>>()?;
-            Ok(ExprDef::Call(name, args))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Call(name, args),
+            })
         }
-        ExprDef::As(expr, unit_expr) => {
+        SpannedExprDefKind::As(expr, unit_expr) => {
             let expr = resolve(*expr, registry)?;
             let unit_expr = resolve_unit_expr(*unit_expr, registry)?;
-            Ok(ExprDef::As(Box::new(expr), Box::new(unit_expr)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::As(Box::new(expr), Box::new(unit_expr)),
+            })
         }
-        ExprDef::VecLiteral(elems) => {
+        SpannedExprDefKind::VecLiteral(elems) => {
             let elems = elems
                 .into_iter()
                 .map(|e| resolve(e, registry))
                 .collect::<Result<Vec<_>, RunError>>()?;
-            Ok(ExprDef::VecLiteral(elems))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::VecLiteral(elems),
+            })
         }
-        ExprDef::Transpose(inner) => {
+        SpannedExprDefKind::Transpose(inner) => {
             let inner = resolve(*inner, registry)?;
-            Ok(ExprDef::Transpose(Box::new(inner)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Transpose(Box::new(inner)),
+            })
         }
-        ExprDef::Index(base, index) => {
+        SpannedExprDefKind::Index(base, index) => {
             let base = resolve(*base, registry)?;
             let index = resolve(*index, registry)?;
-            Ok(ExprDef::Index(Box::new(base), Box::new(index)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Index(Box::new(base), Box::new(index)),
+            })
         }
-        ExprDef::Member(base, name) => {
+        SpannedExprDefKind::Member(base, name) => {
             let base = resolve(*base, registry)?;
-            Ok(ExprDef::Member(Box::new(base), name))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Member(Box::new(base), name),
+            })
         }
-        ExprDef::MethodCall(base, name, args) => {
+        SpannedExprDefKind::MethodCall(base, name, args) => {
             let base = resolve(*base, registry)?;
             let args = args
                 .into_iter()
                 .map(|arg| {
                     Ok(match arg {
-                        CallArg::Positional(e) => CallArg::Positional(Box::new(resolve(*e, registry)?)),
-                        CallArg::Named(n, e) => CallArg::Named(n, Box::new(resolve(*e, registry)?)),
+                        SpannedCallArg::Positional(e) => {
+                            SpannedCallArg::Positional(Box::new(resolve(*e, registry)?))
+                        }
+                        SpannedCallArg::Named(n, e) => {
+                            SpannedCallArg::Named(n, Box::new(resolve(*e, registry)?))
+                        }
                     })
                 })
                 .collect::<Result<Vec<_>, RunError>>()?;
-            Ok(ExprDef::MethodCall(Box::new(base), name, args))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::MethodCall(Box::new(base), name, args),
+            })
         }
-        ExprDef::If(cond, then_b, else_b) => {
+        SpannedExprDefKind::If(cond, then_b, else_b) => {
             let cond = resolve(*cond, registry)?;
             let then_b = resolve(*then_b, registry)?;
             let else_b = resolve(*else_b, registry)?;
-            Ok(ExprDef::If(Box::new(cond), Box::new(then_b), Box::new(else_b)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::If(
+                    Box::new(cond),
+                    Box::new(then_b),
+                    Box::new(else_b),
+                ),
+            })
         }
-        ExprDef::WithPrecision(l, r) => {
+        SpannedExprDefKind::WithPrecision(l, r) => {
             let l = resolve(*l, registry)?;
             let r = resolve(*r, registry)?;
-            Ok(ExprDef::WithPrecision(Box::new(l), Box::new(r)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::WithPrecision(Box::new(l), Box::new(r)),
+            })
         }
-        ExprDef::Block(exprs) => {
+        SpannedExprDefKind::Block(exprs) => {
             let exprs = exprs
                 .into_iter()
                 .map(|e| resolve(e, registry))
                 .collect::<Result<Vec<_>, RunError>>()?;
-            Ok(ExprDef::Block(exprs))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Block(exprs),
+            })
         }
-        ExprDef::Lambda(params, body) => {
+        SpannedExprDefKind::Lambda(params, body) => {
             let params = params
                 .into_iter()
                 .map(|(name, default)| {
                     Ok((
                         name,
-                        default.map(|d| resolve(*d, registry).map(Box::new)).transpose()?,
+                        default
+                            .map(|d| resolve(*d, registry).map(Box::new))
+                            .transpose()?,
                     ))
                 })
                 .collect::<Result<Vec<_>, RunError>>()?;
             let body = resolve(*body, registry)?;
-            Ok(ExprDef::Lambda(params, Box::new(body)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Lambda(params, Box::new(body)),
+            })
         }
-        ExprDef::CallExpr(callee, args) => {
+        SpannedExprDefKind::CallExpr(callee, args) => {
             let callee = resolve(*callee, registry)?;
             let args = args
                 .into_iter()
                 .map(|arg| {
                     Ok(match arg {
-                        CallArg::Positional(e) => CallArg::Positional(Box::new(resolve(*e, registry)?)),
-                        CallArg::Named(n, e) => CallArg::Named(n, Box::new(resolve(*e, registry)?)),
+                        SpannedCallArg::Positional(e) => {
+                            SpannedCallArg::Positional(Box::new(resolve(*e, registry)?))
+                        }
+                        SpannedCallArg::Named(n, e) => {
+                            SpannedCallArg::Named(n, Box::new(resolve(*e, registry)?))
+                        }
                     })
                 })
                 .collect::<Result<Vec<_>, RunError>>()?;
-            Ok(ExprDef::CallExpr(Box::new(callee), args))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::CallExpr(Box::new(callee), args),
+            })
         }
     }
 }
 
 /// Resolve the RHS of "as" (unit-only expression). Only LitUnit, Mul, Div allowed; every ident must be a known unit.
-fn resolve_unit_expr(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, RunError> {
-    match def {
-        ExprDef::LitUnit(ref name) => {
+fn resolve_unit_expr(
+    def: SpannedExprDef,
+    registry: &UnitRegistry,
+) -> Result<SpannedExprDef, RunError> {
+    let span = def.span;
+    match def.value {
+        SpannedExprDefKind::LitUnit(ref name) => {
             if let Some(unit) = registry.get_unit_with_prefix(name) {
-                Ok(ExprDef::Lit(Quantity::new(1.0, unit)))
+                Ok(SpannedExprDef {
+                    span,
+                    value: SpannedExprDefKind::Lit(Quantity::new(1.0, unit)),
+                })
             } else {
-                Err(RunError::UnknownUnit(name.clone()))
+                Err(RunError::new(RunErrorKind::UnknownUnit(name.clone())))
             }
         }
-        ExprDef::Mul(l, r) => {
+        SpannedExprDefKind::Mul(l, r) => {
             let l = resolve_unit_expr(*l, registry)?;
             let r = resolve_unit_expr(*r, registry)?;
-            Ok(ExprDef::Mul(Box::new(l), Box::new(r)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Mul(Box::new(l), Box::new(r)),
+            })
         }
-        ExprDef::Div(l, r) => {
+        SpannedExprDefKind::Div(l, r) => {
             let l = resolve_unit_expr(*l, registry)?;
             let r = resolve_unit_expr(*r, registry)?;
-            Ok(ExprDef::Div(Box::new(l), Box::new(r)))
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::Div(Box::new(l), Box::new(r)),
+            })
         }
-        ExprDef::Lit(_) => Ok(def),
-        ExprDef::LitFuzzyBool(_)
-        | ExprDef::VecLiteral(..)
-        | ExprDef::Transpose(..)
-        | ExprDef::Index(..)
-        | ExprDef::Member(..)
-        | ExprDef::MethodCall(..)
-        | ExprDef::If(..)
-        | ExprDef::Block(..) => Err(RunError::UnknownUnit(
-            "as: right side must be a unit or composed units (e.g. m, meters per second)".to_string(),
-        )),
-        _ => Err(RunError::UnknownUnit(
-            "as: right side must be a unit or composed units (e.g. m, meters per second)".to_string(),
-        )),
+        SpannedExprDefKind::Lit(_) => Ok(SpannedExprDef { span, value: def.value }),
+        SpannedExprDefKind::LitFuzzyBool(_)
+        | SpannedExprDefKind::VecLiteral(..)
+        | SpannedExprDefKind::Transpose(..)
+        | SpannedExprDefKind::Index(..)
+        | SpannedExprDefKind::Member(..)
+        | SpannedExprDefKind::MethodCall(..)
+        | SpannedExprDefKind::If(..)
+        | SpannedExprDefKind::Block(..) => Err(RunError::new(RunErrorKind::UnknownUnit(
+            "as: right side must be a unit or composed units (e.g. m, meters per second)"
+                .to_string(),
+        ))),
+        _ => Err(RunError::new(RunErrorKind::UnknownUnit(
+            "as: right side must be a unit or composed units (e.g. m, meters per second)"
+                .to_string(),
+        ))),
     }
 }

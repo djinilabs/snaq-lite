@@ -1,5 +1,7 @@
 //! Hash-consing interner for CAS expression nodes.
+//! Stores a source span per ExprId for error reporting.
 
+use crate::error::Span;
 use crate::fuzzy::FuzzyBool;
 use crate::quantity::Quantity;
 use std::collections::HashMap;
@@ -56,9 +58,11 @@ pub enum ExprNode {
 }
 
 /// Central cache: same structure => same ExprId. New nodes are interned on construction.
+/// Each ExprId has an associated Span (from first intern of that structure).
 #[derive(Clone, Default)]
 pub struct ExprInterner {
     nodes: Vec<ExprNode>,
+    spans: Vec<Span>,
     dedup: HashMap<ExprNode, ExprId>,
 }
 
@@ -72,14 +76,20 @@ impl ExprInterner {
         &self.nodes[id.0 as usize]
     }
 
-    /// If an identical node already exists, return its id. Otherwise push the node and return the new id.
-    pub fn intern(&mut self, node: ExprNode) -> ExprId {
+    /// Return the span for an id. Panics if id is invalid.
+    pub fn get_span(&self, id: ExprId) -> Span {
+        self.spans[id.0 as usize]
+    }
+
+    /// If an identical node already exists, return its id. Otherwise push the node and span, return the new id.
+    pub fn intern(&mut self, node: ExprNode, span: Span) -> ExprId {
         if let Some(&id) = self.dedup.get(&node) {
             return id;
         }
         let id = ExprId(self.nodes.len() as u32);
         self.dedup.insert(node.clone(), id);
         self.nodes.push(node);
+        self.spans.push(span);
         id
     }
 }

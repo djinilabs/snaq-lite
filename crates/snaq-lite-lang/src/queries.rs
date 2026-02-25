@@ -4,9 +4,9 @@
 //! results that depended on them, so recomputation is incremental.
 //! Evaluation returns Value (Numeric or Symbolic).
 
-use crate::error::RunError;
+use crate::error::{RunError, RunErrorKind, Span};
 use crate::functions;
-use crate::ir::{CallArg, ExprData, ExprDef, Expression, ProgramDef};
+use crate::ir::{CallArg, ExprData, ExprDef, Expression, ProgramDef, SpannedExprDef, SpannedExprDefKind};
 use crate::scope::{closure_env_get, closure_env_register, Scope, StoredValue};
 use crate::user_function;
 use crate::quantity::Quantity;
@@ -269,16 +269,16 @@ impl<'a> futures::stream::Stream for ZippedVectorStream<'a> {
             }
             (Poll::Ready(None), Poll::Ready(None)) => Poll::Ready(None),
             (Poll::Ready(None), Poll::Ready(Some(_))) => Poll::Ready(Some(Err(
-                RunError::VectorLengthMismatch {
+                RunError::new(RunErrorKind::VectorLengthMismatch {
                     left_len: this.left_count,
                     right_len: this.right_count + 1,
-                },
+                }),
             ))),
             (Poll::Ready(Some(_)), Poll::Ready(None)) => Poll::Ready(Some(Err(
-                RunError::VectorLengthMismatch {
+                RunError::new(RunErrorKind::VectorLengthMismatch {
                     left_len: this.left_count + 1,
                     right_len: this.right_count,
-                },
+                }),
             ))),
             _ => Poll::Pending,
         }
@@ -466,7 +466,7 @@ fn apply_binary_op(
         VectorBinaryOp::Add => add_values(&a, &b, registry, None)?,
         VectorBinaryOp::Sub => sub_values(&a, &b, registry, None)?,
         VectorBinaryOp::Mul => mul_values(&a, &b, registry, None)?,
-        VectorBinaryOp::Div => div_values(&a, &b, registry, None)?,
+        VectorBinaryOp::Div => div_values(&a, &b, registry, None, None)?,
         VectorBinaryOp::Eq => cmp_values(CmpOp::Eq, &a, &b, registry, None)?,
         VectorBinaryOp::Ne => cmp_values(CmpOp::Ne, &a, &b, registry, None)?,
         VectorBinaryOp::Lt => cmp_values(CmpOp::Lt, &a, &b, registry, None)?,
@@ -519,20 +519,20 @@ fn apply_user_map_element(
     _registry: &UnitRegistry,
 ) -> Result<Value, RunError> {
     if uf.params.len() != 1 {
-        return Err(RunError::UnknownFunction(format!(
+        return Err(RunError::new(RunErrorKind::UnknownFunction(format!(
             "map requires a function of one parameter (got {} parameters)",
             uf.params.len()
-        )));
+        ))));
     }
     let closure_env = closure_env_get(uf.closure_env_id).ok_or_else(|| {
-        RunError::UnknownFunction("closure env not found (wrong thread or stale id)".to_string())
+        RunError::new(RunErrorKind::UnknownFunction("closure env not found (wrong thread or stale id)".to_string()))
     })?;
     let param_name = uf.params[0].0.clone();
     let stored = StoredValue::from_value(&elem)
-        .map_err(|_| RunError::BindingValueNotSupported("map: function parameter value cannot be stored".to_string()))?;
+        .map_err(|_| RunError::new(RunErrorKind::BindingValueNotSupported("map: function parameter value cannot be stored".to_string())))?;
     let env = closure_env.extend(param_name, stored);
     let scope = Scope::new(db, env);
-    let body_expr = build_expression(db, *uf.body.clone());
+    let body_expr = build_expression(db, *uf.body.clone(), None);
     value(db, scope, body_expr)
 }
 
@@ -550,8 +550,8 @@ fn apply_map_op(
         VectorMapOp::SubRhs(scalar) => sub_values(&v, scalar, registry, None)?,
         VectorMapOp::SubLhs(scalar) => sub_values(scalar, &v, registry, None)?,
         VectorMapOp::Mul(scalar) => mul_values(&v, scalar, registry, None)?,
-        VectorMapOp::DivRhs(scalar) => div_values(&v, scalar, registry, None)?,
-        VectorMapOp::DivLhs(scalar) => div_values(scalar, &v, registry, None)?,
+        VectorMapOp::DivRhs(scalar) => div_values(&v, scalar, registry, None, None)?,
+        VectorMapOp::DivLhs(scalar) => div_values(scalar, &v, registry, None, None)?,
         VectorMapOp::Neg => neg_value(&v)?,
         VectorMapOp::UnaryFunc(name) => apply_unary_builtin(name, &v, registry)?,
         VectorMapOp::Eq(scalar) => cmp_values(CmpOp::Eq, &v, scalar, registry, None)?,
@@ -562,7 +562,7 @@ fn apply_map_op(
         VectorMapOp::Ge(scalar) => cmp_values(CmpOp::Ge, &v, scalar, registry, None)?,
         VectorMapOp::UserMap(uf) => {
             let db = db.ok_or_else(|| {
-                RunError::UnknownFunction("internal: db required for UserMap".to_string())
+                RunError::new(RunErrorKind::UnknownFunction("internal: db required for UserMap".to_string()))
             })?;
             apply_user_map_element(db, uf, v, registry)?
         }
@@ -694,170 +694,383 @@ fn collect_vector_stream(
 }
 
 /// Build the tracked expression graph from the program definition; returns the root.
-/// Expects root to be fully resolved (only Lit(Quantity) | Add | Sub | Mul | Div).
+/// When [ProgramDef::spanned_root] is set, each node gets a source span for runtime error location.
 #[salsa::tracked]
 pub fn program(db: &dyn salsa::Database, program_def: ProgramDef) -> Expression<'_> {
-    let root_def = program_def.root(db);
-    build_expression(db, root_def.clone())
+    let root_def = program_def.root(db).clone();
+    let spanned_root = program_def.spanned_root(db).clone();
+    build_expression(db, root_def, spanned_root)
 }
 
 /// Recursively build tracked Expression nodes from ExprDef.
-fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
+/// When [spanned] is [Some], each node gets that subtree's span for runtime error location.
+fn build_expression(db: &dyn salsa::Database, def: ExprDef, spanned: Option<SpannedExprDef>) -> Expression<'_> {
+    let span = spanned.as_ref().map(|s| s.span);
     let data = match def {
-        ExprDef::Lit(q) => ExprData::Lit(q),
-        ExprDef::LitFuzzyBool(f) => ExprData::LitFuzzyBool(f.clone()),
-        ExprDef::LitSymbol(name) => ExprData::LitSymbol(name),
+        ExprDef::Lit(q) => return Expression::new(db, ExprData::Lit(q), span),
+        ExprDef::LitFuzzyBool(f) => return Expression::new(db, ExprData::LitFuzzyBool(f.clone()), span),
+        ExprDef::LitSymbol(name) => return Expression::new(db, ExprData::LitSymbol(name), span),
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved expression: resolve() must be called before building the graph")
         }
         ExprDef::Add(l, r) => {
-            let left = build_expression(db, *l);
-            let right = build_expression(db, *r);
+            let (ls, rs) = children2(&spanned, |s| {
+                if let SpannedExprDefKind::Add(ls, rs) = &s.value {
+                    Some((*ls.clone(), *rs.clone()))
+                } else {
+                    None
+                }
+            });
+            let left = build_expression(db, *l, ls);
+            let right = build_expression(db, *r, rs);
             ExprData::Add(left, right)
         }
         ExprDef::Sub(l, r) => {
-            let left = build_expression(db, *l);
-            let right = build_expression(db, *r);
+            let (ls, rs) = children2(&spanned, |s| {
+                if let SpannedExprDefKind::Sub(ls, rs) = &s.value {
+                    Some((*ls.clone(), *rs.clone()))
+                } else {
+                    None
+                }
+            });
+            let left = build_expression(db, *l, ls);
+            let right = build_expression(db, *r, rs);
             ExprData::Sub(left, right)
         }
         ExprDef::Mul(l, r) => {
-            let left = build_expression(db, *l);
-            let right = build_expression(db, *r);
+            let (ls, rs) = children2(&spanned, |s| {
+                if let SpannedExprDefKind::Mul(ls, rs) = &s.value {
+                    Some((*ls.clone(), *rs.clone()))
+                } else {
+                    None
+                }
+            });
+            let left = build_expression(db, *l, ls);
+            let right = build_expression(db, *r, rs);
             ExprData::Mul(left, right)
         }
         ExprDef::Div(l, r) => {
-            let left = build_expression(db, *l);
-            let right = build_expression(db, *r);
+            let (ls, rs) = children2(&spanned, |s| {
+                if let SpannedExprDefKind::Div(ls, rs) = &s.value {
+                    Some((*ls.clone(), *rs.clone()))
+                } else {
+                    None
+                }
+            });
+            let left = build_expression(db, *l, ls);
+            let right = build_expression(db, *r, rs);
             ExprData::Div(left, right)
         }
         ExprDef::Eq(l, r) => {
-            let left = build_expression(db, *l);
-            let right = build_expression(db, *r);
+            let (ls, rs) = children2(&spanned, |s| {
+                if let SpannedExprDefKind::Eq(ls, rs) = &s.value {
+                    Some((*ls.clone(), *rs.clone()))
+                } else {
+                    None
+                }
+            });
+            let left = build_expression(db, *l, ls);
+            let right = build_expression(db, *r, rs);
             ExprData::Eq(left, right)
         }
         ExprDef::Ne(l, r) => {
-            let left = build_expression(db, *l);
-            let right = build_expression(db, *r);
+            let (ls, rs) = children2(&spanned, |s| {
+                if let SpannedExprDefKind::Ne(ls, rs) = &s.value {
+                    Some((*ls.clone(), *rs.clone()))
+                } else {
+                    None
+                }
+            });
+            let left = build_expression(db, *l, ls);
+            let right = build_expression(db, *r, rs);
             ExprData::Ne(left, right)
         }
         ExprDef::Lt(l, r) => {
-            let left = build_expression(db, *l);
-            let right = build_expression(db, *r);
+            let (ls, rs) = children2(&spanned, |s| {
+                if let SpannedExprDefKind::Lt(ls, rs) = &s.value {
+                    Some((*ls.clone(), *rs.clone()))
+                } else {
+                    None
+                }
+            });
+            let left = build_expression(db, *l, ls);
+            let right = build_expression(db, *r, rs);
             ExprData::Lt(left, right)
         }
         ExprDef::Le(l, r) => {
-            let left = build_expression(db, *l);
-            let right = build_expression(db, *r);
+            let (ls, rs) = children2(&spanned, |s| {
+                if let SpannedExprDefKind::Le(ls, rs) = &s.value {
+                    Some((*ls.clone(), *rs.clone()))
+                } else {
+                    None
+                }
+            });
+            let left = build_expression(db, *l, ls);
+            let right = build_expression(db, *r, rs);
             ExprData::Le(left, right)
         }
         ExprDef::Gt(l, r) => {
-            let left = build_expression(db, *l);
-            let right = build_expression(db, *r);
+            let (ls, rs) = children2(&spanned, |s| {
+                if let SpannedExprDefKind::Gt(ls, rs) = &s.value {
+                    Some((*ls.clone(), *rs.clone()))
+                } else {
+                    None
+                }
+            });
+            let left = build_expression(db, *l, ls);
+            let right = build_expression(db, *r, rs);
             ExprData::Gt(left, right)
         }
         ExprDef::Ge(l, r) => {
-            let left = build_expression(db, *l);
-            let right = build_expression(db, *r);
+            let (ls, rs) = children2(&spanned, |s| {
+                if let SpannedExprDefKind::Ge(ls, rs) = &s.value {
+                    Some((*ls.clone(), *rs.clone()))
+                } else {
+                    None
+                }
+            });
+            let left = build_expression(db, *l, ls);
+            let right = build_expression(db, *r, rs);
             ExprData::Ge(left, right)
         }
         ExprDef::Neg(inner) => {
-            let inner_expr = build_expression(db, *inner);
+            let inner_s = child1(&spanned, |s| {
+                if let SpannedExprDefKind::Neg(x) = &s.value {
+                    Some((**x).clone())
+                } else {
+                    None
+                }
+            });
+            let inner_expr = build_expression(db, *inner, inner_s);
             ExprData::Neg(inner_expr)
         }
         ExprDef::Call(name, args) => {
+            let arg_spans = spanned.as_ref().and_then(|s| {
+                if let SpannedExprDefKind::Call(_, a) = &s.value {
+                    Some(a.iter().map(|a| match a {
+                        crate::ir::SpannedCallArg::Positional(e) => Some((**e).clone()),
+                        crate::ir::SpannedCallArg::Named(_, e) => Some((**e).clone()),
+                    }).collect::<Vec<_>>())
+                } else {
+                    None
+                }
+            });
             let arg_exprs: Vec<(Option<String>, Expression<'_>)> = args
                 .into_iter()
-                .map(|arg| match arg {
-                    CallArg::Positional(e) => (None, build_expression(db, *e)),
-                    CallArg::Named(n, e) => (Some(n), build_expression(db, *e)),
+                .enumerate()
+                .map(|(i, arg)| {
+                    let (n, e) = match arg {
+                        CallArg::Positional(e) => (None, build_expression(db, *e, arg_spans.as_ref().and_then(|v| v.get(i).and_then(|x| x.clone())))),
+                        CallArg::Named(n, e) => (Some(n), build_expression(db, *e, arg_spans.as_ref().and_then(|v| v.get(i).and_then(|x| x.clone())))),
+                    };
+                    (n, e)
                 })
                 .collect();
             ExprData::Call(name, arg_exprs)
         }
         ExprDef::As(l, r) => {
-            let left = build_expression(db, *l);
-            let right = build_expression(db, *r);
+            let (ls, rs) = children2(&spanned, |s| {
+                if let SpannedExprDefKind::As(ls, rs) = &s.value {
+                    Some((*ls.clone(), *rs.clone()))
+                } else {
+                    None
+                }
+            });
+            let left = build_expression(db, *l, ls);
+            let right = build_expression(db, *r, rs);
             ExprData::As(left, right)
         }
         ExprDef::VecLiteral(elems) => {
+            let elem_spans = spanned.as_ref().and_then(|s| {
+                if let SpannedExprDefKind::VecLiteral(es) = &s.value {
+                    Some(es.clone())
+                } else {
+                    None
+                }
+            });
             let exprs: Vec<Expression<'_>> = elems
                 .into_iter()
-                .map(|d| build_expression(db, d))
+                .enumerate()
+                .map(|(i, d)| build_expression(db, d, elem_spans.as_ref().and_then(|v| v.get(i).cloned())))
                 .collect();
             ExprData::VecLiteral(exprs)
         }
         ExprDef::Transpose(inner) => {
-            let inner_expr = build_expression(db, *inner);
+            let inner_s = child1(&spanned, |s| {
+                if let SpannedExprDefKind::Transpose(x) = &s.value {
+                    Some((**x).clone())
+                } else {
+                    None
+                }
+            });
+            let inner_expr = build_expression(db, *inner, inner_s);
             ExprData::Transpose(inner_expr)
         }
         ExprDef::Index(base, index) => {
-            let base_expr = build_expression(db, *base);
-            let index_expr = build_expression(db, *index);
+            let (bs, is) = children2(&spanned, |s| {
+                if let SpannedExprDefKind::Index(b, i) = &s.value {
+                    Some((*b.clone(), *i.clone()))
+                } else {
+                    None
+                }
+            });
+            let base_expr = build_expression(db, *base, bs);
+            let index_expr = build_expression(db, *index, is);
             ExprData::Index(base_expr, index_expr)
         }
         ExprDef::Member(base, name) => {
-            let base_expr = build_expression(db, *base);
+            let base_s = child1(&spanned, |s| {
+                if let SpannedExprDefKind::Member(b, _) = &s.value {
+                    Some((**b).clone())
+                } else {
+                    None
+                }
+            });
+            let base_expr = build_expression(db, *base, base_s);
             ExprData::Member(base_expr, name)
         }
         ExprDef::MethodCall(base, name, args) => {
-            let base_expr = build_expression(db, *base);
+            let (base_s, arg_spans) = match spanned.as_ref().and_then(|s| {
+                if let SpannedExprDefKind::MethodCall(b, _, a) = &s.value {
+                    Some(((**b).clone(), a.iter().map(|a| match a {
+                        crate::ir::SpannedCallArg::Positional(e) => (**e).clone(),
+                        crate::ir::SpannedCallArg::Named(_, e) => (**e).clone(),
+                    }).collect::<Vec<_>>()))
+                } else {
+                    None
+                }
+            }) {
+                Some((b, a)) => (Some(b), Some(a)),
+                None => (None, None),
+            };
+            let base_expr = build_expression(db, *base, base_s);
             let arg_exprs: Vec<(Option<String>, Expression<'_>)> = args
                 .into_iter()
-                .map(|arg| match arg {
-                    CallArg::Positional(e) => (None, build_expression(db, *e)),
-                    CallArg::Named(n, e) => (Some(n), build_expression(db, *e)),
+                .enumerate()
+                .map(|(i, arg)| match arg {
+                    CallArg::Positional(e) => (None, build_expression(db, *e, arg_spans.as_ref().and_then(|v| v.get(i).cloned()))),
+                    CallArg::Named(n, e) => (Some(n), build_expression(db, *e, arg_spans.as_ref().and_then(|v| v.get(i).cloned()))),
                 })
                 .collect();
             ExprData::MethodCall(base_expr, name, arg_exprs)
         }
         ExprDef::If(cond, then_b, else_b) => {
-            let cond_expr = build_expression(db, *cond);
-            let then_expr = build_expression(db, *then_b);
-            let else_expr = build_expression(db, *else_b);
+            let (cs, ts, es) = match spanned.as_ref().and_then(|s| {
+                if let SpannedExprDefKind::If(c, t, e) = &s.value {
+                    Some(((**c).clone(), (**t).clone(), (**e).clone()))
+                } else {
+                    None
+                }
+            }) {
+                Some((c, t, e)) => (Some(c), Some(t), Some(e)),
+                None => (None, None, None),
+            };
+            let cond_expr = build_expression(db, *cond, cs);
+            let then_expr = build_expression(db, *then_b, ts);
+            let else_expr = build_expression(db, *else_b, es);
             ExprData::If(cond_expr, then_expr, else_expr)
         }
         ExprDef::WithPrecision(l, r) => {
-            let left = build_expression(db, *l);
-            let right = build_expression(db, *r);
+            let (ls, rs) = children2(&spanned, |s| {
+                if let SpannedExprDefKind::WithPrecision(ls, rs) = &s.value {
+                    Some((*ls.clone(), *rs.clone()))
+                } else {
+                    None
+                }
+            });
+            let left = build_expression(db, *l, ls);
+            let right = build_expression(db, *r, rs);
             ExprData::WithPrecision(left, right)
         }
         ExprDef::Block(exprs) => {
+            let block_spans = spanned.as_ref().and_then(|s| {
+                if let SpannedExprDefKind::Block(es) = &s.value {
+                    Some(es.clone())
+                } else {
+                    None
+                }
+            });
             let exprs: Vec<Expression<'_>> = exprs
                 .into_iter()
-                .map(|d| build_expression(db, d))
+                .enumerate()
+                .map(|(i, d)| build_expression(db, d, block_spans.as_ref().and_then(|v| v.get(i).cloned())))
                 .collect();
             ExprData::Block(exprs)
         }
         ExprDef::Binding(name, rhs) => {
-            let rhs_expr = build_expression(db, *rhs);
+            let rhs_s = child1(&spanned, |s| {
+                if let SpannedExprDefKind::Binding(_, r) = &s.value {
+                    Some((**r).clone())
+                } else {
+                    None
+                }
+            });
+            let rhs_expr = build_expression(db, *rhs, rhs_s);
             ExprData::Binding(name, rhs_expr)
         }
         ExprDef::Lambda(params, body) => {
+            let (param_spans, body_s) = match spanned.as_ref().and_then(|s| {
+                if let SpannedExprDefKind::Lambda(ps, b) = &s.value {
+                    Some((ps.iter().map(|(_, o)| o.as_ref().map(|e| (**e).clone())).collect::<Vec<_>>(), (**b).clone()))
+                } else {
+                    None
+                }
+            }) {
+                Some((p, b)) => (Some(p), Some(b)),
+                None => (None, None),
+            };
             let param_exprs: Vec<(String, Option<Expression<'_>>)> = params
                 .into_iter()
-                .map(|(name, opt_def)| {
+                .enumerate()
+                .map(|(i, (name, opt_def))| {
+                    let opt_s = param_spans.as_ref().and_then(|v| v.get(i).cloned()).flatten();
                     (
                         name,
-                        opt_def.map(|d| build_expression(db, *d)),
+                        opt_def.map(|d| build_expression(db, *d, opt_s)),
                     )
                 })
                 .collect();
-            let body_expr = build_expression(db, *body);
+            let body_expr = build_expression(db, *body, body_s);
             ExprData::Lambda(param_exprs, body_expr)
         }
         ExprDef::CallExpr(callee, args) => {
-            let callee_expr = build_expression(db, *callee);
+            let (callee_s, arg_spans) = match spanned.as_ref().and_then(|s| {
+                if let SpannedExprDefKind::CallExpr(c, a) = &s.value {
+                    Some(((**c).clone(), a.iter().map(|a| match a {
+                        crate::ir::SpannedCallArg::Positional(e) => (**e).clone(),
+                        crate::ir::SpannedCallArg::Named(_, e) => (**e).clone(),
+                    }).collect::<Vec<_>>()))
+                } else {
+                    None
+                }
+            }) {
+                Some((c, a)) => (Some(c), Some(a)),
+                None => (None, None),
+            };
+            let callee_expr = build_expression(db, *callee, callee_s);
             let arg_exprs: Vec<(Option<String>, Expression<'_>)> = args
                 .into_iter()
-                .map(|arg| match arg {
-                    CallArg::Positional(e) => (None, build_expression(db, *e)),
-                    CallArg::Named(n, e) => (Some(n), build_expression(db, *e)),
+                .enumerate()
+                .map(|(i, arg)| match arg {
+                    CallArg::Positional(e) => (None, build_expression(db, *e, arg_spans.as_ref().and_then(|v| v.get(i).cloned()))),
+                    CallArg::Named(n, e) => (Some(n), build_expression(db, *e, arg_spans.as_ref().and_then(|v| v.get(i).cloned()))),
                 })
                 .collect();
             ExprData::CallExpr(callee_expr, arg_exprs)
         }
     };
-    Expression::new(db, data)
+    Expression::new(db, data, span)
+}
+
+fn child1(spanned: &Option<SpannedExprDef>, f: impl FnOnce(&SpannedExprDef) -> Option<SpannedExprDef>) -> Option<SpannedExprDef> {
+    spanned.as_ref().and_then(f)
+}
+
+fn children2(spanned: &Option<SpannedExprDef>, f: impl FnOnce(&SpannedExprDef) -> Option<(SpannedExprDef, SpannedExprDef)>) -> (Option<SpannedExprDef>, Option<SpannedExprDef>) {
+    match spanned.as_ref().and_then(f) {
+        Some((a, b)) => (Some(a), Some(b)),
+        None => (None, None),
+    }
 }
 
 /// Evaluate a (possibly chained) binding and return the value and the scope after all bindings in the chain.
@@ -870,7 +1083,7 @@ fn eval_binding_chain<'db>(
     match expr.data(db) {
         ExprData::Binding(name, rhs) => {
             if functions::param_names(name).is_some() {
-                return Err(RunError::CannotObfuscateBuiltin(name.clone()));
+                return Err(RunError::new(RunErrorKind::CannotObfuscateBuiltin(name.clone())));
             }
             let (v, inner_scope) = eval_binding_chain(db, scope, *rhs)?;
             let stored = StoredValue::from_value(&v)?;
@@ -931,7 +1144,11 @@ pub fn value<'db>(
         ExprData::Div(l, r) => {
             let left = value(db, scope, *l)?;
             let right = value(db, scope, *r)?;
-            div_values(&left, &right, registry, Some(db))
+            match div_values(&left, &right, registry, Some(db), expr.span(db)) {
+                Ok(v) => Ok(v),
+                Err(e) if matches!(e.kind, RunErrorKind::DivisionByZero) => Ok(Value::Undefined),
+                Err(e) => Err(e),
+            }
         }
         ExprData::Eq(l, r) => {
             let left = value(db, scope, *l)?;
@@ -973,20 +1190,20 @@ pub fn value<'db>(
             let right_val = value(db, scope, *right)?;
             let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
             let target_quantity = right_val.to_quantity(&sym_reg).map_err(|_| {
-                RunError::UnknownUnit(
+                RunError::new(RunErrorKind::UnknownUnit(
                     "as: right side must evaluate to a unit (no symbols)".to_string(),
-                )
+                ))
             })?;
             let target_unit = target_quantity.unit().clone();
             match &left_val {
-                Value::FuzzyBool(_) => Err(RunError::BooleanResult),
+                Value::FuzzyBool(_) => Err(RunError::new(RunErrorKind::BooleanResult)),
                 Value::Numeric(q) => {
                     let converted = q.clone().convert_to(registry, &target_unit).map_err(|e| {
                         match e {
                             crate::quantity::QuantityError::IncompatibleUnits(left, right) => {
-                                RunError::DimensionMismatch { left, right }
+                                RunError::new(RunErrorKind::DimensionMismatch { left, right })
                             }
-                            _ => RunError::DivisionByZero,
+                            _ => RunError::new(RunErrorKind::DivisionByZero),
                         }
                     })?;
                     Ok(Value::Numeric(converted))
@@ -1001,11 +1218,11 @@ pub fn value<'db>(
                     )?;
                     Ok(Value::Symbolic(SymbolicQuantity::new(scaled, target_unit)))
                 }
-                Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
-                Value::Undefined => Err(RunError::UndefinedResult),
-                Value::Function(_) | Value::BuiltinFunction(_) => Err(RunError::BindingValueNotSupported(
+                Value::Vector(_) => Err(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
+                Value::Undefined => Err(RunError::new(RunErrorKind::UndefinedResult)),
+                Value::Function(_) | Value::BuiltinFunction(_) => Err(RunError::new(RunErrorKind::BindingValueNotSupported(
                     "function value cannot be converted to quantity".to_string(),
-                )),
+                ))),
             }
         }
         ExprData::VecLiteral(exprs) => {
@@ -1023,14 +1240,14 @@ pub fn value<'db>(
             let v = value(db, scope, *inner)?;
             match v {
                 Value::Vector(v) => Ok(Value::Vector(v.transpose())),
-                _ => Err(RunError::ExpectedVector),
+                _ => Err(RunError::new(RunErrorKind::ExpectedVector)),
             }
         }
         ExprData::Member(base, name) => {
             let base_val = value(db, scope, *base)?;
             let VectorValue { inner, .. } = match &base_val {
                 Value::Vector(v) => v.clone(),
-                _ => return Err(RunError::ExpectedVector),
+                _ => return Err(RunError::new(RunErrorKind::ExpectedVector)),
             };
             match name.as_str() {
                 "length" => {
@@ -1038,14 +1255,14 @@ pub fn value<'db>(
                     let len = collected.len();
                     Ok(Value::Numeric(Quantity::from_exact_scalar(len as f64)))
                 }
-                _ => Err(RunError::UnknownProperty(name.clone())),
+                _ => Err(RunError::new(RunErrorKind::UnknownProperty(name.clone()))),
             }
         }
         ExprData::MethodCall(base, name, args) => {
             let base_val = value(db, scope, *base)?;
             let VectorValue { inner, orientation } = match &base_val {
                 Value::Vector(v) => v.clone(),
-                _ => return Err(RunError::ExpectedVector),
+                _ => return Err(RunError::new(RunErrorKind::ExpectedVector)),
             };
             match name.as_str() {
                 "take" => {
@@ -1054,29 +1271,29 @@ pub fn value<'db>(
                         .map(|(_, e)| value(db, scope, *e))
                         .collect::<Result<Vec<_>, _>>()?;
                     if arg_vals.len() != 2 {
-                        return Err(RunError::UnknownMethod(format!(
+                        return Err(RunError::new(RunErrorKind::UnknownMethod(format!(
                             "take requires 2 arguments (start, length), got {}",
                             arg_vals.len()
-                        )));
+                        ))));
                     }
                     let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
                     let start_q = arg_vals[0].to_quantity(&sym_reg).map_err(|_| {
-                        RunError::InvalidIndex("take start must be numeric".to_string())
+                        RunError::new(RunErrorKind::InvalidIndex("take start must be numeric".to_string()))
                     })?;
                     let length_q = arg_vals[1].to_quantity(&sym_reg).map_err(|_| {
-                        RunError::InvalidIndex("take length must be numeric".to_string())
+                        RunError::new(RunErrorKind::InvalidIndex("take length must be numeric".to_string()))
                     })?;
                     let start_f = start_q.value();
                     let length_f = length_q.value();
                     if !start_f.is_finite() || start_f < 0.0 {
-                        return Err(RunError::InvalidIndex(
+                        return Err(RunError::new(RunErrorKind::InvalidIndex(
                             "take start must be a non-negative integer".to_string(),
-                        ));
+                        )));
                     }
                     if !length_f.is_finite() || length_f < 0.0 {
-                        return Err(RunError::InvalidIndex(
+                        return Err(RunError::new(RunErrorKind::InvalidIndex(
                             "take length must be a non-negative integer".to_string(),
-                        ));
+                        )));
                     }
                     let start_u = start_f as usize;
                     let length_u = length_f as usize;
@@ -1091,10 +1308,10 @@ pub fn value<'db>(
                 }
                 "map" => {
                     if args.len() != 1 {
-                        return Err(RunError::UnknownMethod(format!(
+                        return Err(RunError::new(RunErrorKind::UnknownMethod(format!(
                             "map requires 1 argument (a function), got {}",
                             args.len()
-                        )));
+                        ))));
                     }
                     let (_, fn_expr) = &args[0];
                     let fn_val = value(db, scope, *fn_expr)?;
@@ -1117,17 +1334,17 @@ pub fn value<'db>(
                         }
                         Value::BuiltinFunction(name) => {
                             let params = functions::param_names(name).ok_or_else(|| {
-                                RunError::UnknownMethod(
+                                RunError::new(RunErrorKind::UnknownMethod(
                                     "map requires a function (e.g. sqrt or fn (x) => (x+1))"
                                         .to_string(),
-                                )
+                                ))
                             })?;
                             if params.len() != 1 {
-                                return Err(RunError::UnknownMethod(format!(
+                                return Err(RunError::new(RunErrorKind::UnknownMethod(format!(
                                     "map requires a function of one parameter (e.g. sqrt or fn x => (x+1)), got built-in '{}' which takes {}",
                                     name,
                                     params.len()
-                                )));
+                                ))));
                             }
                             collected
                                 .into_iter()
@@ -1142,9 +1359,9 @@ pub fn value<'db>(
                                 .collect()
                         }
                         _ => {
-                            return Err(RunError::UnknownMethod(
+                            return Err(RunError::new(RunErrorKind::UnknownMethod(
                                 "map requires a function (e.g. fn (x) => (x+1) or sqrt)".to_string(),
-                            ))
+                            )))
                         }
                     };
                     let ok_results: Vec<Option<Value>> = results
@@ -1158,9 +1375,9 @@ pub fn value<'db>(
                 }
                 "sum" => {
                     if !args.is_empty() {
-                        return Err(RunError::UnknownMethod(
+                        return Err(RunError::new(RunErrorKind::UnknownMethod(
                             "sum takes no arguments".to_string(),
-                        ));
+                        )));
                     }
                     let collected = collect_vector_stream(db, inner);
                     let sum_val = sum_vector_elements(&collected, registry)?;
@@ -1168,9 +1385,9 @@ pub fn value<'db>(
                 }
                 "mean" => {
                     if !args.is_empty() {
-                        return Err(RunError::UnknownMethod(
+                        return Err(RunError::new(RunErrorKind::UnknownMethod(
                             "mean takes no arguments".to_string(),
-                        ));
+                        )));
                     }
                     let collected = collect_vector_stream(db, inner);
                     let n = collected
@@ -1178,45 +1395,45 @@ pub fn value<'db>(
                         .filter(|r| r.as_ref().is_ok_and(|o| o.is_some()))
                         .count();
                     if n == 0 {
-                        return Err(RunError::EmptyVectorReduction("mean".to_string()));
+                        return Err(RunError::new(RunErrorKind::EmptyVectorReduction("mean".to_string())));
                     }
                     let sum_val = sum_vector_elements(&collected, registry)?;
                     let len_val = Value::Numeric(Quantity::from_exact_scalar(n as f64));
-                    div_values(&sum_val, &len_val, registry, None)
+                    div_values(&sum_val, &len_val, registry, None, None)
                 }
                 "min" => {
                     if !args.is_empty() {
-                        return Err(RunError::UnknownMethod(
+                        return Err(RunError::new(RunErrorKind::UnknownMethod(
                             "min takes no arguments".to_string(),
-                        ));
+                        )));
                     }
                     let collected = collect_vector_stream(db, inner);
                     reduce_min_max(&collected, registry, false, "min")
                 }
                 "max" => {
                     if !args.is_empty() {
-                        return Err(RunError::UnknownMethod(
+                        return Err(RunError::new(RunErrorKind::UnknownMethod(
                             "max takes no arguments".to_string(),
-                        ));
+                        )));
                     }
                     let collected = collect_vector_stream(db, inner);
                     reduce_min_max(&collected, registry, true, "max")
                 }
                 "dot" => {
                     if args.len() != 1 {
-                        return Err(RunError::UnknownMethod(format!(
+                        return Err(RunError::new(RunErrorKind::UnknownMethod(format!(
                             "dot requires 1 argument (another vector), got {}",
                             args.len()
-                        )));
+                        ))));
                     }
                     let (_, other_expr) = &args[0];
                     let other_val = value(db, scope, *other_expr)?;
                     let VectorValue { inner: other_inner, .. } = match &other_val {
                         Value::Vector(v) => v.clone(),
                         _ => {
-                            return Err(RunError::UnknownMethod(
+                            return Err(RunError::new(RunErrorKind::UnknownMethod(
                                 "dot requires a vector argument".to_string(),
-                            ))
+                            )))
                         }
                     };
                     let left_elems = collect_vector_stream(db, inner);
@@ -1225,9 +1442,9 @@ pub fn value<'db>(
                 }
                 "norm" => {
                     if !args.is_empty() {
-                        return Err(RunError::UnknownMethod(
+                        return Err(RunError::new(RunErrorKind::UnknownMethod(
                             "norm takes no arguments".to_string(),
-                        ));
+                        )));
                     }
                     let collected = collect_vector_stream(db, inner);
                     let mut sum_sq = Value::Numeric(Quantity::from_scalar(0.0));
@@ -1240,53 +1457,53 @@ pub fn value<'db>(
                     }
                     let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
                     let sum_sq_q = sum_sq.to_quantity(&sym_reg).map_err(|_| {
-                        RunError::UnknownMethod(
+                        RunError::new(RunErrorKind::UnknownMethod(
                             "norm: elements must be numeric (same dimension)".to_string(),
-                        )
+                        ))
                     })?;
                     functions::call_builtin("sqrt", &[sum_sq_q], registry)
                 }
                 "product" => {
                     if !args.is_empty() {
-                        return Err(RunError::UnknownMethod(
+                        return Err(RunError::new(RunErrorKind::UnknownMethod(
                             "product takes no arguments".to_string(),
-                        ));
+                        )));
                     }
                     let collected = collect_vector_stream(db, inner);
                     product_vector_elements(&collected, registry)
                 }
                 "variance" => {
                     if !args.is_empty() {
-                        return Err(RunError::UnknownMethod(
+                        return Err(RunError::new(RunErrorKind::UnknownMethod(
                             "variance takes no arguments".to_string(),
-                        ));
+                        )));
                     }
                     let collected = collect_vector_stream(db, inner);
                     compute_variance_value(&collected, registry)
                 }
                 "stddev" => {
                     if !args.is_empty() {
-                        return Err(RunError::UnknownMethod(
+                        return Err(RunError::new(RunErrorKind::UnknownMethod(
                             "stddev takes no arguments".to_string(),
-                        ));
+                        )));
                     }
                     let collected = collect_vector_stream(db, inner);
                     let variance_val = compute_variance_value(&collected, registry)?;
                     let sym_reg =
                         crate::symbol_registry::SymbolRegistry::default_registry();
                     let variance_q = variance_val.to_quantity(&sym_reg).map_err(|_| {
-                        RunError::UnknownMethod(
+                        RunError::new(RunErrorKind::UnknownMethod(
                             "stddev: elements must be numeric (same dimension)"
                                 .to_string(),
-                        )
+                        ))
                     })?;
                     functions::call_builtin("sqrt", &[variance_q], registry)
                 }
                 "all" => {
                     if !args.is_empty() {
-                        return Err(RunError::UnknownMethod(
+                        return Err(RunError::new(RunErrorKind::UnknownMethod(
                             "all takes no arguments".to_string(),
-                        ));
+                        )));
                     }
                     let collected = collect_vector_stream(db, inner);
                     let defined: Vec<Value> = collected
@@ -1298,10 +1515,10 @@ pub fn value<'db>(
                         let f = match v {
                             Value::FuzzyBool(f) => f.clone(),
                             _ => {
-                                return Err(RunError::UnknownMethod(
+                                return Err(RunError::new(RunErrorKind::UnknownMethod(
                                     "all: elements must be boolean (e.g. from comparison)"
                                         .to_string(),
-                                ))
+                                )))
                             }
                         };
                         acc = acc.and_(&f);
@@ -1310,9 +1527,9 @@ pub fn value<'db>(
                 }
                 "any" => {
                     if !args.is_empty() {
-                        return Err(RunError::UnknownMethod(
+                        return Err(RunError::new(RunErrorKind::UnknownMethod(
                             "any takes no arguments".to_string(),
-                        ));
+                        )));
                     }
                     let collected = collect_vector_stream(db, inner);
                     let defined: Vec<Value> = collected
@@ -1324,40 +1541,40 @@ pub fn value<'db>(
                         let f = match v {
                             Value::FuzzyBool(f) => f.clone(),
                             _ => {
-                                return Err(RunError::UnknownMethod(
+                                return Err(RunError::new(RunErrorKind::UnknownMethod(
                                     "any: elements must be boolean (e.g. from comparison)"
                                         .to_string(),
-                                ))
+                                )))
                             }
                         };
                         acc = acc.or_(&f);
                     }
                     Ok(Value::FuzzyBool(acc))
                 }
-                _ => Err(RunError::UnknownMethod(name.clone())),
+                _ => Err(RunError::new(RunErrorKind::UnknownMethod(name.clone()))),
             }
         }
         ExprData::Index(base, index_expr) => {
             let base_val = value(db, scope, *base)?;
             let VectorValue { inner, .. } = match &base_val {
                 Value::Vector(v) => v.clone(),
-                _ => return Err(RunError::ExpectedVector),
+                _ => return Err(RunError::new(RunErrorKind::ExpectedVector)),
             };
             let index_val = value(db, scope, *index_expr)?;
             let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
             let index_q = index_val.to_quantity(&sym_reg).map_err(|_| {
-                RunError::InvalidIndex("index must be numeric".to_string())
+                RunError::new(RunErrorKind::InvalidIndex("index must be numeric".to_string()))
             })?;
             let index_f = index_q.value();
             if !index_f.is_finite() || index_f < 0.0 {
-                return Err(RunError::InvalidIndex(
+                return Err(RunError::new(RunErrorKind::InvalidIndex(
                     "index must be a non-negative integer".to_string(),
-                ));
+                )));
             }
             if index_f.fract() != 0.0 {
-                return Err(RunError::InvalidIndex(
+                return Err(RunError::new(RunErrorKind::InvalidIndex(
                     "index must be an integer".to_string(),
-                ));
+                )));
             }
             let index_u = index_f as usize;
             let slice = LazyVector::Take {
@@ -1367,10 +1584,10 @@ pub fn value<'db>(
             };
             let collected = collect_vector_stream(db, slice);
             if collected.is_empty() {
-                return Err(RunError::IndexOutOfBounds {
+                return Err(RunError::new(RunErrorKind::IndexOutOfBounds {
                     index: index_u,
                     length: index_u,
-                });
+                }));
             }
             match &collected[0] {
                 Ok(Some(elem)) => Ok(elem.clone()),
@@ -1383,14 +1600,14 @@ pub fn value<'db>(
             let right_val = value(db, scope, *right)?;
             let left_q = match &left_val {
                 Value::Numeric(q) => q.clone(),
-                _ => return Err(RunError::TildeRequiresNumeric),
+                _ => return Err(RunError::new(RunErrorKind::TildeRequiresNumeric)),
             };
             let right_central = match &right_val {
                 Value::Numeric(rq) => rq.value(),
-                _ => return Err(RunError::TildeRequiresNumeric),
+                _ => return Err(RunError::new(RunErrorKind::TildeRequiresNumeric)),
             };
             if right_central <= 0.0 || !right_central.is_finite() {
-                return Err(RunError::PrecisionMustBePositive);
+                return Err(RunError::new(RunErrorKind::PrecisionMustBePositive));
             }
             let variance = right_central * right_central;
             let number = crate::quantity::SnaqNumber::new(left_q.value(), variance);
@@ -1453,8 +1670,12 @@ pub fn value<'db>(
             let callee_val = value(db, scope, *callee)?;
             match &callee_val {
                 Value::Function(uf) => eval_user_call(db, scope, uf, args, registry),
-                _ => Err(RunError::UnknownFunction(
-                    "expression is not callable (expected a function)".to_string(),
+                _ => Err(run_err_with_span(
+                    db,
+                    *callee,
+                    RunErrorKind::UnknownFunction(
+                        "expression is not callable (expected a function)".to_string(),
+                    ),
                 )),
             }
         }
@@ -1615,7 +1836,7 @@ fn eval_if(
     let cond_val = value(db, scope, cond_expr)?;
     let fuzzy = match &cond_val {
         Value::FuzzyBool(f) => f.clone(),
-        _ => return Err(RunError::ExpectedCondition),
+        _ => return Err(RunError::new(RunErrorKind::ExpectedCondition)),
     };
 
     match &fuzzy {
@@ -1631,15 +1852,15 @@ fn eval_if(
     if matches!(&then_val, Value::FuzzyBool(_) | Value::Vector(_))
         || matches!(&else_val, Value::FuzzyBool(_) | Value::Vector(_))
     {
-        return Err(RunError::IfBranchTypeMismatch);
+        return Err(RunError::new(RunErrorKind::IfBranchTypeMismatch));
     }
 
     if let (Value::Numeric(qa), Value::Numeric(qb)) = (&then_val, &else_val) {
         if !registry.same_dimension(qa.unit(), qb.unit()).unwrap_or(false) {
-            return Err(RunError::DimensionMismatch {
+            return Err(RunError::new(RunErrorKind::DimensionMismatch {
                 left: qa.unit().clone(),
                 right: qb.unit().clone(),
-            });
+            }));
         }
         let result_unit = Quantity::smaller_unit(registry, qa.unit(), qb.unit())
             .cloned()
@@ -1647,16 +1868,16 @@ fn eval_if(
         let qa_c = qa.clone().convert_to(registry, &result_unit).map_err(|e| match e {
             crate::quantity::QuantityError::DimensionMismatch { left, right }
             | crate::quantity::QuantityError::IncompatibleUnits(left, right) => {
-                RunError::DimensionMismatch { left, right }
-            }
-            _ => RunError::DivisionByZero,
+RunError::new(RunErrorKind::DimensionMismatch { left, right })
+                }
+            _ => RunError::new(RunErrorKind::DivisionByZero),
         })?;
         let qb_c = qb.clone().convert_to(registry, &result_unit).map_err(|e| match e {
             crate::quantity::QuantityError::DimensionMismatch { left, right }
             | crate::quantity::QuantityError::IncompatibleUnits(left, right) => {
-                RunError::DimensionMismatch { left, right }
-            }
-            _ => RunError::DivisionByZero,
+RunError::new(RunErrorKind::DimensionMismatch { left, right })
+                }
+            _ => RunError::new(RunErrorKind::DivisionByZero),
         })?;
         let mean_a = qa_c.value();
         let var_a = qa_c.variance();
@@ -1677,10 +1898,10 @@ fn eval_if(
     let (ea, ua) = value_to_expr_unit(&then_val);
     let (eb, ub) = value_to_expr_unit(&else_val);
     if !registry.same_dimension(&ua, &ub).unwrap_or(false) {
-        return Err(RunError::DimensionMismatch {
+        return Err(RunError::new(RunErrorKind::DimensionMismatch {
             left: ua.clone(),
             right: ub.clone(),
-        });
+        }));
     }
     let result_unit = Quantity::smaller_unit(registry, &ua, &ub)
         .cloned()
@@ -1703,7 +1924,7 @@ fn eval_user_call(
     _registry: &UnitRegistry,
 ) -> Result<Value, RunError> {
     let closure_env = closure_env_get(uf.closure_env_id).ok_or_else(|| {
-        RunError::UnknownFunction("closure env not found (wrong thread or stale id)".to_string())
+        RunError::new(RunErrorKind::UnknownFunction("closure env not found (wrong thread or stale id)".to_string()))
     })?;
     let param_names: Vec<String> = uf.params.iter().map(|(n, _)| n.clone()).collect();
     let mut bound: HashMap<String, Value> = HashMap::new();
@@ -1712,17 +1933,17 @@ fn eval_user_call(
         let param = match opt_name {
             Some(n) => {
                 if !param_names.contains(n) {
-                    return Err(RunError::UnknownFunction(format!(
+                    return Err(RunError::new(RunErrorKind::UnknownFunction(format!(
                         "unknown parameter name '{n}'"
-                    )));
+                    ))));
                 }
                 if bound.contains_key(n) {
-                    return Err(RunError::UnknownFunction(format!("duplicate parameter '{n}'")));
+                    return Err(RunError::new(RunErrorKind::UnknownFunction(format!("duplicate parameter '{n}'"))));
                 }
                 n.clone()
             }
             None => param_names.get(i).cloned().ok_or_else(|| {
-                RunError::UnknownFunction(format!("too many arguments (expected {})", param_names.len()))
+                RunError::new(RunErrorKind::UnknownFunction(format!("too many arguments (expected {})", param_names.len())))
             })?,
         };
         bound.insert(param, v);
@@ -1733,9 +1954,9 @@ fn eval_user_call(
             continue;
         }
         let default_def = default.as_ref().ok_or_else(|| {
-            RunError::UnknownFunction(format!("missing argument for parameter '{name}'"))
+            RunError::new(RunErrorKind::UnknownFunction(format!("missing argument for parameter '{name}'")))
         })?;
-        let default_expr = build_expression(db, (**default_def).clone());
+        let default_expr = build_expression(db, (**default_def).clone(), None);
         let v = value(db, closure_scope, default_expr)?;
         bound.insert(name.clone(), v);
     }
@@ -1746,7 +1967,7 @@ fn eval_user_call(
         env = env.extend(name.clone(), stored);
     }
     let body_scope = Scope::new(db, env);
-    let body_expr = build_expression(db, *uf.body.clone());
+    let body_expr = build_expression(db, *uf.body.clone(), None);
     value(db, body_scope, body_expr)
 }
 
@@ -1764,21 +1985,21 @@ fn eval_call(
         return eval_user_call(db, scope, uf, args, registry);
     }
     let param_names = functions::param_names(name)
-        .ok_or_else(|| RunError::UnknownFunction(name.to_string()))?;
+        .ok_or_else(|| RunError::new(RunErrorKind::UnknownFunction(name.to_string())))?;
     let mut bound: HashMap<String, Value> = HashMap::new();
     for (i, (opt_name, expr)) in args.iter().enumerate() {
         let v = value(db, scope, *expr)?;
         let param = match opt_name {
             Some(n) => {
                 if !param_names.contains(&n.as_str()) {
-                    return Err(RunError::UnknownFunction(format!(
+                    return Err(RunError::new(RunErrorKind::UnknownFunction(format!(
                         "{name}: unknown parameter name '{n}'"
-                    )));
+                    ))));
                 }
                 if bound.contains_key(n) {
-                    return Err(RunError::UnknownFunction(format!(
+                    return Err(RunError::new(RunErrorKind::UnknownFunction(format!(
                         "{name}: duplicate parameter '{n}'"
-                    )));
+                    ))));
                 }
                 n.clone()
             }
@@ -1788,10 +2009,10 @@ fn eval_call(
                     .copied()
                     .map(String::from)
                     .ok_or_else(|| {
-                        RunError::UnknownFunction(format!(
+                        RunError::new(RunErrorKind::UnknownFunction(format!(
                             "{name}: too many arguments (expected {})",
                             param_names.len()
-                        ))
+                        )))
                     })?
             }
         };
@@ -1799,9 +2020,9 @@ fn eval_call(
     }
     for p in param_names.iter() {
         if !bound.contains_key(*p) {
-            return Err(RunError::UnknownFunction(format!(
+            return Err(RunError::new(RunErrorKind::UnknownFunction(format!(
                 "{name}: missing argument for parameter '{p}'"
-            )));
+            ))));
         }
     }
     // Unary built-ins (sin, cos, tan, sqrt): map over vector when the single argument is a vector.
@@ -1824,26 +2045,26 @@ fn eval_call(
         let length_val = bound.get("length").unwrap();
         let VectorValue { inner, orientation } = match vec_val {
             Value::Vector(v) => v.clone(),
-            _ => return Err(RunError::ExpectedVector),
+            _ => return Err(RunError::new(RunErrorKind::ExpectedVector)),
         };
         let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
         let start_q = start_val.to_quantity(&sym_reg).map_err(|_| {
-            RunError::InvalidIndex("start must be numeric".to_string())
+            RunError::new(RunErrorKind::InvalidIndex("start must be numeric".to_string()))
         })?;
         let length_q = length_val.to_quantity(&sym_reg).map_err(|_| {
-            RunError::InvalidIndex("length must be numeric".to_string())
+            RunError::new(RunErrorKind::InvalidIndex("length must be numeric".to_string()))
         })?;
         let start_f = start_q.value();
         let length_f = length_q.value();
         if !start_f.is_finite() || start_f < 0.0 {
-            return Err(RunError::InvalidIndex(
+            return Err(RunError::new(RunErrorKind::InvalidIndex(
                 "start must be a non-negative integer".to_string(),
-            ));
+            )));
         }
         if !length_f.is_finite() || length_f < 0.0 {
-            return Err(RunError::InvalidIndex(
+            return Err(RunError::new(RunErrorKind::InvalidIndex(
                 "length must be a non-negative integer".to_string(),
-            ));
+            )));
         }
         let start_u = start_f as usize;
         let length_u = length_f as usize;
@@ -1857,7 +2078,7 @@ fn eval_call(
         }));
     }
     if bound.values().any(|v| matches!(v, Value::Vector(_))) {
-        return Err(RunError::UnsupportedVectorOperation);
+        return Err(RunError::new(RunErrorKind::UnsupportedVectorOperation));
     }
     let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
     let param_values: Result<Vec<Quantity>, RunError> = param_names
@@ -1981,7 +2202,7 @@ fn compute_variance_value(
         .filter(|r| r.as_ref().is_ok_and(|o| o.is_some()))
         .count();
     if defined_count == 0 {
-        return Err(RunError::EmptyVectorReduction("variance".to_string()));
+        return Err(RunError::new(RunErrorKind::EmptyVectorReduction("variance".to_string())));
     }
     let n = defined_count as f64;
     let sum_x = sum_vector_elements(collected, registry)?;
@@ -1994,8 +2215,8 @@ fn compute_variance_value(
         }
     }
     let len_val = Value::Numeric(Quantity::from_exact_scalar(n));
-    let mean_val = div_values(&sum_x, &len_val, registry, None)?;
-    let mean_sq_val = div_values(&sum_sq, &len_val, registry, None)?;
+    let mean_val = div_values(&sum_x, &len_val, registry, None, None)?;
+    let mean_sq_val = div_values(&sum_sq, &len_val, registry, None, None)?;
     let mean_sq_mean = mul_values(&mean_val, &mean_val, registry, None)?;
     sub_values(&mean_sq_val, &mean_sq_mean, registry, None)
 }
@@ -2013,25 +2234,25 @@ fn reduce_min_max(
         .filter_map(|r| r.as_ref().ok().and_then(|o| o.clone()))
         .collect();
     if values.is_empty() {
-        return Err(RunError::EmptyVectorReduction(method_name.to_string()));
+        return Err(RunError::new(RunErrorKind::EmptyVectorReduction(method_name.to_string())));
     }
     let name = if is_max { "max" } else { "min" };
     let mut acc_q = values[0].clone().to_quantity(&sym_reg).map_err(|_| {
-        RunError::UnknownMethod(format!(
+        RunError::new(RunErrorKind::UnknownMethod(format!(
             "{method_name}: elements must be numeric (same dimension)"
-        ))
+        )))
     })?;
     for v in values.iter().skip(1) {
         let q = v.to_quantity(&sym_reg).map_err(|_| {
-            RunError::UnknownMethod(format!(
+            RunError::new(RunErrorKind::UnknownMethod(format!(
                 "{method_name}: elements must be numeric (same dimension)"
-            ))
+            )))
         })?;
         let result = functions::call_builtin(name, &[acc_q, q], registry)?;
         acc_q = result.to_quantity(&sym_reg).map_err(|_| {
-            RunError::UnknownMethod(format!(
+            RunError::new(RunErrorKind::UnknownMethod(format!(
                 "{method_name}: elements must be numeric (same dimension)"
-            ))
+            )))
         })?;
     }
     Ok(Value::Numeric(acc_q))
@@ -2093,7 +2314,7 @@ fn cmp_values(
             }))
         }
         (Value::Vector(left), Value::Vector(right)) => {
-            let db = db.ok_or(RunError::UnsupportedVectorOperation)?;
+            let db = db.ok_or(RunError::new(RunErrorKind::UnsupportedVectorOperation))?;
             let bin_op = cmp_op_to_binary_op(op);
             match (left.orientation, right.orientation) {
                 (VectorOrientation::Column, VectorOrientation::Column) => Ok(Value::Vector(
@@ -2130,10 +2351,10 @@ fn cmp_values(
                     let left_elems = collect_vector_stream(db, left.inner.clone());
                     let right_elems = collect_vector_stream(db, right.inner.clone());
                     if left_elems.len() != right_elems.len() {
-                        return Err(RunError::VectorLengthMismatch {
-                            left_len: left_elems.len(),
-                            right_len: right_elems.len(),
-                        });
+return Err(RunError::new(RunErrorKind::VectorLengthMismatch {
+                    left_len: left_elems.len(),
+                    right_len: right_elems.len(),
+                }));
                     }
                     let sum_left = sum_vector_elements(&left_elems, registry)?;
                     let sum_right = sum_vector_elements(&right_elems, registry)?;
@@ -2143,25 +2364,25 @@ fn cmp_values(
         }
         (Value::Numeric(qa), Value::Numeric(qb)) => {
             if !registry.same_dimension(qa.unit(), qb.unit()).unwrap_or(false) {
-                return Err(RunError::DimensionMismatch {
+                return Err(RunError::new(RunErrorKind::DimensionMismatch {
                     left: qa.unit().clone(),
                     right: qb.unit().clone(),
-                });
+                }));
             }
             let result_unit = Quantity::smaller_unit(registry, qa.unit(), qb.unit())
                 .cloned()
                 .unwrap_or_else(|| qa.unit().clone());
             let qa_c = qa.clone().convert_to(registry, &result_unit).map_err(|e| match e {
                 crate::quantity::QuantityError::DimensionMismatch { left, right } => {
-                    RunError::DimensionMismatch { left, right }
+                    RunError::new(RunErrorKind::DimensionMismatch { left, right })
                 }
-                _ => RunError::DivisionByZero,
+                _ => RunError::new(RunErrorKind::DivisionByZero),
             })?;
             let qb_c = qb.clone().convert_to(registry, &result_unit).map_err(|e| match e {
                 crate::quantity::QuantityError::DimensionMismatch { left, right } => {
-                    RunError::DimensionMismatch { left, right }
+                    RunError::new(RunErrorKind::DimensionMismatch { left, right })
                 }
-                _ => RunError::DivisionByZero,
+                _ => RunError::new(RunErrorKind::DivisionByZero),
             })?;
             let na = qa_c.number;
             let nb = qb_c.number;
@@ -2177,18 +2398,18 @@ fn cmp_values(
             let fuzzy = probability_to_fuzzy_bool(prob, CONFIDENCE_THRESHOLD);
             Ok(Value::FuzzyBool(fuzzy))
         }
-        (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
+        (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::new(RunErrorKind::BooleanResult)),
         (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
-            Err(RunError::UnknownFunction("function value cannot be used in comparison".to_string()))
+            Err(RunError::new(RunErrorKind::UnknownFunction("function value cannot be used in comparison".to_string())))
         }
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
             if !registry.same_dimension(&ua, &ub).unwrap_or(false) {
-                return Err(RunError::DimensionMismatch {
+                return Err(RunError::new(RunErrorKind::DimensionMismatch {
                     left: ua.clone(),
                     right: ub.clone(),
-                });
+                }));
             }
             let result_unit = Quantity::smaller_unit(registry, &ua, &ub)
                 .cloned()
@@ -2218,10 +2439,10 @@ fn dot_product(
     registry: &UnitRegistry,
 ) -> Result<Value, RunError> {
     if left_elems.len() != right_elems.len() {
-        return Err(RunError::VectorLengthMismatch {
-            left_len: left_elems.len(),
-            right_len: right_elems.len(),
-        });
+return Err(RunError::new(RunErrorKind::VectorLengthMismatch {
+                    left_len: left_elems.len(),
+                    right_len: right_elems.len(),
+                }));
     }
     let mut acc = Value::Numeric(Quantity::from_scalar(0.0));
     for (l, r) in left_elems.iter().zip(right_elems.iter()) {
@@ -2254,7 +2475,7 @@ fn add_values(
             }))
         }
         (Value::Vector(left), Value::Vector(right)) => {
-            let db = db.ok_or(RunError::UnsupportedVectorOperation)?;
+            let db = db.ok_or(RunError::new(RunErrorKind::UnsupportedVectorOperation))?;
             match (left.orientation, right.orientation) {
                 (VectorOrientation::Column, VectorOrientation::Column) => Ok(Value::Vector(
                     VectorValue {
@@ -2290,10 +2511,10 @@ fn add_values(
                     let left_elems = collect_vector_stream(db, left.inner.clone());
                     let right_elems = collect_vector_stream(db, right.inner.clone());
                     if left_elems.len() != right_elems.len() {
-                        return Err(RunError::VectorLengthMismatch {
-                            left_len: left_elems.len(),
-                            right_len: right_elems.len(),
-                        });
+return Err(RunError::new(RunErrorKind::VectorLengthMismatch {
+                    left_len: left_elems.len(),
+                    right_len: right_elems.len(),
+                }));
                     }
                     let sum_left = sum_vector_elements(&left_elems, registry)?;
                     let sum_right = sum_vector_elements(&right_elems, registry)?;
@@ -2307,22 +2528,22 @@ fn add_values(
             .map(Value::Numeric)
             .map_err(|e| match e {
                 crate::quantity::QuantityError::DimensionMismatch { left, right } => {
-                    RunError::DimensionMismatch { left, right }
+                    RunError::new(RunErrorKind::DimensionMismatch { left, right })
                 }
-                _ => RunError::DivisionByZero,
+                _ => RunError::new(RunErrorKind::DivisionByZero),
             }),
-        (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
+        (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::new(RunErrorKind::BooleanResult)),
         (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
-            Err(RunError::UnknownFunction("function value cannot be used in arithmetic".to_string()))
+            Err(RunError::new(RunErrorKind::UnknownFunction("function value cannot be used in arithmetic".to_string())))
         }
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
             if !registry.same_dimension(&ua, &ub).unwrap_or(false) {
-                return Err(RunError::DimensionMismatch {
+                return Err(RunError::new(RunErrorKind::DimensionMismatch {
                     left: ua.clone(),
                     right: ub.clone(),
-                });
+                }));
             }
             let result_unit = Quantity::smaller_unit(registry, &ua, &ub)
                 .cloned()
@@ -2363,7 +2584,7 @@ fn sub_values(
             }))
         }
         (Value::Vector(left), Value::Vector(right)) => {
-            let db = db.ok_or(RunError::UnsupportedVectorOperation)?;
+            let db = db.ok_or(RunError::new(RunErrorKind::UnsupportedVectorOperation))?;
             match (left.orientation, right.orientation) {
                 (VectorOrientation::Column, VectorOrientation::Column) => Ok(Value::Vector(
                     VectorValue {
@@ -2399,10 +2620,10 @@ fn sub_values(
                     let left_elems = collect_vector_stream(db, left.inner.clone());
                     let right_elems = collect_vector_stream(db, right.inner.clone());
                     if left_elems.len() != right_elems.len() {
-                        return Err(RunError::VectorLengthMismatch {
-                            left_len: left_elems.len(),
-                            right_len: right_elems.len(),
-                        });
+return Err(RunError::new(RunErrorKind::VectorLengthMismatch {
+                    left_len: left_elems.len(),
+                    right_len: right_elems.len(),
+                }));
                     }
                     let sum_left = sum_vector_elements(&left_elems, registry)?;
                     let sum_right = sum_vector_elements(&right_elems, registry)?;
@@ -2416,22 +2637,22 @@ fn sub_values(
             .map(Value::Numeric)
             .map_err(|e| match e {
                 crate::quantity::QuantityError::DimensionMismatch { left, right } => {
-                    RunError::DimensionMismatch { left, right }
+                    RunError::new(RunErrorKind::DimensionMismatch { left, right })
                 }
-                _ => RunError::DivisionByZero,
+                _ => RunError::new(RunErrorKind::DivisionByZero),
             }),
-        (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
+        (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::new(RunErrorKind::BooleanResult)),
         (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
-            Err(RunError::UnknownFunction("function value cannot be used in arithmetic".to_string()))
+            Err(RunError::new(RunErrorKind::UnknownFunction("function value cannot be used in arithmetic".to_string())))
         }
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
             if !registry.same_dimension(&ua, &ub).unwrap_or(false) {
-                return Err(RunError::DimensionMismatch {
+                return Err(RunError::new(RunErrorKind::DimensionMismatch {
                     left: ua.clone(),
                     right: ub.clone(),
-                });
+                }));
             }
             let result_unit = Quantity::smaller_unit(registry, &ua, &ub)
                 .cloned()
@@ -2465,7 +2686,7 @@ fn mul_values(
             }))
         }
         (Value::Vector(left), Value::Vector(right)) => {
-            let db = db.ok_or(RunError::UnsupportedVectorOperation)?;
+            let db = db.ok_or(RunError::new(RunErrorKind::UnsupportedVectorOperation))?;
             match (left.orientation, right.orientation) {
                 (VectorOrientation::Column, VectorOrientation::Column) => Ok(Value::Vector(
                     VectorValue {
@@ -2505,9 +2726,9 @@ fn mul_values(
             }
         }
         (Value::Numeric(qa), Value::Numeric(qb)) => Ok(Value::Numeric(qa.clone() * qb.clone())),
-        (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
+        (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::new(RunErrorKind::BooleanResult)),
         (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
-            Err(RunError::UnknownFunction("function value cannot be used in arithmetic".to_string()))
+            Err(RunError::new(RunErrorKind::UnknownFunction("function value cannot be used in arithmetic".to_string())))
         }
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
@@ -2521,12 +2742,24 @@ fn mul_values(
     }
 }
 
+fn run_err_with_span(db: &dyn salsa::Database, expr: Expression<'_>, kind: RunErrorKind) -> RunError {
+    match expr.span(db) {
+        Some(s) => RunError::at(s, kind),
+        None => RunError::new(kind),
+    }
+}
+
 fn div_values(
     a: &Value,
     b: &Value,
     registry: &UnitRegistry,
     db: Option<&dyn salsa::Database>,
+    span: Option<Span>,
 ) -> Result<Value, RunError> {
+    let err = |kind: RunErrorKind| match span {
+        Some(s) => RunError::at(s, kind),
+        None => RunError::new(kind),
+    };
     match (a, b) {
         (Value::Vector(v), scalar) if !matches!(scalar, Value::Vector(_)) => {
             Ok(Value::Vector(VectorValue {
@@ -2547,7 +2780,7 @@ fn div_values(
             }))
         }
         (Value::Vector(left), Value::Vector(right)) => {
-            let _db = db.ok_or(RunError::UnsupportedVectorOperation)?;
+            let _db = db.ok_or(err(RunErrorKind::UnsupportedVectorOperation))?;
             match (left.orientation, right.orientation) {
                 (VectorOrientation::Column, VectorOrientation::Column) => Ok(Value::Vector(
                     VectorValue {
@@ -2581,16 +2814,16 @@ fn div_values(
                 )),
                 (VectorOrientation::Row, VectorOrientation::Column) => {
                     let _ = registry;
-                    Err(RunError::UnsupportedVectorOperation)
+                    Err(err(RunErrorKind::UnsupportedVectorOperation))
                 }
             }
         }
         (Value::Numeric(qa), Value::Numeric(qb)) => (qa.clone() / qb.clone())
             .map(Value::Numeric)
-            .map_err(|_| RunError::DivisionByZero),
-        (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
+            .map_err(|_| err(RunErrorKind::DivisionByZero)),
+        (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(err(RunErrorKind::BooleanResult)),
         (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
-            Err(RunError::UnknownFunction("function value cannot be used in arithmetic".to_string()))
+            Err(err(RunErrorKind::UnknownFunction("function value cannot be used in arithmetic".to_string())))
         }
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
@@ -2606,11 +2839,11 @@ fn div_values(
 
 fn neg_value(v: &Value) -> Result<Value, RunError> {
     match v {
-        Value::FuzzyBool(_) => Err(RunError::BooleanResult),
+        Value::FuzzyBool(_) => Err(RunError::new(RunErrorKind::BooleanResult)),
         Value::Function(_) | Value::BuiltinFunction(_) => {
-            Err(RunError::UnknownFunction("function value cannot be negated".to_string()))
+            Err(RunError::new(RunErrorKind::UnknownFunction("function value cannot be negated".to_string())))
         }
-        Value::Undefined => Err(RunError::UndefinedResult),
+        Value::Undefined => Err(RunError::new(RunErrorKind::UndefinedResult)),
         Value::Vector(v) => Ok(Value::Vector(VectorValue {
             inner: LazyVector::Map {
                 source: Box::new(v.inner.clone()),
@@ -2651,16 +2884,16 @@ fn scale_expr_to_unit(
     }
     let (_, from_factor) = registry
         .to_base_unit_representation(from_unit)
-        .ok_or_else(|| RunError::DimensionMismatch {
+        .ok_or_else(|| RunError::new(RunErrorKind::DimensionMismatch {
             left: from_unit.clone(),
             right: to_unit.clone(),
-        })?;
+        }))?;
     let (_, to_factor) = registry
         .to_base_unit_representation(to_unit)
-        .ok_or_else(|| RunError::DimensionMismatch {
+        .ok_or_else(|| RunError::new(RunErrorKind::DimensionMismatch {
             left: from_unit.clone(),
             right: to_unit.clone(),
-        })?;
+        }))?;
     let ratio = from_factor / to_factor;
     match v {
         Value::Numeric(q) => {
@@ -2669,16 +2902,16 @@ fn scale_expr_to_unit(
                 .convert_to(registry, to_unit)
                 .map_err(|e| match e {
                     crate::quantity::QuantityError::DimensionMismatch { left, right } => {
-                        RunError::DimensionMismatch { left, right }
-                    }
-                    _ => RunError::DivisionByZero,
+RunError::new(RunErrorKind::DimensionMismatch { left, right })
+                }
+                    _ => RunError::new(RunErrorKind::DivisionByZero),
                 })?;
             Ok(SymbolicExpr::number(converted.value()))
         }
         Value::Symbolic(_) => Ok(SymbolicExpr::mul(expr, &SymbolicExpr::number(ratio))),
-        Value::FuzzyBool(_) => Err(RunError::BooleanResult),
-        Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
-        Value::Undefined => Err(RunError::UndefinedResult),
-        Value::Function(_) | Value::BuiltinFunction(_) => Err(RunError::UnsupportedVectorOperation),
+        Value::FuzzyBool(_) => Err(RunError::new(RunErrorKind::BooleanResult)),
+        Value::Vector(_) => Err(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
+        Value::Undefined => Err(RunError::new(RunErrorKind::UndefinedResult)),
+        Value::Function(_) | Value::BuiltinFunction(_) => Err(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
     }
 }

@@ -1,5 +1,6 @@
 //! IR: inputs and tracked expression graph for the reactive computation.
 
+use crate::error::Span;
 use crate::fuzzy::FuzzyBool;
 use crate::quantity::Quantity;
 use ordered_float::OrderedFloat;
@@ -57,6 +58,132 @@ pub enum CallArg {
     Positional(Box<ExprDef>),
     /// Named argument (e.g. `b: 2` in `max(a: 1, b: 2)`).
     Named(String, Box<ExprDef>),
+}
+
+/// Call argument with source span (used in spanned AST from parser).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum SpannedCallArg {
+    Positional(Box<SpannedExprDef>),
+    Named(String, Box<SpannedExprDef>),
+}
+
+/// Expression definition with source span. Parser produces this; pipeline preserves spans.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct SpannedExprDef {
+    pub span: Span,
+    pub value: SpannedExprDefKind,
+}
+
+/// Kind of expression (mirrors [ExprDef] but with [SpannedExprDef] for children).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum SpannedExprDefKind {
+    LitScalar(NumLiteral),
+    LitWithUnit(NumLiteral, String),
+    LitUnit(String),
+    Lit(Quantity),
+    LitFuzzyBool(FuzzyBool),
+    LitSymbol(String),
+    Add(Box<SpannedExprDef>, Box<SpannedExprDef>),
+    Sub(Box<SpannedExprDef>, Box<SpannedExprDef>),
+    Mul(Box<SpannedExprDef>, Box<SpannedExprDef>),
+    Div(Box<SpannedExprDef>, Box<SpannedExprDef>),
+    Eq(Box<SpannedExprDef>, Box<SpannedExprDef>),
+    Ne(Box<SpannedExprDef>, Box<SpannedExprDef>),
+    Lt(Box<SpannedExprDef>, Box<SpannedExprDef>),
+    Le(Box<SpannedExprDef>, Box<SpannedExprDef>),
+    Gt(Box<SpannedExprDef>, Box<SpannedExprDef>),
+    Ge(Box<SpannedExprDef>, Box<SpannedExprDef>),
+    Neg(Box<SpannedExprDef>),
+    Call(String, Vec<SpannedCallArg>),
+    Lambda(Vec<(String, Option<Box<SpannedExprDef>>)>, Box<SpannedExprDef>),
+    CallExpr(Box<SpannedExprDef>, Vec<SpannedCallArg>),
+    As(Box<SpannedExprDef>, Box<SpannedExprDef>),
+    VecLiteral(Vec<SpannedExprDef>),
+    Transpose(Box<SpannedExprDef>),
+    Index(Box<SpannedExprDef>, Box<SpannedExprDef>),
+    Member(Box<SpannedExprDef>, String),
+    MethodCall(Box<SpannedExprDef>, String, Vec<SpannedCallArg>),
+    If(Box<SpannedExprDef>, Box<SpannedExprDef>, Box<SpannedExprDef>),
+    WithPrecision(Box<SpannedExprDef>, Box<SpannedExprDef>),
+    Block(Vec<SpannedExprDef>),
+    Binding(String, Box<SpannedExprDef>),
+}
+
+impl SpannedExprDef {
+    /// Strip spans and return plain [ExprDef] (for transition or when spans are not needed).
+    pub fn to_expr_def(&self) -> ExprDef {
+        match &self.value {
+            SpannedExprDefKind::LitScalar(n) => ExprDef::LitScalar(n.clone()),
+            SpannedExprDefKind::LitWithUnit(n, s) => ExprDef::LitWithUnit(n.clone(), s.clone()),
+            SpannedExprDefKind::LitUnit(s) => ExprDef::LitUnit(s.clone()),
+            SpannedExprDefKind::Lit(q) => ExprDef::Lit(q.clone()),
+            SpannedExprDefKind::LitFuzzyBool(f) => ExprDef::LitFuzzyBool(f.clone()),
+            SpannedExprDefKind::LitSymbol(s) => ExprDef::LitSymbol(s.clone()),
+            SpannedExprDefKind::Add(l, r) => ExprDef::Add(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
+            SpannedExprDefKind::Sub(l, r) => ExprDef::Sub(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
+            SpannedExprDefKind::Mul(l, r) => ExprDef::Mul(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
+            SpannedExprDefKind::Div(l, r) => ExprDef::Div(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
+            SpannedExprDefKind::Eq(l, r) => ExprDef::Eq(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
+            SpannedExprDefKind::Ne(l, r) => ExprDef::Ne(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
+            SpannedExprDefKind::Lt(l, r) => ExprDef::Lt(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
+            SpannedExprDefKind::Le(l, r) => ExprDef::Le(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
+            SpannedExprDefKind::Gt(l, r) => ExprDef::Gt(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
+            SpannedExprDefKind::Ge(l, r) => ExprDef::Ge(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
+            SpannedExprDefKind::Neg(inner) => ExprDef::Neg(Box::new(inner.to_expr_def())),
+            SpannedExprDefKind::Call(name, args) => ExprDef::Call(
+                name.clone(),
+                args.iter()
+                    .map(|a| match a {
+                        SpannedCallArg::Positional(e) => CallArg::Positional(Box::new(e.to_expr_def())),
+                        SpannedCallArg::Named(n, e) => CallArg::Named(n.clone(), Box::new(e.to_expr_def())),
+                    })
+                    .collect(),
+            ),
+            SpannedExprDefKind::Lambda(params, body) => ExprDef::Lambda(
+                params
+                    .iter()
+                    .map(|(s, o)| (s.clone(), o.as_ref().map(|e| Box::new(e.to_expr_def()))))
+                    .collect(),
+                Box::new(body.to_expr_def()),
+            ),
+            SpannedExprDefKind::CallExpr(callee, args) => ExprDef::CallExpr(
+                Box::new(callee.to_expr_def()),
+                args.iter()
+                    .map(|a| match a {
+                        SpannedCallArg::Positional(e) => CallArg::Positional(Box::new(e.to_expr_def())),
+                        SpannedCallArg::Named(n, e) => CallArg::Named(n.clone(), Box::new(e.to_expr_def())),
+                    })
+                    .collect(),
+            ),
+            SpannedExprDefKind::As(l, r) => ExprDef::As(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
+            SpannedExprDefKind::VecLiteral(elems) => ExprDef::VecLiteral(elems.iter().map(|e| e.to_expr_def()).collect()),
+            SpannedExprDefKind::Transpose(inner) => ExprDef::Transpose(Box::new(inner.to_expr_def())),
+            SpannedExprDefKind::Index(base, index) => {
+                ExprDef::Index(Box::new(base.to_expr_def()), Box::new(index.to_expr_def()))
+            }
+            SpannedExprDefKind::Member(base, name) => ExprDef::Member(Box::new(base.to_expr_def()), name.clone()),
+            SpannedExprDefKind::MethodCall(base, name, args) => ExprDef::MethodCall(
+                Box::new(base.to_expr_def()),
+                name.clone(),
+                args.iter()
+                    .map(|a| match a {
+                        SpannedCallArg::Positional(e) => CallArg::Positional(Box::new(e.to_expr_def())),
+                        SpannedCallArg::Named(n, e) => CallArg::Named(n.clone(), Box::new(e.to_expr_def())),
+                    })
+                    .collect(),
+            ),
+            SpannedExprDefKind::If(cond, then_b, else_b) => ExprDef::If(
+                Box::new(cond.to_expr_def()),
+                Box::new(then_b.to_expr_def()),
+                Box::new(else_b.to_expr_def()),
+            ),
+            SpannedExprDefKind::WithPrecision(l, r) => {
+                ExprDef::WithPrecision(Box::new(l.to_expr_def()), Box::new(r.to_expr_def()))
+            }
+            SpannedExprDefKind::Block(list) => ExprDef::Block(list.iter().map(|e| e.to_expr_def()).collect()),
+            SpannedExprDefKind::Binding(name, rhs) => ExprDef::Binding(name.clone(), Box::new(rhs.to_expr_def())),
+        }
+    }
 }
 
 /// Definition of the root expression (plain data, no Salsa).
@@ -117,10 +244,14 @@ pub enum ExprDef {
 }
 
 /// Input that holds the root expression definition.
+/// When [spanned_root] is [Some], runtime errors can report source location (line/column and snippet).
 #[salsa::input]
 pub struct ProgramDef {
     #[returns(ref)]
     pub root: ExprDef,
+    /// Spanned AST for the same root; when set, each expression node gets a span for error reporting.
+    #[returns(ref)]
+    pub spanned_root: Option<SpannedExprDef>,
 }
 
 /// A single expression node in the computation graph (tracked by Salsa).
@@ -128,6 +259,8 @@ pub struct ProgramDef {
 pub struct Expression<'db> {
     #[returns(ref)]
     pub data: ExprData<'db>,
+    /// Source span when built from [ProgramDef::spanned_root]; used for runtime error location.
+    pub span: Option<Span>,
 }
 
 /// Data for an expression node; can reference other expressions.

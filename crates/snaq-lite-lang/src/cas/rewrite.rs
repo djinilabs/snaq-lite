@@ -1,7 +1,7 @@
 //! Term rewriting: identity/annihilation, constant folding, like-term collection.
 
 use crate::cas::{ExprId, ExprInterner, ExprNode};
-use crate::error::RunError;
+use crate::error::{RunError, RunErrorKind, Span};
 use crate::fuzzy::FuzzyBool;
 use crate::quantity::{Quantity, QuantityError, SnaqNumber};
 use crate::stat_compare::{
@@ -29,10 +29,11 @@ fn rewrite_rec(
     id: ExprId,
     registry: &UnitRegistry,
 ) -> Result<ExprId, RunError> {
+    let span = pool.get_span(id);
     match pool.get(id) {
-        ExprNode::Lit(q) => Ok(out.intern(ExprNode::Lit(q.clone()))),
-        ExprNode::LitFuzzyBool(f) => Ok(out.intern(ExprNode::LitFuzzyBool(f.clone()))),
-        ExprNode::LitSymbol(s) => Ok(out.intern(ExprNode::LitSymbol(s.clone()))),
+        ExprNode::Lit(q) => Ok(out.intern(ExprNode::Lit(q.clone()), span)),
+        ExprNode::LitFuzzyBool(f) => Ok(out.intern(ExprNode::LitFuzzyBool(f.clone()), span)),
+        ExprNode::LitSymbol(s) => Ok(out.intern(ExprNode::LitSymbol(s.clone()), span)),
         ExprNode::Neg(inner) => {
             let new_inner = rewrite_rec(pool, out, *inner, registry)?;
             // Neg(Neg(x)) -> x
@@ -41,12 +42,12 @@ fn rewrite_rec(
             }
             // Constant fold: Neg(Lit(q)) -> Lit(-q)
             if let ExprNode::Lit(q) = out.get(new_inner) {
-                return Ok(out.intern(ExprNode::Lit(q.clone().neg())));
+                return Ok(out.intern(ExprNode::Lit(q.clone().neg()), span));
             }
-            Ok(out.intern(ExprNode::Neg(new_inner)))
+            Ok(out.intern(ExprNode::Neg(new_inner), span))
         }
-        ExprNode::Add(ids) => rewrite_add(pool, out, ids, registry),
-        ExprNode::Mul(ids) => rewrite_mul(pool, out, ids, registry),
+        ExprNode::Add(ids) => rewrite_add(pool, out, id, ids, registry),
+        ExprNode::Mul(ids) => rewrite_mul(pool, out, id, ids, registry),
         ExprNode::Sub(l, r) => {
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;
@@ -62,9 +63,9 @@ fn rewrite_rec(
                     .clone()
                     .sub(qr, registry)
                     .map_err(quantity_to_run_error)?;
-                return Ok(out.intern(ExprNode::Lit(result)));
+                return Ok(out.intern(ExprNode::Lit(result), span));
             }
-            Ok(out.intern(ExprNode::Sub(new_l, new_r)))
+            Ok(out.intern(ExprNode::Sub(new_l, new_r), span))
         }
         ExprNode::Div(l, r) => {
             let new_l = rewrite_rec(pool, out, *l, registry)?;
@@ -75,20 +76,21 @@ fn rewrite_rec(
                     return Ok(new_l);
                 }
             }
-            // Constant fold; any division by zero in CAS yields DivisionByZero (plan: fail the rewrite step).
+            // Constant fold: nonzero/0 → ±∞ (Lit); 0/0 left as Div so value() can map to Undefined.
             if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
-                if qr.is_zero() {
-                    return Err(RunError::DivisionByZero);
+                if qr.is_zero() && ql.is_zero() {
+                    // 0/0: do not constant-fold (no Quantity for undefined); leave as Div.
+                    return Ok(out.intern(ExprNode::Div(new_l, new_r), span));
                 }
                 let result = (ql.clone() / qr.clone()).map_err(quantity_to_run_error)?;
-                return Ok(out.intern(ExprNode::Lit(result)));
+                return Ok(out.intern(ExprNode::Lit(result), span));
             }
             // Push Neg out of numerator: Div(Neg(inner), r) -> Neg(Div(inner, r)) so value() can simplify Div to product form.
             if let ExprNode::Neg(inner_id) = out.get(new_l) {
-                let div_id = out.intern(ExprNode::Div(*inner_id, new_r));
-                return Ok(out.intern(ExprNode::Neg(div_id)));
+                let div_id = out.intern(ExprNode::Div(*inner_id, new_r), span);
+                return Ok(out.intern(ExprNode::Neg(div_id), span));
             }
-            Ok(out.intern(ExprNode::Div(new_l, new_r)))
+            Ok(out.intern(ExprNode::Div(new_l, new_r), span))
         }
         ExprNode::Call(name, args) => {
             let new_args: Vec<(Option<String>, ExprId)> = args
@@ -98,32 +100,32 @@ fn rewrite_rec(
                     Ok((n.clone(), new_id))
                 })
                 .collect::<Result<Vec<_>, RunError>>()?;
-            Ok(out.intern(ExprNode::Call(name.clone(), new_args)))
+            Ok(out.intern(ExprNode::Call(name.clone(), new_args), span))
         }
         ExprNode::As(l, r) => {
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;
-            Ok(out.intern(ExprNode::As(new_l, new_r)))
+            Ok(out.intern(ExprNode::As(new_l, new_r), span))
         }
         ExprNode::VecLiteral(ids) => {
             let new_ids: Vec<ExprId> = ids
                 .iter()
                 .map(|&id| rewrite_rec(pool, out, id, registry))
                 .collect::<Result<Vec<_>, RunError>>()?;
-            Ok(out.intern(ExprNode::VecLiteral(new_ids)))
+            Ok(out.intern(ExprNode::VecLiteral(new_ids), span))
         }
         ExprNode::Transpose(inner) => {
             let new_inner = rewrite_rec(pool, out, *inner, registry)?;
-            Ok(out.intern(ExprNode::Transpose(new_inner)))
+            Ok(out.intern(ExprNode::Transpose(new_inner), span))
         }
         ExprNode::Index(base, index) => {
             let new_base = rewrite_rec(pool, out, *base, registry)?;
             let new_index = rewrite_rec(pool, out, *index, registry)?;
-            Ok(out.intern(ExprNode::Index(new_base, new_index)))
+            Ok(out.intern(ExprNode::Index(new_base, new_index), span))
         }
         ExprNode::Member(base, name) => {
             let new_base = rewrite_rec(pool, out, *base, registry)?;
-            Ok(out.intern(ExprNode::Member(new_base, name.clone())))
+            Ok(out.intern(ExprNode::Member(new_base, name.clone()), span))
         }
         ExprNode::MethodCall(base, name, args) => {
             let new_base = rewrite_rec(pool, out, *base, registry)?;
@@ -133,61 +135,61 @@ fn rewrite_rec(
                     rewrite_rec(pool, out, *id, registry).map(|new_id| (n.clone(), new_id))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(out.intern(ExprNode::MethodCall(new_base, name.clone(), new_args)))
+            Ok(out.intern(ExprNode::MethodCall(new_base, name.clone(), new_args), span))
         }
         ExprNode::Eq(l, r) => {
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;
             if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
                 let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Eq)?;
-                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy)));
+                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy), span));
             }
-            Ok(out.intern(ExprNode::Eq(new_l, new_r)))
+            Ok(out.intern(ExprNode::Eq(new_l, new_r), span))
         }
         ExprNode::Ne(l, r) => {
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;
             if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
                 let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Ne)?;
-                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy)));
+                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy), span));
             }
-            Ok(out.intern(ExprNode::Ne(new_l, new_r)))
+            Ok(out.intern(ExprNode::Ne(new_l, new_r), span))
         }
         ExprNode::Lt(l, r) => {
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;
             if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
                 let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Lt)?;
-                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy)));
+                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy), span));
             }
-            Ok(out.intern(ExprNode::Lt(new_l, new_r)))
+            Ok(out.intern(ExprNode::Lt(new_l, new_r), span))
         }
         ExprNode::Le(l, r) => {
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;
             if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
                 let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Le)?;
-                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy)));
+                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy), span));
             }
-            Ok(out.intern(ExprNode::Le(new_l, new_r)))
+            Ok(out.intern(ExprNode::Le(new_l, new_r), span))
         }
         ExprNode::Gt(l, r) => {
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;
             if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
                 let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Gt)?;
-                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy)));
+                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy), span));
             }
-            Ok(out.intern(ExprNode::Gt(new_l, new_r)))
+            Ok(out.intern(ExprNode::Gt(new_l, new_r), span))
         }
         ExprNode::Ge(l, r) => {
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;
             if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
                 let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Ge)?;
-                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy)));
+                return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy), span));
             }
-            Ok(out.intern(ExprNode::Ge(new_l, new_r)))
+            Ok(out.intern(ExprNode::Ge(new_l, new_r), span))
         }
         ExprNode::If(cond_id, then_id, else_id) => {
             let new_cond = rewrite_rec(pool, out, *cond_id, registry)?;
@@ -199,23 +201,23 @@ fn rewrite_rec(
                 ExprNode::LitFuzzyBool(FuzzyBool::False) => return Ok(new_else),
                 _ => {}
             }
-            Ok(out.intern(ExprNode::If(new_cond, new_then, new_else)))
+            Ok(out.intern(ExprNode::If(new_cond, new_then, new_else), span))
         }
         ExprNode::WithPrecision(l, r) => {
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;
-            Ok(out.intern(ExprNode::WithPrecision(new_l, new_r)))
+            Ok(out.intern(ExprNode::WithPrecision(new_l, new_r), span))
         }
         ExprNode::Block(ids) => {
             let new_ids: Vec<ExprId> = ids
                 .iter()
                 .map(|&id| rewrite_rec(pool, out, id, registry))
                 .collect::<Result<Vec<_>, RunError>>()?;
-            Ok(out.intern(ExprNode::Block(new_ids)))
+            Ok(out.intern(ExprNode::Block(new_ids), span))
         }
         ExprNode::Binding(name, rhs) => {
             let new_rhs = rewrite_rec(pool, out, *rhs, registry)?;
-            Ok(out.intern(ExprNode::Binding(name.clone(), new_rhs)))
+            Ok(out.intern(ExprNode::Binding(name.clone(), new_rhs), span))
         }
         ExprNode::Lambda(params, body_id) => {
             let new_params: Vec<(String, Option<ExprId>)> = params
@@ -229,7 +231,7 @@ fn rewrite_rec(
                 })
                 .collect::<Result<Vec<_>, RunError>>()?;
             let new_body = rewrite_rec(pool, out, *body_id, registry)?;
-            Ok(out.intern(ExprNode::Lambda(new_params, new_body)))
+            Ok(out.intern(ExprNode::Lambda(new_params, new_body), span))
         }
         ExprNode::CallExpr(callee_id, args) => {
             let new_callee = rewrite_rec(pool, out, *callee_id, registry)?;
@@ -237,7 +239,7 @@ fn rewrite_rec(
                 .iter()
                 .map(|(name_opt, id)| Ok((name_opt.clone(), rewrite_rec(pool, out, *id, registry)?)))
                 .collect::<Result<Vec<_>, RunError>>()?;
-            Ok(out.intern(ExprNode::CallExpr(new_callee, new_args)))
+            Ok(out.intern(ExprNode::CallExpr(new_callee, new_args), span))
         }
     }
 }
@@ -249,10 +251,10 @@ fn cmp_lit_numbers(
     registry: &UnitRegistry,
 ) -> Result<(SnaqNumber, SnaqNumber), RunError> {
     if !registry.same_dimension(ql.unit(), qr.unit()).unwrap_or(false) {
-        return Err(RunError::DimensionMismatch {
+        return Err(RunError::new(RunErrorKind::DimensionMismatch {
             left: ql.unit().clone(),
             right: qr.unit().clone(),
-        });
+        }));
     }
     let result_unit = Quantity::smaller_unit(registry, ql.unit(), qr.unit())
         .cloned()
@@ -282,24 +284,26 @@ fn cmp_lit_fuzzy_with_kind(
 
 fn quantity_to_run_error(e: QuantityError) -> RunError {
     match e {
-        QuantityError::DivisionByZero => RunError::DivisionByZero,
-        QuantityError::DimensionMismatch { left, right } => RunError::DimensionMismatch {
+        QuantityError::DivisionByZero => RunError::new(RunErrorKind::DivisionByZero),
+        QuantityError::DimensionMismatch { left, right } => RunError::new(RunErrorKind::DimensionMismatch {
             left,
             right,
-        },
-        QuantityError::IncompatibleUnits(left, right) => RunError::DimensionMismatch {
+        }),
+        QuantityError::IncompatibleUnits(left, right) => RunError::new(RunErrorKind::DimensionMismatch {
             left,
             right,
-        },
+        }),
     }
 }
 
 fn rewrite_add(
     pool: &ExprInterner,
     out: &mut ExprInterner,
+    add_id: ExprId,
     ids: &[ExprId],
     registry: &UnitRegistry,
 ) -> Result<ExprId, RunError> {
+    let span = pool.get_span(add_id);
     let simplified: Vec<ExprId> = {
         let mut v = Vec::with_capacity(ids.len());
         for &i in ids {
@@ -340,7 +344,7 @@ fn rewrite_add(
     let mut add_operands: Vec<ExprId> = Vec::new();
     if let Some(c) = constant {
         if !c.is_zero() {
-            add_operands.push(out.intern(ExprNode::Lit(c)));
+            add_operands.push(out.intern(ExprNode::Lit(c), span));
         }
     }
     for (term_id, coef) in coef_by_term {
@@ -350,8 +354,8 @@ fn rewrite_add(
         if (coef - 1.0).abs() < 1e-15 {
             add_operands.push(term_id);
         } else {
-            let lit = out.intern(ExprNode::Lit(Quantity::from_scalar(coef)));
-            add_operands.push(out.intern(ExprNode::Mul(vec![lit, term_id])));
+            let lit = out.intern(ExprNode::Lit(Quantity::from_scalar(coef)), Span::default());
+            add_operands.push(out.intern(ExprNode::Mul(vec![lit, term_id]), Span::default()));
         }
     }
     for id in rest {
@@ -359,16 +363,17 @@ fn rewrite_add(
     }
 
     if add_operands.is_empty() {
-        return Ok(out.intern(ExprNode::Lit(Quantity::from_scalar(0.0))));
+        return Ok(out.intern(ExprNode::Lit(Quantity::from_scalar(0.0)), span));
     }
     if add_operands.len() == 1 {
         return Ok(add_operands[0]);
     }
-    Ok(out.intern(ExprNode::Add(add_operands)))
+    Ok(out.intern(ExprNode::Add(add_operands), span))
 }
 
 /// Extract (coefficient, term_id) for a "monomial" view. Returns Ok for simple monomials, Err(id) for non-monomial (e.g. Div).
 fn extract_monomial(out: &mut ExprInterner, id: ExprId) -> Result<(f64, ExprId), ExprId> {
+    let span = out.get_span(id);
     match out.get(id) {
         ExprNode::LitSymbol(_) => Ok((1.0, id)),
         ExprNode::Lit(q) => {
@@ -390,11 +395,11 @@ fn extract_monomial(out: &mut ExprInterner, id: ExprId) -> Result<(f64, ExprId),
                 }
             }
             if rest.is_empty() {
-                Ok((coef, out.intern(ExprNode::Lit(Quantity::from_scalar(1.0)))))
+                Ok((coef, out.intern(ExprNode::Lit(Quantity::from_scalar(1.0)), Span::default())))
             } else if rest.len() == 1 {
                 Ok((coef, rest[0]))
             } else {
-                Ok((coef, out.intern(ExprNode::Mul(rest))))
+                Ok((coef, out.intern(ExprNode::Mul(rest), span)))
             }
         }
         _ => Err(id),
@@ -404,9 +409,11 @@ fn extract_monomial(out: &mut ExprInterner, id: ExprId) -> Result<(f64, ExprId),
 fn rewrite_mul(
     pool: &ExprInterner,
     out: &mut ExprInterner,
+    mul_id: ExprId,
     ids: &[ExprId],
     registry: &UnitRegistry,
 ) -> Result<ExprId, RunError> {
+    let span = pool.get_span(mul_id);
     let simplified: Vec<ExprId> = {
         let mut v = Vec::with_capacity(ids.len());
         for &i in ids {
@@ -424,7 +431,7 @@ fn rewrite_mul(
     for &id in &simplified {
         if let ExprNode::Lit(q) = out.get(id) {
             if q.is_zero() {
-                return Ok(out.intern(ExprNode::Lit(Quantity::from_scalar(0.0))));
+                return Ok(out.intern(ExprNode::Lit(Quantity::from_scalar(0.0)), span));
             }
         }
     }
@@ -455,17 +462,17 @@ fn rewrite_mul(
             });
         }
         if let Some(q) = acc {
-            return Ok(out.intern(ExprNode::Lit(q)));
+            return Ok(out.intern(ExprNode::Lit(q), span));
         }
     }
 
     if operands.is_empty() {
-        return Ok(out.intern(ExprNode::Lit(Quantity::from_scalar(1.0))));
+        return Ok(out.intern(ExprNode::Lit(Quantity::from_scalar(1.0)), span));
     }
     if operands.len() == 1 {
         return Ok(operands[0]);
     }
-    Ok(out.intern(ExprNode::Mul(operands)))
+    Ok(out.intern(ExprNode::Mul(operands), span))
 }
 
 #[cfg(test)]

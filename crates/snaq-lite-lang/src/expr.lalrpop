@@ -4,7 +4,8 @@
 //! NumIdents (number + one or more idents) and IdentIdents (one or more idents) form single factors
 //! so "2 pi rad", "pi rad", and "1 s" parse correctly; PiIdents allows "π rad" like "pi rad".
 
-use crate::ir::{CallArg, ExprDef};
+use crate::error::Span;
+use crate::ir::{CallArg, ExprDef, SpannedCallArg, SpannedExprDef, SpannedExprDefKind};
 use crate::lexer::Tok;
 
 grammar;
@@ -54,8 +55,12 @@ extern {
 }
 
 // Top-level program: expression list (newline- or semicolon-separated), wrapped in a Block.
-pub Program: ExprDef = {
-    <list:ExprList> => ExprDef::Block(list),
+// @L and @R capture the start and end location of the matched region.
+pub Program: SpannedExprDef = {
+    <lo:@L> <list:ExprList> <hi:@R> => SpannedExprDef {
+        span: Span { start: lo, end: hi },
+        value: SpannedExprDefKind::Block(list)
+    }
 };
 
 // Name for a named function: Ident or FuncIdent (lexer emits FuncIdent when ident is followed by "(").
@@ -64,34 +69,49 @@ FnName: String = {
     FuncIdent => <>,
 };
 
-// Block item: named function (fn name(params)=>body or fn name param=>body), binding (Ident = BlockItem), or expression.
-BlockItem: ExprDef = {
-    "fn" <name:FnName> "(" <params:ParamList> ")" "=>" "{" <list:ExprList> "}" => {
+// Block item: named function, binding, or expression.
+BlockItem: SpannedExprDef = {
+    <lo:@L> "fn" <name:FnName> "(" <params:ParamList> ")" "=>" "{" <list:ExprList> "}" <hi:@R> => {
         let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
-        ExprDef::Binding(name, Box::new(ExprDef::Lambda(params, Box::new(ExprDef::Block(list)))))
+        SpannedExprDef {
+            span: Span { start: lo, end: hi },
+            value: SpannedExprDefKind::Binding(name, Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(params, Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(list) })) }))
+        }
     },
-    "fn" <name:FnName> "(" <params:ParamList> ")" "=>" "(" <body:Expr> ")" => {
+    <lo:@L> "fn" <name:FnName> "(" <params:ParamList> ")" "=>" "(" <body:Expr> ")" <hi:@R> => {
         let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
-        ExprDef::Binding(name, Box::new(ExprDef::Lambda(params, Box::new(body))))
+        SpannedExprDef {
+            span: Span { start: lo, end: hi },
+            value: SpannedExprDefKind::Binding(name, Box::new(SpannedExprDef { span: body.span, value: SpannedExprDefKind::Lambda(params, Box::new(body)) }))
+        }
     },
-    "fn" <name:FnName> <param:Ident> "=>" "{" <list:ExprList> "}" => {
-        ExprDef::Binding(name, Box::new(ExprDef::Lambda(vec![(param, None)], Box::new(ExprDef::Block(list)))))
+    <lo:@L> "fn" <name:FnName> <param:Ident> "=>" "{" <list:ExprList> "}" <hi:@R> => {
+        SpannedExprDef {
+            span: Span { start: lo, end: hi },
+            value: SpannedExprDefKind::Binding(name, Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(vec![(param, None)], Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(list) })) }))
+        }
     },
-    "fn" <name:FnName> <param:Ident> "=>" "(" <body:Expr> ")" => {
-        ExprDef::Binding(name, Box::new(ExprDef::Lambda(vec![(param, None)], Box::new(body))))
+    <lo:@L> "fn" <name:FnName> <param:Ident> "=>" "(" <body:Expr> ")" <hi:@R> => {
+        SpannedExprDef {
+            span: Span { start: lo, end: hi },
+            value: SpannedExprDefKind::Binding(name, Box::new(SpannedExprDef { span: body.span, value: SpannedExprDefKind::Lambda(vec![(param, None)], Box::new(body)) }))
+        }
     },
-    <name:Ident> "=" <rhs:BlockItem> => ExprDef::Binding(name, Box::new(rhs)),
+    <lo:@L> <name:Ident> "=" <rhs:BlockItem> <hi:@R> => SpannedExprDef {
+        span: Span { start: lo, end: hi },
+        value: SpannedExprDefKind::Binding(name, Box::new(rhs))
+    },
     <e:Expr> => e,
 };
 
 // One parameter: (name) or (name = default_expr).
-Param: (String, Option<ExprDef>) = {
+Param: (String, Option<SpannedExprDef>) = {
     <n:Ident> => (n, None),
     <n:Ident> "=" <e:Expr> => (n, Some(e)),
 };
 
 // Comma-separated parameter list for lambda.
-ParamList: Vec<(String, Option<ExprDef>)> = {
+ParamList: Vec<(String, Option<SpannedExprDef>)> = {
     <p:Param> => vec![p],
     <rest:ParamList> "," <p:Param> => {
         let mut r = rest;
@@ -101,7 +121,7 @@ ParamList: Vec<(String, Option<ExprDef>)> = {
 };
 
 // Expression list for program root and block bodies: zero or more BlockItem, separated by ";" or Newline.
-ExprList: Vec<ExprDef> = {
+ExprList: Vec<SpannedExprDef> = {
     => vec![],
     <first:BlockItem> <rest:ExprListRest> => {
         let mut v = vec![first];
@@ -110,7 +130,7 @@ ExprList: Vec<ExprDef> = {
     },
 };
 
-ExprListRest: Vec<ExprDef> = {
+ExprListRest: Vec<SpannedExprDef> = {
     => vec![],
     ";" <e:BlockItem> <rest:ExprListRest> => {
         let mut r = rest;
@@ -127,134 +147,182 @@ ExprListRest: Vec<ExprDef> = {
 };
 
 // Expression (used inside blocks and as list elements): conditional, comparison, then additive.
-Expr: ExprDef = {
+Expr: SpannedExprDef = {
     <if_expr:IfExpr> => if_expr,
-    <l:AddExpr> "==" <r:Expr> => ExprDef::Eq(Box::new(l), Box::new(r)),
-    <l:AddExpr> "!=" <r:Expr> => ExprDef::Ne(Box::new(l), Box::new(r)),
-    <l:AddExpr> "<" <r:Expr> => ExprDef::Lt(Box::new(l), Box::new(r)),
-    <l:AddExpr> "<=" <r:Expr> => ExprDef::Le(Box::new(l), Box::new(r)),
-    <l:AddExpr> ">" <r:Expr> => ExprDef::Gt(Box::new(l), Box::new(r)),
-    <l:AddExpr> ">=" <r:Expr> => ExprDef::Ge(Box::new(l), Box::new(r)),
+    <lo:@L> <l:AddExpr> "==" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Eq(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> "!=" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Ne(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> "<" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lt(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> "<=" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Le(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> ">" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Gt(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> ">=" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Ge(Box::new(l), Box::new(r)) },
     AddExpr,
 };
 
-// Conditional: if condition then expression else expression (condition and branches are full Expr).
-IfExpr: ExprDef = {
-    "if" <cond:Expr> "then" <then_b:Expr> "else" <else_b:Expr> => ExprDef::If(Box::new(cond), Box::new(then_b), Box::new(else_b)),
+// Conditional: if condition then expression else expression.
+IfExpr: SpannedExprDef = {
+    <lo:@L> "if" <cond:Expr> "then" <then_b:Expr> "else" <else_b:Expr> <hi:@R> => SpannedExprDef {
+        span: Span { start: lo, end: hi },
+        value: SpannedExprDefKind::If(Box::new(cond), Box::new(then_b), Box::new(else_b))
+    }
 };
 
-AddExpr: ExprDef = {
-    <l:AddExpr> "+" <r:Term> => ExprDef::Add(Box::new(l), Box::new(r)),
-    <l:AddExpr> "-" <r:Term> => ExprDef::Sub(Box::new(l), Box::new(r)),
-    <e:AddExpr> "as" <u:UnitTerm> => ExprDef::As(Box::new(e), Box::new(u)),
+AddExpr: SpannedExprDef = {
+    <lo:@L> <l:AddExpr> "+" <r:Term> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Add(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> "-" <r:Term> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Sub(Box::new(l), Box::new(r)) },
+    <lo:@L> <e:AddExpr> "as" <u:UnitTerm> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::As(Box::new(e), Box::new(u)) },
     Term,
 };
 
-// Unit-only expression (idents, *, /, per): e.g. "m", "meters per second", "newton per squareinch".
-UnitTerm: ExprDef = {
-    <l:UnitTerm> "*" <r:IdentIdents> => ExprDef::Mul(Box::new(l), Box::new(r)),
-    <l:UnitTerm> "/" <r:IdentIdents> => ExprDef::Div(Box::new(l), Box::new(r)),
-    <l:UnitTerm> "per" <r:IdentIdents> => ExprDef::Div(Box::new(l), Box::new(r)),
+// Unit-only expression (idents, *, /, per).
+UnitTerm: SpannedExprDef = {
+    <lo:@L> <l:UnitTerm> "*" <r:IdentIdents> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Mul(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:UnitTerm> "/" <r:IdentIdents> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Div(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:UnitTerm> "per" <r:IdentIdents> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Div(Box::new(l), Box::new(r)) },
     IdentIdents,
 };
 
-ImplicitMulRight: ExprDef = {
-    <n:Num> => ExprDef::LitScalar(n),
-    "(" <e:Expr> ")" => e,
+ImplicitMulRight: SpannedExprDef = {
+    <lo:@L> <n:Num> <hi:@R> => SpannedExprDef {
+        span: Span { start: lo, end: hi },
+        value: SpannedExprDefKind::LitScalar(n)
+    },
+    <lo:@L> "(" <e:Expr> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: e.value },
 };
 
-// Number followed by one or more idents: "1 s" or "2 pi rad" as a single factor (so "/ 1 s" divides by 1 s).
-NumIdents: ExprDef = {
-    <n:Num> <id:Ident> => ExprDef::Mul(
-        Box::new(ExprDef::LitScalar(n)),
-        Box::new(ExprDef::LitUnit(id)),
-    ),
-    <prev:NumIdents> <id:Ident> => ExprDef::Mul(Box::new(prev), Box::new(ExprDef::LitUnit(id))),
+// Number followed by one or more idents: "1 s" or "2 pi rad" as a single factor.
+NumIdents: SpannedExprDef = {
+    <lo:@L> <n:Num> <id:Ident> <hi:@R> => {
+        let lit_span = Span { start: lo, end: lo + n.raw.len() };
+        let id_span = Span { start: lo + n.raw.len(), end: hi };
+        SpannedExprDef {
+            span: Span { start: lo, end: hi },
+            value: SpannedExprDefKind::Mul(
+                Box::new(SpannedExprDef { span: lit_span, value: SpannedExprDefKind::LitScalar(n) }),
+                Box::new(SpannedExprDef { span: id_span, value: SpannedExprDefKind::LitUnit(id) })
+            )
+        }
+    },
+    <lo:@L> <prev:NumIdents> <id:Ident> <hi:@R> => {
+        let id_span = Span { start: prev.span.end, end: hi };
+        SpannedExprDef {
+            span: Span { start: lo, end: hi },
+            value: SpannedExprDefKind::Mul(Box::new(prev), Box::new(SpannedExprDef { span: id_span, value: SpannedExprDefKind::LitUnit(id) }))
+        }
+    },
 };
 
 // One or more idents (no number): "pi" or "pi rad" as a single factor.
-IdentIdents: ExprDef = {
-    <id:Ident> => ExprDef::LitUnit(id),
-    <prev:IdentIdents> <id:Ident> => ExprDef::Mul(Box::new(prev), Box::new(ExprDef::LitUnit(id))),
+IdentIdents: SpannedExprDef = {
+    <lo:@L> <id:Ident> <hi:@R> => SpannedExprDef {
+        span: Span { start: lo, end: hi },
+        value: SpannedExprDefKind::LitUnit(id)
+    },
+    <lo:@L> <prev:IdentIdents> <id:Ident> <hi:@R> => {
+        let id_span = Span { start: prev.span.end, end: hi };
+        SpannedExprDef {
+            span: Span { start: lo, end: hi },
+            value: SpannedExprDefKind::Mul(Box::new(prev), Box::new(SpannedExprDef { span: id_span, value: SpannedExprDefKind::LitUnit(id) }))
+        }
+    },
 };
 
-// One or more idents following "π" (so "π rad" and "π rad degree" work like "pi rad").
-IdentsRest: ExprDef = {
-    <id:Ident> => ExprDef::LitUnit(id),
-    <prev:IdentsRest> <id:Ident> => ExprDef::Mul(Box::new(prev), Box::new(ExprDef::LitUnit(id))),
+// One or more idents following "π".
+IdentsRest: SpannedExprDef = {
+    <lo:@L> <id:Ident> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::LitUnit(id) },
+    <lo:@L> <prev:IdentsRest> <id:Ident> <hi:@R> => {
+        let id_span = Span { start: prev.span.end, end: hi };
+        SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Mul(Box::new(prev), Box::new(SpannedExprDef { span: id_span, value: SpannedExprDefKind::LitUnit(id) })) }
+    },
 };
 
 // "π" alone or "π" followed by one or more idents (e.g. "π rad").
-PiIdents: ExprDef = {
-    "π" => ExprDef::LitSymbol("pi".to_string()),
-    "π" <id:Ident> => ExprDef::Mul(
-        Box::new(ExprDef::LitSymbol("pi".to_string())),
-        Box::new(ExprDef::LitUnit(id)),
-    ),
-    "π" <id:Ident> <rest:IdentsRest> => ExprDef::Mul(
-        Box::new(ExprDef::Mul(
-            Box::new(ExprDef::LitSymbol("pi".to_string())),
-            Box::new(ExprDef::LitUnit(id)),
-        )),
-        Box::new(rest),
-    ),
+PiIdents: SpannedExprDef = {
+    <lo:@L> "π" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::LitSymbol("pi".to_string()) },
+    <lo:@L> "π" <id:Ident> <hi:@R> => {
+        let pi_end = lo + 2;
+        let id_span = Span { start: pi_end, end: hi };
+        SpannedExprDef {
+            span: Span { start: lo, end: hi },
+            value: SpannedExprDefKind::Mul(
+                Box::new(SpannedExprDef { span: Span { start: lo, end: pi_end }, value: SpannedExprDefKind::LitSymbol("pi".to_string()) }),
+                Box::new(SpannedExprDef { span: id_span, value: SpannedExprDefKind::LitUnit(id) })
+            )
+        }
+    },
+    <lo:@L> "π" <id:Ident> <rest:IdentsRest> <hi:@R> => {
+        let pi_end = lo + 2;
+        let id_span = Span { start: pi_end, end: pi_end + id.len() };
+        SpannedExprDef {
+            span: Span { start: lo, end: hi },
+            value: SpannedExprDefKind::Mul(
+                Box::new(SpannedExprDef {
+                    span: Span { start: lo, end: rest.span.start },
+                    value: SpannedExprDefKind::Mul(
+                        Box::new(SpannedExprDef { span: Span { start: lo, end: pi_end }, value: SpannedExprDefKind::LitSymbol("pi".to_string()) }),
+                        Box::new(SpannedExprDef { span: id_span, value: SpannedExprDefKind::LitUnit(id) }),
+                    ),
+                }),
+                Box::new(rest)
+            )
+        }
+    },
 };
 
 // Tilde binds tighter than * / per implicit mul: "5 + 10 ~ 2" => 5 + (10 ~ 2).
-TildeBound: ExprDef = {
-    <l:TildeBound> "~" <r:PostfixFactor> => ExprDef::WithPrecision(Box::new(l), Box::new(r)),
+TildeBound: SpannedExprDef = {
+    <lo:@L> <l:TildeBound> "~" <r:PostfixFactor> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::WithPrecision(Box::new(l), Box::new(r)) },
     PostfixFactor,
 };
 
-Term: ExprDef = {
-    <l:Term> "*" <r:TildeBound> => ExprDef::Mul(Box::new(l), Box::new(r)),
-    <l:Term> "/" <r:TildeBound> => ExprDef::Div(Box::new(l), Box::new(r)),
-    <l:Term> "per" <r:TildeBound> => ExprDef::Div(Box::new(l), Box::new(r)),
-    <l:Term> <r:ImplicitMulRight> => ExprDef::Mul(Box::new(l), Box::new(r)),
+Term: SpannedExprDef = {
+    <lo:@L> <l:Term> "*" <r:TildeBound> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Mul(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:Term> "/" <r:TildeBound> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Div(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:Term> "per" <r:TildeBound> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Div(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:Term> <r:ImplicitMulRight> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Mul(Box::new(l), Box::new(r)) },
     TildeBound,
 };
 
 // Factor with optional postfix transpose(s), index V[expr], property V.length, method V.map(...), or V.0.
-// Lexer emits MethodIdent after "." when ident is followed by "(", so no ambiguity.
-PostfixFactor: ExprDef = {
-    <f:PostfixFactor> "[" <index:Expr> "]" => ExprDef::Index(Box::new(f), Box::new(index)),
-    <f:PostfixFactor> "." <id:MethodIdent> "(" <args:ArgList> ")" => ExprDef::MethodCall(Box::new(f), id, args),
-    <f:PostfixFactor> "." <id:Ident> => ExprDef::Member(Box::new(f), id),
-    <f:PostfixFactor> "." <n:Num> => ExprDef::Index(Box::new(f), Box::new(ExprDef::LitScalar(n))),
-    <f:PostfixFactor> "'" => ExprDef::Transpose(Box::new(f)),
+PostfixFactor: SpannedExprDef = {
+    <lo:@L> <f:PostfixFactor> "[" <index:Expr> "]" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Index(Box::new(f), Box::new(index)) },
+    <lo:@L> <f:PostfixFactor> "." <id:MethodIdent> "(" <args:ArgList> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::MethodCall(Box::new(f), id, args) },
+    <lo:@L> <f:PostfixFactor> "." <id:Ident> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Member(Box::new(f), id) },
+    <lo:@L> <f:PostfixFactor> "." <n:Num> <hi:@R> => SpannedExprDef {
+        span: Span { start: lo, end: hi },
+        value: SpannedExprDefKind::Index(Box::new(f), Box::new(SpannedExprDef { span: Span { start: lo + 1, end: hi }, value: SpannedExprDefKind::LitScalar(n) }))
+    },
+    <lo:@L> <f:PostfixFactor> "'" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Transpose(Box::new(f)) },
     Factor,
 };
 
-Factor: ExprDef = {
-    "-" <e:Factor> => ExprDef::Neg(Box::new(e)),
-    // Anonymous lambda: fn ( params ) => body or fn param => body (single-arg shorthand).
-    "fn" "(" <params:ParamList> ")" "=>" "{" <list:ExprList> "}" => {
+Factor: SpannedExprDef = {
+    <lo:@L> "-" <e:Factor> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Neg(Box::new(e)) },
+    <lo:@L> "fn" "(" <params:ParamList> ")" "=>" "{" <list:ExprList> "}" <hi:@R> => {
         let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
-        ExprDef::Lambda(params, Box::new(ExprDef::Block(list)))
+        SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(params, Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(list) })) }
     },
-    "fn" "(" <params:ParamList> ")" "=>" "(" <body:Expr> ")" => {
+    <lo:@L> "fn" "(" <params:ParamList> ")" "=>" "(" <body:Expr> ")" <hi:@R> => {
         let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
-        ExprDef::Lambda(params, Box::new(body))
+        SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(params, Box::new(body)) }
     },
-    "fn" <param:Ident> "=>" "{" <list:ExprList> "}" => {
-        ExprDef::Lambda(vec![(param, None)], Box::new(ExprDef::Block(list)))
+    <lo:@L> "fn" <param:Ident> "=>" "{" <list:ExprList> "}" <hi:@R> => {
+        SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(vec![(param, None)], Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(list) })) }
     },
-    "fn" <param:Ident> "=>" "(" <body:Expr> ")" => {
-        ExprDef::Lambda(vec![(param, None)], Box::new(body))
+    <lo:@L> "fn" <param:Ident> "=>" "(" <body:Expr> ")" <hi:@R> => {
+        SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(vec![(param, None)], Box::new(body)) }
     },
     <ni:NumIdents> => ni,
-    <n:Num> => ExprDef::LitScalar(n),
+    <lo:@L> <n:Num> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::LitScalar(n) },
     <pi:PiIdents> => pi,
-    <id:FuncIdent> "(" <args:ArgList> ")" => ExprDef::Call(id, args),
-    // Ident "(" ArgList ")" omitted to avoid conflict with BlockItem; use (f)(args) for variable call
+    <lo:@L> <id:FuncIdent> "(" <args:ArgList> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Call(id, args) },
     <ii:IdentIdents> => ii,
-    "(" <e:Expr> ")" => e,
-    "[" <elems:VecExprList> "]" => ExprDef::VecLiteral(elems),
-    "{" <list:ExprList> "}" => ExprDef::Block(list),
+    <lo:@L> "(" <e:Expr> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: e.value },
+    <lo:@L> "[" <elems:VecExprList> "]" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::VecLiteral(elems) },
+    <lo:@L> "{" <list:ExprList> "}" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(list) },
 };
 
 // Comma-separated list of expressions for vector literal: [ expr, expr, ... ] or [].
-VecExprList: Vec<ExprDef> = {
+VecExprList: Vec<SpannedExprDef> = {
     => vec![],
     <single:Expr> => vec![single],
     <rest:VecExprList> "," <last:Expr> => {
@@ -264,14 +332,14 @@ VecExprList: Vec<ExprDef> = {
     },
 };
 
-// One argument: named (Ident : Expr) or positional (Expr). Named first so "a: 1" is not parsed as positional "a".
-CallArg: CallArg = {
-    <id:Ident> ":" <e:Expr> => CallArg::Named(id, Box::new(e)),
-    <e:Expr> => CallArg::Positional(Box::new(e)),
+// One argument: named (Ident : Expr) or positional (Expr).
+CallArg: SpannedCallArg = {
+    <id:Ident> ":" <e:Expr> => SpannedCallArg::Named(id, Box::new(e)),
+    <e:Expr> => SpannedCallArg::Positional(Box::new(e)),
 };
 
 // Left-recursive list to avoid reduce/shift conflict on ",". Empty allowed (e.g. V.sum()).
-ArgList: Vec<CallArg> = {
+ArgList: Vec<SpannedCallArg> = {
     => vec![],
     <single:CallArg> => vec![single],
     <rest:ArgList> "," <last:CallArg> => {

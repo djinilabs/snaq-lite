@@ -13,7 +13,7 @@ This document lists the main error conditions and edge cases you may encounter w
 |-----------|------------------------|
 | **Unknown unit** | An identifier was used as a unit but is not in the unit registry. |
 | **Dimension mismatch** | Two values that must have the same dimension do not (e.g. `1 m + 1 s`, or converting to an incompatible unit with `as`). |
-| **Division by zero** | Division where the divisor is zero. See below for nonzero/0 vs 0/0. |
+| **Result is undefined** (from 0/0) | The expression `0/0` yields **undefined**. If you request a numeric result (`run_numeric("0/0")`), you get **result is undefined**. See below for division semantics. |
 | **Symbol has no value** | You requested a numeric result (`run_numeric`) but a symbol (or unbound identifier) has no value in the symbol registry and is not bound in the program. |
 | **Unknown function** | The call uses a name that is not a built-in and not bound to a user-defined function in scope. For user-defined functions: missing required argument (no default), unknown parameter name in a named argument, duplicate parameter name in a call, or too many arguments also yield an error. Calling a non-function value (e.g. applying arguments to a number) yields "expression is not callable". |
 | **Cannot shadow built-in function** | You tried to bind a variable or user-defined function to a built-in name (`sin`, `cos`, `tan`, `max`, `min`). Those names cannot be redefined. |
@@ -36,10 +36,29 @@ This document lists the main error conditions and edge cases you may encounter w
 | **Binding value not supported** | You tried to bind a symbolic value to a variable (vectors are supported; only symbolic is not). Converting a function to a quantity (e.g. in unit conversion) also yields this (or a similar) error. |
 | **Invalid argument** | A built-in function received an invalid argument (e.g. `sqrt(-1)` → argument must be non-negative). |
 
+### How runtime and parse errors are shown
+
+When the CLI (or any formatter that has the original source) reports an error, it may show:
+
+- **Line and column** — e.g. `at line 1, column 7: division by zero`
+- **A snippet** — the line of source with a squiggle (`~`) under the offending part
+
+So for a runtime error that has a source location you might see something like:
+
+```
+at line 1, column 8: dimension mismatch: m vs s
+
+   |
+ 1 | 1 m + 1 s
+   | ~~~~~~~
+```
+
+Parse errors use the same style. If the source is not available, only the message is shown (e.g. `division by zero`).
+
 ## Division by zero
 
 - **Nonzero / 0:** The result is **plus or minus infinity** (sign of the numerator). Infinity propagates through arithmetic and unit conversion (same dimension; only the unit may change).
-- **0 / 0:** The runtime returns an error: **division by zero** (indeterminate).
+- **0 / 0:** The result is **undefined** (not an error). `run("0/0")` yields the value **undefined** (displayed as such). If you request a numeric quantity (`run_numeric("0/0")`), you get the error **result is undefined** because undefined cannot be converted to a number.
 
 There is **no NaN** in the language; only +∞ and −∞ for infinite values.
 

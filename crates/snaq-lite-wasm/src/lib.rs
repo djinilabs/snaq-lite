@@ -38,6 +38,9 @@ mod tests {
     #[wasm_bindgen_test]
     fn evaluate_error_returns_parse_error_message() {
         let out = evaluate("1 + ");
-        assert!(out.starts_with("parse error: "), "expected parse error, got: {out}");
+        assert!(
+            out.starts_with("parse error: ") || out.starts_with("parse error at "),
+            "expected parse error, got: {out}"
+        );
     }
 }

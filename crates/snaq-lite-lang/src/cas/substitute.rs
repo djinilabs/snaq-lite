@@ -5,8 +5,8 @@
 
 use std::collections::HashSet;
 
-use crate::error::RunError;
-use crate::ir::ExprDef;
+use crate::error::{RunError, RunErrorKind};
+use crate::ir::{ExprDef, SpannedCallArg, SpannedExprDef, SpannedExprDefKind};
 use crate::quantity::Quantity;
 use crate::symbol_registry::SymbolRegistry;
 use crate::unit_registry::UnitRegistry;
@@ -99,6 +99,297 @@ pub fn substitute_symbols(
     substitute_symbols_inner(def, symbol_registry, unit_registry, &bound_names)
 }
 
+/// Collect bound names from a SpannedExprDef (for substitute_symbols_spanned).
+fn collect_bound_names_spanned(def: &SpannedExprDef) -> HashSet<String> {
+    let mut names = HashSet::new();
+    fn go(def: &SpannedExprDef, names: &mut HashSet<String>) {
+        match &def.value {
+            SpannedExprDefKind::Binding(name, rhs) => {
+                names.insert(name.clone());
+                go(rhs, names);
+            }
+            SpannedExprDefKind::Block(exprs) => {
+                for e in exprs {
+                    go(e, names);
+                }
+            }
+            SpannedExprDefKind::Add(l, r) | SpannedExprDefKind::Sub(l, r) | SpannedExprDefKind::Mul(l, r)
+            | SpannedExprDefKind::Div(l, r) | SpannedExprDefKind::Eq(l, r) | SpannedExprDefKind::Ne(l, r)
+            | SpannedExprDefKind::Lt(l, r) | SpannedExprDefKind::Le(l, r) | SpannedExprDefKind::Gt(l, r)
+            | SpannedExprDefKind::Ge(l, r) | SpannedExprDefKind::As(l, r)
+            | SpannedExprDefKind::WithPrecision(l, r) => {
+                go(l, names);
+                go(r, names);
+            }
+            SpannedExprDefKind::Neg(inner) | SpannedExprDefKind::Transpose(inner) => go(inner, names),
+            SpannedExprDefKind::Index(base, index) => {
+                go(base, names);
+                go(index, names);
+            }
+            SpannedExprDefKind::Member(base, _) => go(base, names),
+            SpannedExprDefKind::MethodCall(base, _, args) => {
+                go(base, names);
+                for arg in args {
+                    match arg {
+                        SpannedCallArg::Positional(e) | SpannedCallArg::Named(_, e) => go(e, names),
+                    }
+                }
+            }
+            SpannedExprDefKind::If(cond, then_b, else_b) => {
+                go(cond, names);
+                go(then_b, names);
+                go(else_b, names);
+            }
+            SpannedExprDefKind::Call(_, args) => {
+                for arg in args {
+                    match arg {
+                        SpannedCallArg::Positional(e) | SpannedCallArg::Named(_, e) => go(e, names),
+                    }
+                }
+            }
+            SpannedExprDefKind::Lambda(params, body) => {
+                for (name, default) in params {
+                    names.insert(name.clone());
+                    if let Some(d) = default {
+                        go(d, names);
+                    }
+                }
+                go(body, names);
+            }
+            SpannedExprDefKind::CallExpr(callee, args) => {
+                go(callee, names);
+                for arg in args {
+                    match arg {
+                        SpannedCallArg::Positional(e) | SpannedCallArg::Named(_, e) => go(e, names),
+                    }
+                }
+            }
+            SpannedExprDefKind::VecLiteral(elems) => {
+                for e in elems {
+                    go(e, names);
+                }
+            }
+            SpannedExprDefKind::Lit(_) | SpannedExprDefKind::LitFuzzyBool(_) | SpannedExprDefKind::LitSymbol(_)
+            | SpannedExprDefKind::LitScalar(..) | SpannedExprDefKind::LitWithUnit(..)
+            | SpannedExprDefKind::LitUnit(..) => {}
+        }
+    }
+    go(def, &mut names);
+    names
+}
+
+/// Spanned version: substitute symbols and preserve source spans.
+pub fn substitute_symbols_spanned(
+    def: SpannedExprDef,
+    symbol_registry: &SymbolRegistry,
+    unit_registry: &UnitRegistry,
+) -> Result<SpannedExprDef, RunError> {
+    let bound_names = collect_bound_names_spanned(&def);
+    substitute_symbols_spanned_inner(def, symbol_registry, unit_registry, &bound_names)
+}
+
+fn substitute_symbols_spanned_inner(
+    def: SpannedExprDef,
+    symbol_registry: &SymbolRegistry,
+    unit_registry: &UnitRegistry,
+    bound_names: &HashSet<String>,
+) -> Result<SpannedExprDef, RunError> {
+    let span = def.span;
+    let value = match def.value {
+        SpannedExprDefKind::Lit(q) => SpannedExprDefKind::Lit(q),
+        SpannedExprDefKind::LitFuzzyBool(f) => SpannedExprDefKind::LitFuzzyBool(f),
+        SpannedExprDefKind::LitSymbol(name) => {
+            if bound_names.contains(&name) {
+                SpannedExprDefKind::LitSymbol(name)
+            } else if let Some(value) = symbol_registry.get(&name) {
+                SpannedExprDefKind::Lit(Quantity::from_scalar(value))
+            } else if let Some(unit) = unit_registry.get_unit_with_prefix(&name) {
+                SpannedExprDefKind::Lit(Quantity::new(1.0, unit))
+            } else {
+                return Err(RunError::new(RunErrorKind::SymbolHasNoValue(name)));
+            }
+        }
+        SpannedExprDefKind::Add(l, r) => SpannedExprDefKind::Add(
+            Box::new(substitute_symbols_spanned_inner(*l, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*r, symbol_registry, unit_registry, bound_names)?),
+        ),
+        SpannedExprDefKind::Sub(l, r) => SpannedExprDefKind::Sub(
+            Box::new(substitute_symbols_spanned_inner(*l, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*r, symbol_registry, unit_registry, bound_names)?),
+        ),
+        SpannedExprDefKind::Mul(l, r) => SpannedExprDefKind::Mul(
+            Box::new(substitute_symbols_spanned_inner(*l, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*r, symbol_registry, unit_registry, bound_names)?),
+        ),
+        SpannedExprDefKind::Div(l, r) => SpannedExprDefKind::Div(
+            Box::new(substitute_symbols_spanned_inner(*l, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*r, symbol_registry, unit_registry, bound_names)?),
+        ),
+        SpannedExprDefKind::Neg(inner) => {
+            SpannedExprDefKind::Neg(Box::new(substitute_symbols_spanned_inner(*inner, symbol_registry, unit_registry, bound_names)?))
+        }
+        SpannedExprDefKind::Call(name, args) => {
+            let args = args
+                .into_iter()
+                .map(|arg| {
+                    Ok::<SpannedCallArg, RunError>(match arg {
+                        SpannedCallArg::Positional(e) => {
+                            SpannedCallArg::Positional(Box::new(substitute_symbols_spanned_inner(*e, symbol_registry, unit_registry, bound_names)?))
+                        }
+                        SpannedCallArg::Named(n, e) => {
+                            SpannedCallArg::Named(n, Box::new(substitute_symbols_spanned_inner(*e, symbol_registry, unit_registry, bound_names)?))
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            SpannedExprDefKind::Call(name, args)
+        }
+        SpannedExprDefKind::As(l, r) => SpannedExprDefKind::As(
+            Box::new(substitute_symbols_spanned_inner(*l, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*r, symbol_registry, unit_registry, bound_names)?),
+        ),
+        SpannedExprDefKind::VecLiteral(elems) => {
+            let elems = elems
+                .into_iter()
+                .map(|e| substitute_symbols_spanned_inner(e, symbol_registry, unit_registry, bound_names))
+                .collect::<Result<Vec<_>, RunError>>()?;
+            SpannedExprDefKind::VecLiteral(elems)
+        }
+        SpannedExprDefKind::Transpose(inner) => {
+            SpannedExprDefKind::Transpose(Box::new(substitute_symbols_spanned_inner(*inner, symbol_registry, unit_registry, bound_names)?))
+        }
+        SpannedExprDefKind::Index(base, index) => SpannedExprDefKind::Index(
+            Box::new(substitute_symbols_spanned_inner(*base, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*index, symbol_registry, unit_registry, bound_names)?),
+        ),
+        SpannedExprDefKind::Member(base, name) => SpannedExprDefKind::Member(
+            Box::new(substitute_symbols_spanned_inner(*base, symbol_registry, unit_registry, bound_names)?),
+            name,
+        ),
+        SpannedExprDefKind::MethodCall(base, name, args) => {
+            let args: Vec<SpannedCallArg> = args
+                .into_iter()
+                .map(|arg| {
+                    Ok(match arg {
+                        SpannedCallArg::Positional(e) => {
+                            SpannedCallArg::Positional(Box::new(substitute_symbols_spanned_inner(
+                                *e, symbol_registry, unit_registry, bound_names,
+                            )?))
+                        }
+                        SpannedCallArg::Named(n, e) => {
+                            SpannedCallArg::Named(
+                                n,
+                                Box::new(substitute_symbols_spanned_inner(
+                                    *e, symbol_registry, unit_registry, bound_names,
+                                )?),
+                            )
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            SpannedExprDefKind::MethodCall(
+                Box::new(substitute_symbols_spanned_inner(*base, symbol_registry, unit_registry, bound_names)?),
+                name,
+                args,
+            )
+        }
+        SpannedExprDefKind::Eq(l, r) => SpannedExprDefKind::Eq(
+            Box::new(substitute_symbols_spanned_inner(*l, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*r, symbol_registry, unit_registry, bound_names)?),
+        ),
+        SpannedExprDefKind::Ne(l, r) => SpannedExprDefKind::Ne(
+            Box::new(substitute_symbols_spanned_inner(*l, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*r, symbol_registry, unit_registry, bound_names)?),
+        ),
+        SpannedExprDefKind::Lt(l, r) => SpannedExprDefKind::Lt(
+            Box::new(substitute_symbols_spanned_inner(*l, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*r, symbol_registry, unit_registry, bound_names)?),
+        ),
+        SpannedExprDefKind::Le(l, r) => SpannedExprDefKind::Le(
+            Box::new(substitute_symbols_spanned_inner(*l, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*r, symbol_registry, unit_registry, bound_names)?),
+        ),
+        SpannedExprDefKind::Gt(l, r) => SpannedExprDefKind::Gt(
+            Box::new(substitute_symbols_spanned_inner(*l, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*r, symbol_registry, unit_registry, bound_names)?),
+        ),
+        SpannedExprDefKind::Ge(l, r) => SpannedExprDefKind::Ge(
+            Box::new(substitute_symbols_spanned_inner(*l, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*r, symbol_registry, unit_registry, bound_names)?),
+        ),
+        SpannedExprDefKind::If(cond, then_b, else_b) => SpannedExprDefKind::If(
+            Box::new(substitute_symbols_spanned_inner(*cond, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*then_b, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*else_b, symbol_registry, unit_registry, bound_names)?),
+        ),
+        SpannedExprDefKind::WithPrecision(l, r) => SpannedExprDefKind::WithPrecision(
+            Box::new(substitute_symbols_spanned_inner(*l, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*r, symbol_registry, unit_registry, bound_names)?),
+        ),
+        SpannedExprDefKind::Binding(name, rhs) => SpannedExprDefKind::Binding(
+            name,
+            Box::new(substitute_symbols_spanned_inner(*rhs, symbol_registry, unit_registry, bound_names)?),
+        ),
+        SpannedExprDefKind::Block(exprs) => {
+            let exprs = exprs
+                .into_iter()
+                .map(|e| substitute_symbols_spanned_inner(e, symbol_registry, unit_registry, bound_names))
+                .collect::<Result<Vec<_>, RunError>>()?;
+            SpannedExprDefKind::Block(exprs)
+        }
+        SpannedExprDefKind::Lambda(params, body) => {
+            let mut lambda_bound = bound_names.clone();
+            for (name, _) in &params {
+                lambda_bound.insert(name.clone());
+            }
+            let params = params
+                .into_iter()
+                .map(|(name, default)| {
+                    Ok((
+                        name,
+                        default
+                            .map(|d| {
+                                substitute_symbols_spanned_inner(*d, symbol_registry, unit_registry, &lambda_bound)
+                                    .map(Box::new)
+                            })
+                            .transpose()?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            let body = substitute_symbols_spanned_inner(*body, symbol_registry, unit_registry, &lambda_bound)?;
+            SpannedExprDefKind::Lambda(params, Box::new(body))
+        }
+        SpannedExprDefKind::CallExpr(callee, args) => {
+            let callee = substitute_symbols_spanned_inner(*callee, symbol_registry, unit_registry, bound_names)?;
+            let args = args
+                .into_iter()
+                .map(|arg| {
+                    Ok(match arg {
+                        SpannedCallArg::Positional(e) => {
+                            SpannedCallArg::Positional(Box::new(substitute_symbols_spanned_inner(
+                                *e, symbol_registry, unit_registry, bound_names,
+                            )?))
+                        }
+                        SpannedCallArg::Named(n, e) => {
+                            SpannedCallArg::Named(
+                                n,
+                                Box::new(substitute_symbols_spanned_inner(
+                                    *e, symbol_registry, unit_registry, bound_names,
+                                )?),
+                            )
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            SpannedExprDefKind::CallExpr(Box::new(callee), args)
+        }
+        SpannedExprDefKind::LitScalar(..) | SpannedExprDefKind::LitWithUnit(..) | SpannedExprDefKind::LitUnit(..) => {
+            panic!("unresolved SpannedExprDef: resolve() must be called before substitute_symbols_spanned")
+        }
+    };
+    Ok(SpannedExprDef { span, value })
+}
+
 fn substitute_symbols_inner(
     def: ExprDef,
     symbol_registry: &SymbolRegistry,
@@ -116,7 +407,7 @@ fn substitute_symbols_inner(
             } else if let Some(unit) = unit_registry.get_unit_with_prefix(&name) {
                 Ok(ExprDef::Lit(Quantity::new(1.0, unit)))
             } else {
-                Err(RunError::SymbolHasNoValue(name))
+                Err(RunError::new(RunErrorKind::SymbolHasNoValue(name)))
             }
         }
         ExprDef::Add(l, r) => Ok(ExprDef::Add(

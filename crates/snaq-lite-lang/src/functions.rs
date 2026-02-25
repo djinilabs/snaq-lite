@@ -1,7 +1,7 @@
 //! Built-in functions: sin, cos, tan (trig, one arg in angle dimension: rad or degree), max, min (two args, same dimension).
 //! For well-known angles, exact symbolic results (0, 1, √2/2, etc.) are returned when possible.
 
-use crate::error::RunError;
+use crate::error::{RunError, RunErrorKind};
 use crate::quantity::{Quantity, SnaqNumber};
 use crate::symbolic::{SymbolicExpr, SymbolicQuantity, Value};
 use crate::unit::Unit;
@@ -339,9 +339,9 @@ pub fn call_builtin(
             let x = exactly_one(param_values, "sqrt")?;
             let v = x.value();
             if v < 0.0 {
-                return Err(RunError::InvalidArgument(
+                return Err(RunError::new(RunErrorKind::InvalidArgument(
                     "sqrt: argument must be non-negative".to_string(),
-                ));
+                )));
             }
             let result_value = v.sqrt();
             let var_x = x.variance();
@@ -357,7 +357,7 @@ pub fn call_builtin(
                 x.unit().clone().power(half),
             )))
         }
-        _ => Err(RunError::UnknownFunction(name.to_string())),
+        _ => Err(RunError::new(RunErrorKind::UnknownFunction(name.to_string()))),
     }
 }
 
@@ -385,20 +385,20 @@ where
 fn exactly_one(qs: &[Quantity], name: &str) -> Result<Quantity, RunError> {
     match qs {
         [q] => Ok(q.clone()),
-        _ => Err(RunError::UnknownFunction(format!(
+        _ => Err(RunError::new(RunErrorKind::UnknownFunction(format!(
             "{name}: expected 1 argument, got {}",
             qs.len()
-        ))),
+        )))),
     }
 }
 
 fn exactly_two(qs: &[Quantity], name: &str) -> Result<(Quantity, Quantity), RunError> {
     match qs {
         [a, b] => Ok((a.clone(), b.clone())),
-        _ => Err(RunError::UnknownFunction(format!(
+        _ => Err(RunError::new(RunErrorKind::UnknownFunction(format!(
             "{name}: expected 2 arguments, got {}",
             qs.len()
-        ))),
+        )))),
     }
 }
 
@@ -410,13 +410,13 @@ fn require_angle(
 ) -> Result<Quantity, RunError> {
     let rad = Unit::from_base_unit("rad");
     if !registry.same_dimension(q.unit(), &rad).unwrap_or(false) {
-        return Err(RunError::ExpectedAngle {
+        return Err(RunError::new(RunErrorKind::ExpectedAngle {
             actual: q.unit().clone(),
-        });
+        }));
     }
-    q.convert_to(registry, &rad).map_err(|_| RunError::ExpectedAngle {
+    q.convert_to(registry, &rad).map_err(|_| RunError::new(RunErrorKind::ExpectedAngle {
         actual: q.unit().clone(),
-    })
+    }))
 }
 
 fn same_dimension_max_min<F>(
@@ -429,25 +429,25 @@ where
     F: FnOnce(f64, f64) -> f64,
 {
     if !registry.same_dimension(a.unit(), b.unit()).unwrap_or(false) {
-        return Err(RunError::DimensionMismatch {
+        return Err(RunError::new(RunErrorKind::DimensionMismatch {
             left: a.unit().clone(),
             right: b.unit().clone(),
-        });
+        }));
     }
     let result_unit = Quantity::smaller_unit(registry, a.unit(), b.unit())
         .cloned()
         .unwrap_or_else(|| a.unit().clone());
     let a_val = a.convert_to(registry, &result_unit).map_err(|e| match e {
         crate::quantity::QuantityError::DimensionMismatch { left, right } => {
-            RunError::DimensionMismatch { left, right }
+            RunError::new(RunErrorKind::DimensionMismatch { left, right })
         }
-        _ => RunError::DivisionByZero,
+        _ => RunError::new(RunErrorKind::DivisionByZero),
     })?.value();
     let b_val = b.convert_to(registry, &result_unit).map_err(|e| match e {
         crate::quantity::QuantityError::DimensionMismatch { left, right } => {
-            RunError::DimensionMismatch { left, right }
+            RunError::new(RunErrorKind::DimensionMismatch { left, right })
         }
-        _ => RunError::DivisionByZero,
+        _ => RunError::new(RunErrorKind::DivisionByZero),
     })?.value();
     let result = op(a_val, b_val);
     Ok(Value::Numeric(Quantity::new(result, result_unit)))

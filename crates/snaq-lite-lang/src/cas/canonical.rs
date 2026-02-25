@@ -245,13 +245,14 @@ fn canonicalize_rec(
     out: &mut ExprInterner,
     id: ExprId,
 ) -> ExprId {
+    let span = pool.get_span(id);
     match pool.get(id) {
-        ExprNode::Lit(q) => out.intern(ExprNode::Lit(q.clone())),
-        ExprNode::LitFuzzyBool(f) => out.intern(ExprNode::LitFuzzyBool(f.clone())),
-        ExprNode::LitSymbol(s) => out.intern(ExprNode::LitSymbol(s.clone())),
+        ExprNode::Lit(q) => out.intern(ExprNode::Lit(q.clone()), span),
+        ExprNode::LitFuzzyBool(f) => out.intern(ExprNode::LitFuzzyBool(f.clone()), span),
+        ExprNode::LitSymbol(s) => out.intern(ExprNode::LitSymbol(s.clone()), span),
         ExprNode::Neg(inner) => {
             let new_inner = canonicalize_rec(pool, out, *inner);
-            out.intern(ExprNode::Neg(new_inner))
+            out.intern(ExprNode::Neg(new_inner), span)
         }
         ExprNode::Add(_) => {
             let flat: Vec<ExprId> = flatten_add(pool, id)
@@ -260,7 +261,7 @@ fn canonicalize_rec(
                 .collect();
             let mut sorted = flat;
             sorted.sort_by_key(|a| rank(out, *a));
-            out.intern(ExprNode::Add(sorted))
+            out.intern(ExprNode::Add(sorted), span)
         }
         ExprNode::Mul(_) => {
             let flat: Vec<ExprId> = flatten_mul(pool, id)
@@ -276,49 +277,49 @@ fn canonicalize_rec(
             if !preserve_order {
                 sorted.sort_by_key(|a| rank(out, *a));
             }
-            out.intern(ExprNode::Mul(sorted))
+            out.intern(ExprNode::Mul(sorted), span)
         }
         ExprNode::Sub(l, r) => {
             let new_l = canonicalize_rec(pool, out, *l);
             let new_r = canonicalize_rec(pool, out, *r);
-            out.intern(ExprNode::Sub(new_l, new_r))
+            out.intern(ExprNode::Sub(new_l, new_r), span)
         }
         ExprNode::Div(l, r) => {
             let new_l = canonicalize_rec(pool, out, *l);
             let new_r = canonicalize_rec(pool, out, *r);
-            out.intern(ExprNode::Div(new_l, new_r))
+            out.intern(ExprNode::Div(new_l, new_r), span)
         }
         ExprNode::Call(name, args) => {
             let new_args: Vec<(Option<String>, ExprId)> = args
                 .iter()
                 .map(|(n, id)| (n.clone(), canonicalize_rec(pool, out, *id)))
                 .collect();
-            out.intern(ExprNode::Call(name.clone(), new_args))
+            out.intern(ExprNode::Call(name.clone(), new_args), span)
         }
         ExprNode::As(l, r) => {
             let new_l = canonicalize_rec(pool, out, *l);
             let new_r = canonicalize_rec(pool, out, *r);
-            out.intern(ExprNode::As(new_l, new_r))
+            out.intern(ExprNode::As(new_l, new_r), span)
         }
         ExprNode::VecLiteral(ids) => {
             let new_ids: Vec<ExprId> = ids
                 .iter()
                 .map(|&id| canonicalize_rec(pool, out, id))
                 .collect();
-            out.intern(ExprNode::VecLiteral(new_ids))
+            out.intern(ExprNode::VecLiteral(new_ids), span)
         }
         ExprNode::Transpose(inner) => {
             let new_inner = canonicalize_rec(pool, out, *inner);
-            out.intern(ExprNode::Transpose(new_inner))
+            out.intern(ExprNode::Transpose(new_inner), span)
         }
         ExprNode::Index(base, index) => {
             let new_base = canonicalize_rec(pool, out, *base);
             let new_index = canonicalize_rec(pool, out, *index);
-            out.intern(ExprNode::Index(new_base, new_index))
+            out.intern(ExprNode::Index(new_base, new_index), span)
         }
         ExprNode::Member(base, name) => {
             let new_base = canonicalize_rec(pool, out, *base);
-            out.intern(ExprNode::Member(new_base, name.clone()))
+            out.intern(ExprNode::Member(new_base, name.clone()), span)
         }
         ExprNode::MethodCall(base, name, args) => {
             let new_base = canonicalize_rec(pool, out, *base);
@@ -326,59 +327,59 @@ fn canonicalize_rec(
                 .iter()
                 .map(|(n, id)| (n.clone(), canonicalize_rec(pool, out, *id)))
                 .collect();
-            out.intern(ExprNode::MethodCall(new_base, name.clone(), new_args))
+            out.intern(ExprNode::MethodCall(new_base, name.clone(), new_args), span)
         }
         ExprNode::Eq(l, r) => {
             let new_l = canonicalize_rec(pool, out, *l);
             let new_r = canonicalize_rec(pool, out, *r);
-            out.intern(ExprNode::Eq(new_l, new_r))
+            out.intern(ExprNode::Eq(new_l, new_r), span)
         }
         ExprNode::Ne(l, r) => {
             let new_l = canonicalize_rec(pool, out, *l);
             let new_r = canonicalize_rec(pool, out, *r);
-            out.intern(ExprNode::Ne(new_l, new_r))
+            out.intern(ExprNode::Ne(new_l, new_r), span)
         }
         ExprNode::Lt(l, r) => {
             let new_l = canonicalize_rec(pool, out, *l);
             let new_r = canonicalize_rec(pool, out, *r);
-            out.intern(ExprNode::Lt(new_l, new_r))
+            out.intern(ExprNode::Lt(new_l, new_r), span)
         }
         ExprNode::Le(l, r) => {
             let new_l = canonicalize_rec(pool, out, *l);
             let new_r = canonicalize_rec(pool, out, *r);
-            out.intern(ExprNode::Le(new_l, new_r))
+            out.intern(ExprNode::Le(new_l, new_r), span)
         }
         ExprNode::Gt(l, r) => {
             let new_l = canonicalize_rec(pool, out, *l);
             let new_r = canonicalize_rec(pool, out, *r);
-            out.intern(ExprNode::Gt(new_l, new_r))
+            out.intern(ExprNode::Gt(new_l, new_r), span)
         }
         ExprNode::Ge(l, r) => {
             let new_l = canonicalize_rec(pool, out, *l);
             let new_r = canonicalize_rec(pool, out, *r);
-            out.intern(ExprNode::Ge(new_l, new_r))
+            out.intern(ExprNode::Ge(new_l, new_r), span)
         }
         ExprNode::If(c, t, e) => {
             let new_c = canonicalize_rec(pool, out, *c);
             let new_t = canonicalize_rec(pool, out, *t);
             let new_e = canonicalize_rec(pool, out, *e);
-            out.intern(ExprNode::If(new_c, new_t, new_e))
+            out.intern(ExprNode::If(new_c, new_t, new_e), span)
         }
         ExprNode::WithPrecision(l, r) => {
             let new_l = canonicalize_rec(pool, out, *l);
             let new_r = canonicalize_rec(pool, out, *r);
-            out.intern(ExprNode::WithPrecision(new_l, new_r))
+            out.intern(ExprNode::WithPrecision(new_l, new_r), span)
         }
         ExprNode::Block(ids) => {
             let new_ids: Vec<ExprId> = ids
                 .iter()
                 .map(|&id| canonicalize_rec(pool, out, id))
                 .collect();
-            out.intern(ExprNode::Block(new_ids))
+            out.intern(ExprNode::Block(new_ids), span)
         }
         ExprNode::Binding(name, rhs) => {
             let new_rhs = canonicalize_rec(pool, out, *rhs);
-            out.intern(ExprNode::Binding(name.clone(), new_rhs))
+            out.intern(ExprNode::Binding(name.clone(), new_rhs), span)
         }
         ExprNode::Lambda(params, body_id) => {
             let new_params: Vec<(String, Option<ExprId>)> = params
@@ -391,7 +392,7 @@ fn canonicalize_rec(
                 })
                 .collect();
             let new_body = canonicalize_rec(pool, out, *body_id);
-            out.intern(ExprNode::Lambda(new_params, new_body))
+            out.intern(ExprNode::Lambda(new_params, new_body), span)
         }
         ExprNode::CallExpr(callee_id, args) => {
             let new_callee = canonicalize_rec(pool, out, *callee_id);
@@ -399,7 +400,7 @@ fn canonicalize_rec(
                 .iter()
                 .map(|(name_opt, id)| (name_opt.clone(), canonicalize_rec(pool, out, *id)))
                 .collect();
-            out.intern(ExprNode::CallExpr(new_callee, new_args))
+            out.intern(ExprNode::CallExpr(new_callee, new_args), span)
         }
     }
 }

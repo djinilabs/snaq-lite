@@ -1,3 +1,5 @@
+use std::io::Write;
+
 /// Format a numeric value for CLI output: ±∞ as Unicode ∞, -∞.
 fn format_value(v: f64) -> String {
     if v == f64::INFINITY {
@@ -66,13 +68,17 @@ fn main() {
                         }
                     }
                     Err(e) => {
-                        eprintln!("error: {e}");
+                        let msg = snaq_lite_lang::format_run_error_with_source(&e, Some(&expression));
+                        eprintln!("error: {msg}");
+                        let _ = std::io::stderr().flush();
                         std::process::exit(1);
                     }
                 }
             }
             Err(e) => {
-                eprintln!("error: {e}");
+                let msg = snaq_lite_lang::format_run_error_with_source(&e, Some(&expression));
+                eprintln!("error: {msg}");
+                let _ = std::io::stderr().flush();
                 std::process::exit(1);
             }
         }
@@ -80,7 +86,9 @@ fn main() {
         match snaq_lite_lang::run_format(&expression) {
             Ok(formatted) => println!("{formatted}"),
             Err(e) => {
-                eprintln!("error: {e}");
+                let msg = snaq_lite_lang::format_run_error_with_source(&e, Some(&expression));
+                eprintln!("error: {msg}");
+                let _ = std::io::stderr().flush();
                 std::process::exit(1);
             }
         }

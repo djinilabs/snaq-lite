@@ -1,38 +1,204 @@
 //! Conversion between ExprDef (binary tree) and interned CAS representation.
 
 use crate::cas::{ExprId, ExprInterner, ExprNode};
-use crate::ir::{CallArg, ExprDef};
+use crate::error::Span;
+use crate::ir::{CallArg, ExprDef, SpannedCallArg, SpannedExprDef, SpannedExprDefKind};
 
-/// Build interned nodes from a resolved ExprDef. Only resolved variants are supported.
-/// Binary Add/Mul become two-child nodes (flattened in canonicalization).
+/// Build interned nodes from a resolved SpannedExprDef. Only resolved variants are supported.
+/// Binary Add/Mul become two-child nodes (flattened in canonicalization). Spans are stored per node.
+pub fn spanned_expr_def_to_interned(def: &SpannedExprDef, pool: &mut ExprInterner) -> ExprId {
+    let span = def.span;
+    match &def.value {
+        SpannedExprDefKind::Lit(q) => pool.intern(ExprNode::Lit(q.clone()), span),
+        SpannedExprDefKind::LitFuzzyBool(f) => pool.intern(ExprNode::LitFuzzyBool(f.clone()), span),
+        SpannedExprDefKind::LitSymbol(s) => pool.intern(ExprNode::LitSymbol(s.clone()), span),
+        SpannedExprDefKind::Add(l, r) => {
+            let lid = spanned_expr_def_to_interned(l, pool);
+            let rid = spanned_expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Add(vec![lid, rid]), span)
+        }
+        SpannedExprDefKind::Sub(l, r) => {
+            let lid = spanned_expr_def_to_interned(l, pool);
+            let rid = spanned_expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Sub(lid, rid), span)
+        }
+        SpannedExprDefKind::Mul(l, r) => {
+            let lid = spanned_expr_def_to_interned(l, pool);
+            let rid = spanned_expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Mul(vec![lid, rid]), span)
+        }
+        SpannedExprDefKind::Div(l, r) => {
+            let lid = spanned_expr_def_to_interned(l, pool);
+            let rid = spanned_expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Div(lid, rid), span)
+        }
+        SpannedExprDefKind::Neg(inner) => {
+            let id = spanned_expr_def_to_interned(inner, pool);
+            pool.intern(ExprNode::Neg(id), span)
+        }
+        SpannedExprDefKind::Call(name, args) => {
+            let arg_ids: Vec<(Option<String>, ExprId)> = args
+                .iter()
+                .map(|arg| {
+                    let (name_opt, def) = match arg {
+                        SpannedCallArg::Positional(e) => (None, e.as_ref()),
+                        SpannedCallArg::Named(n, e) => (Some(n.clone()), e.as_ref()),
+                    };
+                    (name_opt, spanned_expr_def_to_interned(def, pool))
+                })
+                .collect();
+            pool.intern(ExprNode::Call(name.clone(), arg_ids), span)
+        }
+        SpannedExprDefKind::As(l, r) => {
+            let lid = spanned_expr_def_to_interned(l, pool);
+            let rid = spanned_expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::As(lid, rid), span)
+        }
+        SpannedExprDefKind::VecLiteral(elems) => {
+            let ids: Vec<_> = elems.iter().map(|e| spanned_expr_def_to_interned(e, pool)).collect();
+            pool.intern(ExprNode::VecLiteral(ids), span)
+        }
+        SpannedExprDefKind::Transpose(inner) => {
+            let id = spanned_expr_def_to_interned(inner, pool);
+            pool.intern(ExprNode::Transpose(id), span)
+        }
+        SpannedExprDefKind::Index(base, index) => {
+            let base_id = spanned_expr_def_to_interned(base, pool);
+            let index_id = spanned_expr_def_to_interned(index, pool);
+            pool.intern(ExprNode::Index(base_id, index_id), span)
+        }
+        SpannedExprDefKind::Member(base, name) => {
+            let base_id = spanned_expr_def_to_interned(base, pool);
+            pool.intern(ExprNode::Member(base_id, name.clone()), span)
+        }
+        SpannedExprDefKind::MethodCall(base, name, args) => {
+            let base_id = spanned_expr_def_to_interned(base, pool);
+            let arg_ids: Vec<(Option<String>, ExprId)> = args
+                .iter()
+                .map(|arg| {
+                    let (name_opt, def) = match arg {
+                        SpannedCallArg::Positional(e) => (None, e.as_ref()),
+                        SpannedCallArg::Named(n, e) => (Some(n.clone()), e.as_ref()),
+                    };
+                    (name_opt, spanned_expr_def_to_interned(def, pool))
+                })
+                .collect();
+            pool.intern(ExprNode::MethodCall(base_id, name.clone(), arg_ids), span)
+        }
+        SpannedExprDefKind::Eq(l, r) => {
+            let lid = spanned_expr_def_to_interned(l, pool);
+            let rid = spanned_expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Eq(lid, rid), span)
+        }
+        SpannedExprDefKind::Ne(l, r) => {
+            let lid = spanned_expr_def_to_interned(l, pool);
+            let rid = spanned_expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Ne(lid, rid), span)
+        }
+        SpannedExprDefKind::Lt(l, r) => {
+            let lid = spanned_expr_def_to_interned(l, pool);
+            let rid = spanned_expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Lt(lid, rid), span)
+        }
+        SpannedExprDefKind::Le(l, r) => {
+            let lid = spanned_expr_def_to_interned(l, pool);
+            let rid = spanned_expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Le(lid, rid), span)
+        }
+        SpannedExprDefKind::Gt(l, r) => {
+            let lid = spanned_expr_def_to_interned(l, pool);
+            let rid = spanned_expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Gt(lid, rid), span)
+        }
+        SpannedExprDefKind::Ge(l, r) => {
+            let lid = spanned_expr_def_to_interned(l, pool);
+            let rid = spanned_expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::Ge(lid, rid), span)
+        }
+        SpannedExprDefKind::If(cond, then_b, else_b) => {
+            let cid = spanned_expr_def_to_interned(cond, pool);
+            let tid = spanned_expr_def_to_interned(then_b, pool);
+            let eid = spanned_expr_def_to_interned(else_b, pool);
+            pool.intern(ExprNode::If(cid, tid, eid), span)
+        }
+        SpannedExprDefKind::WithPrecision(l, r) => {
+            let lid = spanned_expr_def_to_interned(l, pool);
+            let rid = spanned_expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::WithPrecision(lid, rid), span)
+        }
+        SpannedExprDefKind::Block(exprs) => {
+            let ids: Vec<ExprId> = exprs.iter().map(|e| spanned_expr_def_to_interned(e, pool)).collect();
+            pool.intern(ExprNode::Block(ids), span)
+        }
+        SpannedExprDefKind::Binding(name, rhs) => {
+            let rid = spanned_expr_def_to_interned(rhs, pool);
+            pool.intern(ExprNode::Binding(name.clone(), rid), span)
+        }
+        SpannedExprDefKind::Lambda(params, body) => {
+            let param_ids: Vec<(String, Option<ExprId>)> = params
+                .iter()
+                .map(|(name, default)| {
+                    (
+                        name.clone(),
+                        default.as_ref().map(|d| spanned_expr_def_to_interned(d, pool)),
+                    )
+                })
+                .collect();
+            let body_id = spanned_expr_def_to_interned(body, pool);
+            pool.intern(ExprNode::Lambda(param_ids, body_id), span)
+        }
+        SpannedExprDefKind::CallExpr(callee, args) => {
+            let callee_id = spanned_expr_def_to_interned(callee, pool);
+            let arg_ids: Vec<(Option<String>, ExprId)> = args
+                .iter()
+                .map(|arg| {
+                    let (name_opt, def) = match arg {
+                        SpannedCallArg::Positional(e) => (None, e.as_ref()),
+                        SpannedCallArg::Named(n, e) => (Some(n.clone()), e.as_ref()),
+                    };
+                    (name_opt, spanned_expr_def_to_interned(def, pool))
+                })
+                .collect();
+            pool.intern(ExprNode::CallExpr(callee_id, arg_ids), span)
+        }
+        SpannedExprDefKind::LitScalar(..)
+        | SpannedExprDefKind::LitWithUnit(..)
+        | SpannedExprDefKind::LitUnit(..) => {
+            panic!("unresolved SpannedExprDef: resolve() must be called before CAS")
+        }
+    }
+}
+
+/// Build interned nodes from a resolved ExprDef (no spans). Uses default span for all nodes. For tests or legacy paths.
 pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
+    let span = Span::default();
     match def {
-        ExprDef::Lit(q) => pool.intern(ExprNode::Lit(q.clone())),
-        ExprDef::LitFuzzyBool(f) => pool.intern(ExprNode::LitFuzzyBool(f.clone())),
-        ExprDef::LitSymbol(s) => pool.intern(ExprNode::LitSymbol(s.clone())),
+        ExprDef::Lit(q) => pool.intern(ExprNode::Lit(q.clone()), span),
+        ExprDef::LitFuzzyBool(f) => pool.intern(ExprNode::LitFuzzyBool(f.clone()), span),
+        ExprDef::LitSymbol(s) => pool.intern(ExprNode::LitSymbol(s.clone()), span),
         ExprDef::Add(l, r) => {
             let lid = expr_def_to_interned(l, pool);
             let rid = expr_def_to_interned(r, pool);
-            pool.intern(ExprNode::Add(vec![lid, rid]))
+            pool.intern(ExprNode::Add(vec![lid, rid]), span)
         }
         ExprDef::Sub(l, r) => {
             let lid = expr_def_to_interned(l, pool);
             let rid = expr_def_to_interned(r, pool);
-            pool.intern(ExprNode::Sub(lid, rid))
+            pool.intern(ExprNode::Sub(lid, rid), span)
         }
         ExprDef::Mul(l, r) => {
             let lid = expr_def_to_interned(l, pool);
             let rid = expr_def_to_interned(r, pool);
-            pool.intern(ExprNode::Mul(vec![lid, rid]))
+            pool.intern(ExprNode::Mul(vec![lid, rid]), span)
         }
         ExprDef::Div(l, r) => {
             let lid = expr_def_to_interned(l, pool);
             let rid = expr_def_to_interned(r, pool);
-            pool.intern(ExprNode::Div(lid, rid))
+            pool.intern(ExprNode::Div(lid, rid), span)
         }
         ExprDef::Neg(inner) => {
             let id = expr_def_to_interned(inner, pool);
-            pool.intern(ExprNode::Neg(id))
+            pool.intern(ExprNode::Neg(id), span)
         }
         ExprDef::Call(name, args) => {
             let arg_ids: Vec<(Option<String>, ExprId)> = args
@@ -45,29 +211,29 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
                     (name_opt, expr_def_to_interned(def, pool))
                 })
                 .collect();
-            pool.intern(ExprNode::Call(name.clone(), arg_ids))
+            pool.intern(ExprNode::Call(name.clone(), arg_ids), span)
         }
         ExprDef::As(l, r) => {
             let lid = expr_def_to_interned(l, pool);
             let rid = expr_def_to_interned(r, pool);
-            pool.intern(ExprNode::As(lid, rid))
+            pool.intern(ExprNode::As(lid, rid), span)
         }
         ExprDef::VecLiteral(elems) => {
             let ids: Vec<_> = elems.iter().map(|e| expr_def_to_interned(e, pool)).collect();
-            pool.intern(ExprNode::VecLiteral(ids))
+            pool.intern(ExprNode::VecLiteral(ids), span)
         }
         ExprDef::Transpose(inner) => {
             let id = expr_def_to_interned(inner, pool);
-            pool.intern(ExprNode::Transpose(id))
+            pool.intern(ExprNode::Transpose(id), span)
         }
         ExprDef::Index(base, index) => {
             let base_id = expr_def_to_interned(base, pool);
             let index_id = expr_def_to_interned(index, pool);
-            pool.intern(ExprNode::Index(base_id, index_id))
+            pool.intern(ExprNode::Index(base_id, index_id), span)
         }
         ExprDef::Member(base, name) => {
             let base_id = expr_def_to_interned(base, pool);
-            pool.intern(ExprNode::Member(base_id, name.clone()))
+            pool.intern(ExprNode::Member(base_id, name.clone()), span)
         }
         ExprDef::MethodCall(base, name, args) => {
             let base_id = expr_def_to_interned(base, pool);
@@ -81,56 +247,56 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
                     (name_opt, expr_def_to_interned(def, pool))
                 })
                 .collect();
-            pool.intern(ExprNode::MethodCall(base_id, name.clone(), arg_ids))
+            pool.intern(ExprNode::MethodCall(base_id, name.clone(), arg_ids), span)
         }
         ExprDef::Eq(l, r) => {
             let lid = expr_def_to_interned(l, pool);
             let rid = expr_def_to_interned(r, pool);
-            pool.intern(ExprNode::Eq(lid, rid))
+            pool.intern(ExprNode::Eq(lid, rid), span)
         }
         ExprDef::Ne(l, r) => {
             let lid = expr_def_to_interned(l, pool);
             let rid = expr_def_to_interned(r, pool);
-            pool.intern(ExprNode::Ne(lid, rid))
+            pool.intern(ExprNode::Ne(lid, rid), span)
         }
         ExprDef::Lt(l, r) => {
             let lid = expr_def_to_interned(l, pool);
             let rid = expr_def_to_interned(r, pool);
-            pool.intern(ExprNode::Lt(lid, rid))
+            pool.intern(ExprNode::Lt(lid, rid), span)
         }
         ExprDef::Le(l, r) => {
             let lid = expr_def_to_interned(l, pool);
             let rid = expr_def_to_interned(r, pool);
-            pool.intern(ExprNode::Le(lid, rid))
+            pool.intern(ExprNode::Le(lid, rid), span)
         }
         ExprDef::Gt(l, r) => {
             let lid = expr_def_to_interned(l, pool);
             let rid = expr_def_to_interned(r, pool);
-            pool.intern(ExprNode::Gt(lid, rid))
+            pool.intern(ExprNode::Gt(lid, rid), span)
         }
         ExprDef::Ge(l, r) => {
             let lid = expr_def_to_interned(l, pool);
             let rid = expr_def_to_interned(r, pool);
-            pool.intern(ExprNode::Ge(lid, rid))
+            pool.intern(ExprNode::Ge(lid, rid), span)
         }
         ExprDef::If(cond, then_b, else_b) => {
             let cid = expr_def_to_interned(cond, pool);
             let tid = expr_def_to_interned(then_b, pool);
             let eid = expr_def_to_interned(else_b, pool);
-            pool.intern(ExprNode::If(cid, tid, eid))
+            pool.intern(ExprNode::If(cid, tid, eid), span)
         }
         ExprDef::WithPrecision(l, r) => {
             let lid = expr_def_to_interned(l, pool);
             let rid = expr_def_to_interned(r, pool);
-            pool.intern(ExprNode::WithPrecision(lid, rid))
+            pool.intern(ExprNode::WithPrecision(lid, rid), span)
         }
         ExprDef::Block(exprs) => {
             let ids: Vec<ExprId> = exprs.iter().map(|e| expr_def_to_interned(e, pool)).collect();
-            pool.intern(ExprNode::Block(ids))
+            pool.intern(ExprNode::Block(ids), span)
         }
         ExprDef::Binding(name, rhs) => {
             let rid = expr_def_to_interned(rhs, pool);
-            pool.intern(ExprNode::Binding(name.clone(), rid))
+            pool.intern(ExprNode::Binding(name.clone(), rid), span)
         }
         ExprDef::Lambda(params, body) => {
             let param_ids: Vec<(String, Option<ExprId>)> = params
@@ -143,7 +309,7 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
                 })
                 .collect();
             let body_id = expr_def_to_interned(body, pool);
-            pool.intern(ExprNode::Lambda(param_ids, body_id))
+            pool.intern(ExprNode::Lambda(param_ids, body_id), span)
         }
         ExprDef::CallExpr(callee, args) => {
             let callee_id = expr_def_to_interned(callee, pool);
@@ -157,7 +323,7 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
                     (name_opt, expr_def_to_interned(def, pool))
                 })
                 .collect();
-            pool.intern(ExprNode::CallExpr(callee_id, arg_ids))
+            pool.intern(ExprNode::CallExpr(callee_id, arg_ids), span)
         }
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved ExprDef: resolve() must be called before CAS")
@@ -165,168 +331,204 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
     }
 }
 
-/// Convert an interned expression back to ExprDef. N-ary Add/Mul are re-binaryized left-associatively.
-pub fn interned_to_expr_def(pool: &ExprInterner, id: ExprId) -> ExprDef {
-    match pool.get(id) {
-        ExprNode::Lit(q) => ExprDef::Lit(q.clone()),
-        ExprNode::LitFuzzyBool(f) => ExprDef::LitFuzzyBool(f.clone()),
-        ExprNode::LitSymbol(s) => ExprDef::LitSymbol(s.clone()),
-        ExprNode::Add(ids) => binaryize_add(pool, ids),
-        ExprNode::Mul(ids) => binaryize_mul(pool, ids),
-        ExprNode::Sub(l, r) => ExprDef::Sub(
-            Box::new(interned_to_expr_def(pool, *l)),
-            Box::new(interned_to_expr_def(pool, *r)),
+/// Convert an interned expression back to SpannedExprDef. N-ary Add/Mul are re-binaryized left-associatively.
+pub fn interned_to_spanned_expr_def(pool: &ExprInterner, id: ExprId) -> SpannedExprDef {
+    let span = pool.get_span(id);
+    let value = match pool.get(id) {
+        ExprNode::Lit(q) => SpannedExprDefKind::Lit(q.clone()),
+        ExprNode::LitFuzzyBool(f) => SpannedExprDefKind::LitFuzzyBool(f.clone()),
+        ExprNode::LitSymbol(s) => SpannedExprDefKind::LitSymbol(s.clone()),
+        ExprNode::Add(ids) => return binaryize_add_spanned(pool, ids),
+        ExprNode::Mul(ids) => return binaryize_mul_spanned(pool, ids),
+        ExprNode::Sub(l, r) => SpannedExprDefKind::Sub(
+            Box::new(interned_to_spanned_expr_def(pool, *l)),
+            Box::new(interned_to_spanned_expr_def(pool, *r)),
         ),
-        ExprNode::Div(l, r) => ExprDef::Div(
-            Box::new(interned_to_expr_def(pool, *l)),
-            Box::new(interned_to_expr_def(pool, *r)),
+        ExprNode::Div(l, r) => SpannedExprDefKind::Div(
+            Box::new(interned_to_spanned_expr_def(pool, *l)),
+            Box::new(interned_to_spanned_expr_def(pool, *r)),
         ),
-        ExprNode::Neg(inner) => ExprDef::Neg(Box::new(interned_to_expr_def(pool, *inner))),
+        ExprNode::Neg(inner) => {
+            SpannedExprDefKind::Neg(Box::new(interned_to_spanned_expr_def(pool, *inner)))
+        }
         ExprNode::Call(name, args) => {
-            let args: Vec<CallArg> = args
+            let args: Vec<SpannedCallArg> = args
                 .iter()
                 .map(|(name_opt, id)| {
-                    let e = interned_to_expr_def(pool, *id);
+                    let e = interned_to_spanned_expr_def(pool, *id);
                     match name_opt {
-                        None => CallArg::Positional(Box::new(e)),
-                        Some(n) => CallArg::Named(n.clone(), Box::new(e)),
+                        None => SpannedCallArg::Positional(Box::new(e)),
+                        Some(n) => SpannedCallArg::Named(n.clone(), Box::new(e)),
                     }
                 })
                 .collect();
-            ExprDef::Call(name.clone(), args)
+            SpannedExprDefKind::Call(name.clone(), args)
         }
-        ExprNode::As(l, r) => ExprDef::As(
-            Box::new(interned_to_expr_def(pool, *l)),
-            Box::new(interned_to_expr_def(pool, *r)),
+        ExprNode::As(l, r) => SpannedExprDefKind::As(
+            Box::new(interned_to_spanned_expr_def(pool, *l)),
+            Box::new(interned_to_spanned_expr_def(pool, *r)),
         ),
-        ExprNode::VecLiteral(ids) => ExprDef::VecLiteral(
+        ExprNode::VecLiteral(ids) => SpannedExprDefKind::VecLiteral(
             ids.iter()
-                .map(|&id| interned_to_expr_def(pool, id))
+                .map(|&id| interned_to_spanned_expr_def(pool, id))
                 .collect(),
         ),
-        ExprNode::Transpose(inner) => ExprDef::Transpose(Box::new(interned_to_expr_def(pool, *inner))),
-        ExprNode::Index(base, index) => ExprDef::Index(
-            Box::new(interned_to_expr_def(pool, *base)),
-            Box::new(interned_to_expr_def(pool, *index)),
+        ExprNode::Transpose(inner) => {
+            SpannedExprDefKind::Transpose(Box::new(interned_to_spanned_expr_def(pool, *inner)))
+        }
+        ExprNode::Index(base, index) => SpannedExprDefKind::Index(
+            Box::new(interned_to_spanned_expr_def(pool, *base)),
+            Box::new(interned_to_spanned_expr_def(pool, *index)),
         ),
-        ExprNode::Member(base_id, name) => ExprDef::Member(
-            Box::new(interned_to_expr_def(pool, *base_id)),
+        ExprNode::Member(base_id, name) => SpannedExprDefKind::Member(
+            Box::new(interned_to_spanned_expr_def(pool, *base_id)),
             name.clone(),
         ),
         ExprNode::MethodCall(base_id, name, args) => {
-            let args: Vec<CallArg> = args
+            let args: Vec<SpannedCallArg> = args
                 .iter()
                 .map(|(name_opt, id)| {
-                    let e = interned_to_expr_def(pool, *id);
+                    let e = interned_to_spanned_expr_def(pool, *id);
                     match name_opt {
-                        None => CallArg::Positional(Box::new(e)),
-                        Some(n) => CallArg::Named(n.clone(), Box::new(e)),
+                        None => SpannedCallArg::Positional(Box::new(e)),
+                        Some(n) => SpannedCallArg::Named(n.clone(), Box::new(e)),
                     }
                 })
                 .collect();
-            ExprDef::MethodCall(
-                Box::new(interned_to_expr_def(pool, *base_id)),
+            SpannedExprDefKind::MethodCall(
+                Box::new(interned_to_spanned_expr_def(pool, *base_id)),
                 name.clone(),
                 args,
             )
         }
-        ExprNode::Eq(l, r) => ExprDef::Eq(
-            Box::new(interned_to_expr_def(pool, *l)),
-            Box::new(interned_to_expr_def(pool, *r)),
+        ExprNode::Eq(l, r) => SpannedExprDefKind::Eq(
+            Box::new(interned_to_spanned_expr_def(pool, *l)),
+            Box::new(interned_to_spanned_expr_def(pool, *r)),
         ),
-        ExprNode::Ne(l, r) => ExprDef::Ne(
-            Box::new(interned_to_expr_def(pool, *l)),
-            Box::new(interned_to_expr_def(pool, *r)),
+        ExprNode::Ne(l, r) => SpannedExprDefKind::Ne(
+            Box::new(interned_to_spanned_expr_def(pool, *l)),
+            Box::new(interned_to_spanned_expr_def(pool, *r)),
         ),
-        ExprNode::Lt(l, r) => ExprDef::Lt(
-            Box::new(interned_to_expr_def(pool, *l)),
-            Box::new(interned_to_expr_def(pool, *r)),
+        ExprNode::Lt(l, r) => SpannedExprDefKind::Lt(
+            Box::new(interned_to_spanned_expr_def(pool, *l)),
+            Box::new(interned_to_spanned_expr_def(pool, *r)),
         ),
-        ExprNode::Le(l, r) => ExprDef::Le(
-            Box::new(interned_to_expr_def(pool, *l)),
-            Box::new(interned_to_expr_def(pool, *r)),
+        ExprNode::Le(l, r) => SpannedExprDefKind::Le(
+            Box::new(interned_to_spanned_expr_def(pool, *l)),
+            Box::new(interned_to_spanned_expr_def(pool, *r)),
         ),
-        ExprNode::Gt(l, r) => ExprDef::Gt(
-            Box::new(interned_to_expr_def(pool, *l)),
-            Box::new(interned_to_expr_def(pool, *r)),
+        ExprNode::Gt(l, r) => SpannedExprDefKind::Gt(
+            Box::new(interned_to_spanned_expr_def(pool, *l)),
+            Box::new(interned_to_spanned_expr_def(pool, *r)),
         ),
-        ExprNode::Ge(l, r) => ExprDef::Ge(
-            Box::new(interned_to_expr_def(pool, *l)),
-            Box::new(interned_to_expr_def(pool, *r)),
+        ExprNode::Ge(l, r) => SpannedExprDefKind::Ge(
+            Box::new(interned_to_spanned_expr_def(pool, *l)),
+            Box::new(interned_to_spanned_expr_def(pool, *r)),
         ),
-        ExprNode::If(c, t, e) => ExprDef::If(
-            Box::new(interned_to_expr_def(pool, *c)),
-            Box::new(interned_to_expr_def(pool, *t)),
-            Box::new(interned_to_expr_def(pool, *e)),
+        ExprNode::If(c, t, e) => SpannedExprDefKind::If(
+            Box::new(interned_to_spanned_expr_def(pool, *c)),
+            Box::new(interned_to_spanned_expr_def(pool, *t)),
+            Box::new(interned_to_spanned_expr_def(pool, *e)),
         ),
-        ExprNode::WithPrecision(l, r) => ExprDef::WithPrecision(
-            Box::new(interned_to_expr_def(pool, *l)),
-            Box::new(interned_to_expr_def(pool, *r)),
+        ExprNode::WithPrecision(l, r) => SpannedExprDefKind::WithPrecision(
+            Box::new(interned_to_spanned_expr_def(pool, *l)),
+            Box::new(interned_to_spanned_expr_def(pool, *r)),
         ),
-        ExprNode::Block(ids) => ExprDef::Block(
+        ExprNode::Block(ids) => SpannedExprDefKind::Block(
             ids.iter()
-                .map(|&id| interned_to_expr_def(pool, id))
+                .map(|&id| interned_to_spanned_expr_def(pool, id))
                 .collect(),
         ),
-        ExprNode::Binding(name, rhs_id) => ExprDef::Binding(
+        ExprNode::Binding(name, rhs_id) => SpannedExprDefKind::Binding(
             name.clone(),
-            Box::new(interned_to_expr_def(pool, *rhs_id)),
+            Box::new(interned_to_spanned_expr_def(pool, *rhs_id)),
         ),
         ExprNode::Lambda(params, body_id) => {
-            let params: Vec<(String, Option<Box<ExprDef>>)> = params
+            let params: Vec<(String, Option<Box<SpannedExprDef>>)> = params
                 .iter()
                 .map(|(name, default_id)| {
                     (
                         name.clone(),
-                        default_id.map(|id| Box::new(interned_to_expr_def(pool, id))),
+                        default_id.map(|id| Box::new(interned_to_spanned_expr_def(pool, id))),
                     )
                 })
                 .collect();
-            ExprDef::Lambda(params, Box::new(interned_to_expr_def(pool, *body_id)))
+            SpannedExprDefKind::Lambda(
+                params,
+                Box::new(interned_to_spanned_expr_def(pool, *body_id)),
+            )
         }
         ExprNode::CallExpr(callee_id, args) => {
-            let callee = interned_to_expr_def(pool, *callee_id);
-            let args: Vec<CallArg> = args
+            let callee = interned_to_spanned_expr_def(pool, *callee_id);
+            let args: Vec<SpannedCallArg> = args
                 .iter()
                 .map(|(name_opt, id)| {
-                    let e = interned_to_expr_def(pool, *id);
+                    let e = interned_to_spanned_expr_def(pool, *id);
                     match name_opt {
-                        None => CallArg::Positional(Box::new(e)),
-                        Some(n) => CallArg::Named(n.clone(), Box::new(e)),
+                        None => SpannedCallArg::Positional(Box::new(e)),
+                        Some(n) => SpannedCallArg::Named(n.clone(), Box::new(e)),
                     }
                 })
                 .collect();
-            ExprDef::CallExpr(Box::new(callee), args)
+            SpannedExprDefKind::CallExpr(Box::new(callee), args)
         }
-    }
+    };
+    SpannedExprDef { span, value }
 }
 
-fn binaryize_add(pool: &ExprInterner, ids: &[ExprId]) -> ExprDef {
+fn binaryize_add_spanned(pool: &ExprInterner, ids: &[ExprId]) -> SpannedExprDef {
     match ids {
-        [] => ExprDef::Lit(crate::quantity::Quantity::from_scalar(0.0)),
-        [id] => interned_to_expr_def(pool, *id),
+        [] => SpannedExprDef {
+            span: Span::default(),
+            value: SpannedExprDefKind::Lit(crate::quantity::Quantity::from_scalar(0.0)),
+        },
+        [id] => interned_to_spanned_expr_def(pool, *id),
         [first, rest @ ..] => {
-            let mut acc = interned_to_expr_def(pool, *first);
+            let mut acc = interned_to_spanned_expr_def(pool, *first);
             for id in rest {
-                acc = ExprDef::Add(Box::new(acc), Box::new(interned_to_expr_def(pool, *id)));
+                let next = interned_to_spanned_expr_def(pool, *id);
+                let span = Span {
+                    start: acc.span.start.min(next.span.start),
+                    end: acc.span.end.max(next.span.end),
+                };
+                acc = SpannedExprDef {
+                    span,
+                    value: SpannedExprDefKind::Add(Box::new(acc), Box::new(next)),
+                };
             }
             acc
         }
     }
 }
 
-fn binaryize_mul(pool: &ExprInterner, ids: &[ExprId]) -> ExprDef {
+fn binaryize_mul_spanned(pool: &ExprInterner, ids: &[ExprId]) -> SpannedExprDef {
     match ids {
-        [] => ExprDef::Lit(crate::quantity::Quantity::from_scalar(1.0)),
-        [id] => interned_to_expr_def(pool, *id),
+        [] => SpannedExprDef {
+            span: Span::default(),
+            value: SpannedExprDefKind::Lit(crate::quantity::Quantity::from_scalar(1.0)),
+        },
+        [id] => interned_to_spanned_expr_def(pool, *id),
         [first, rest @ ..] => {
-            let mut acc = interned_to_expr_def(pool, *first);
+            let mut acc = interned_to_spanned_expr_def(pool, *first);
             for id in rest {
-                acc = ExprDef::Mul(Box::new(acc), Box::new(interned_to_expr_def(pool, *id)));
+                let next = interned_to_spanned_expr_def(pool, *id);
+                let span = Span {
+                    start: acc.span.start.min(next.span.start),
+                    end: acc.span.end.max(next.span.end),
+                };
+                acc = SpannedExprDef {
+                    span,
+                    value: SpannedExprDefKind::Mul(Box::new(acc), Box::new(next)),
+                };
             }
             acc
         }
     }
+}
+
+/// Convert an interned expression back to ExprDef (drops spans). N-ary Add/Mul are re-binaryized left-associatively.
+pub fn interned_to_expr_def(pool: &ExprInterner, id: ExprId) -> ExprDef {
+    interned_to_spanned_expr_def(pool, id).to_expr_def()
 }
 
 #[cfg(test)]

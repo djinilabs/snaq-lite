@@ -40,8 +40,10 @@ impl StoredValue {
     pub fn from_value(v: &Value) -> Result<Self, crate::error::RunError> {
         match v {
             Value::Numeric(q) => Ok(StoredValue::Numeric(q.clone())),
-            Value::Symbolic(_) => Err(crate::error::RunError::BindingValueNotSupported(
-                "symbolic value not yet supported".to_string(),
+            Value::Symbolic(_) => Err(crate::error::RunError::new(
+                crate::error::RunErrorKind::BindingValueNotSupported(
+                    "symbolic value not yet supported".to_string(),
+                ),
             )),
             Value::FuzzyBool(fb) => Ok(StoredValue::FuzzyBool(fb.clone())),
             Value::Undefined => Ok(StoredValue::Undefined),

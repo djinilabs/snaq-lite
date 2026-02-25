@@ -1,6 +1,53 @@
-/// Errors that can occur when running a snaq-lite expression.
+/// Byte-range span in the source (inclusive start, exclusive end).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Span {
+    /// 1-based (line, column) for the start of this span. Column is in bytes.
+    pub fn line_col(&self, source: &str) -> (u32, u32) {
+        let prefix = source.get(..self.start).unwrap_or("");
+        let line = prefix.lines().count() as u32;
+        let last_newline = prefix.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let column = (self.start - last_newline) as u32;
+        (line.max(1), column.max(1))
+    }
+
+    /// Slice of source for this span, truncated to max_len with "..." if needed.
+    pub fn snippet(&self, source: &str, max_len: usize) -> String {
+        let slice = source.get(self.start..self.end.min(self.start + source.len())).unwrap_or("");
+        if slice.len() <= max_len {
+            slice.to_string()
+        } else {
+            format!("{}...", &slice[..max_len.saturating_sub(3)])
+        }
+    }
+
+    /// Line of source containing this span and a squiggle line (spaces then ~ under the span).
+    /// Returns None if source is empty or span is invalid. Column is 1-based for display.
+    pub fn snippet_with_squiggle(&self, source: &str) -> Option<(String, String)> {
+        if source.is_empty() {
+            return None;
+        }
+        let start = self.start.min(source.len());
+        let (line_1based, _col_1based) = self.line_col(source);
+        let line_idx = (line_1based as usize).saturating_sub(1);
+        let line_content = source.lines().nth(line_idx)?;
+        let last_newline = source.get(..start)?.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let col_byte = start - last_newline;
+        let span_len_byte = (self.end.saturating_sub(self.start)).min(line_content.len().saturating_sub(col_byte));
+        let squiggle_len = span_len_byte.max(1);
+        let spaces = " ".repeat(col_byte);
+        let squiggle = "~".repeat(squiggle_len);
+        Some((line_content.to_string(), format!("{spaces}{squiggle}")))
+    }
+}
+
+/// Kind of run error (no source location).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RunError {
+pub enum RunErrorKind {
     Parse(ParseError),
     UnknownUnit(String),
     DimensionMismatch {
@@ -8,82 +55,158 @@ pub enum RunError {
         right: crate::unit::Unit,
     },
     DivisionByZero,
-    /// A symbol in the expression has no numeric value in the symbol registry (cannot substitute).
     SymbolHasNoValue(String),
-    /// Unknown function name at call site.
     UnknownFunction(String),
-    /// Trig function (sin, cos, tan) received an argument that is not an angle (rad or degree).
     ExpectedAngle { actual: crate::unit::Unit },
-    /// Operation not supported for vector (e.g. arithmetic or to_quantity).
     UnsupportedVectorOperation,
-    /// Transpose operator (') applied to a non-vector (scalar or symbolic).
     ExpectedVector,
-    /// Vector operation (element-wise or dot) requires same length; left and right lengths differ.
     VectorLengthMismatch { left_len: usize, right_len: usize },
-    /// Result is boolean (e.g. comparison); cannot convert to quantity.
     BooleanResult,
-    /// If condition must evaluate to a boolean (FuzzyBool), not a number or symbolic.
     ExpectedCondition,
-    /// Both branches of if/then/else must be numeric or symbolic (blendable); got boolean or vector.
     IfBranchTypeMismatch,
-    /// Both sides of ~ (explicit precision) must be numeric (not symbolic, boolean, or vector).
     TildeRequiresNumeric,
-    /// Right-hand side of ~ (explicit precision) must be strictly positive.
     PrecisionMustBePositive,
-    /// Result is undefined (e.g. empty block or empty program); cannot convert to quantity.
     UndefinedResult,
-    /// Variable binding RHS cannot be stored in scope (e.g. symbolic or vector in v1).
     BindingValueNotSupported(String),
-    /// Cannot bind a name that shadows a built-in function (sin, cos, tan, max, min).
     CannotObfuscateBuiltin(String),
-    /// Index or slice start/length must be a non-negative integer (e.g. take(V, start, length) or V[i]).
     InvalidIndex(String),
-    /// Vector index out of bounds (single-element access V[i]).
     IndexOutOfBounds { index: usize, length: usize },
-    /// Property not supported on this value (e.g. vector has no property with that name).
     UnknownProperty(String),
-    /// Method not supported on this value (e.g. vector has no method with that name).
     UnknownMethod(String),
-    /// Reduction (mean, min, max, variance, stddev) on an empty vector is undefined.
     EmptyVectorReduction(String),
-    /// Built-in function received an invalid argument (e.g. sqrt of negative).
     InvalidArgument(String),
+}
+
+/// Errors that can occur when running a snaq-lite expression.
+/// Carries an optional source span for runtime errors (e.g. division by zero at a specific `/`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunError {
+    pub span: Option<Span>,
+    pub kind: RunErrorKind,
+}
+
+impl RunError {
+    /// Build a runtime error with no location.
+    pub fn new(kind: RunErrorKind) -> Self {
+        Self { span: None, kind }
+    }
+
+    /// Build a runtime error at a source location.
+    pub fn at(span: Span, kind: RunErrorKind) -> Self {
+        Self {
+            span: Some(span),
+            kind,
+        }
+    }
+
+    /// Attach a span to an existing error (e.g. when propagating from a subcall).
+    pub fn with_span(mut self, span: Span) -> Self {
+        self.span = Some(span);
+        self
+    }
 }
 
 /// Parse error for expression strings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub message: String,
+    pub span: Option<Span>,
 }
 
 impl ParseError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            span: None,
         }
+    }
+
+    pub fn with_span(message: impl Into<String>, span: Span) -> Self {
+        Self {
+            message: message.into(),
+            span: Some(span),
+        }
+    }
+
+    /// Format error with optional source for line/column, snippet, and squiggle under the error span.
+    pub fn format_with_source(&self, source: Option<&str>) -> String {
+        let mut out = String::new();
+        if let Some(span) = self.span {
+            if let Some(s) = source {
+                let (line, col) = span.line_col(s);
+                out.push_str(&format!("parse error at line {line}, column {col}: "));
+            } else {
+                out.push_str(&format!("parse error at byte {}-{}: ", span.start, span.end));
+            }
+        } else {
+            out.push_str("parse error: ");
+        }
+        out.push_str(&self.message);
+        if let (Some(span), Some(s)) = (self.span, source) {
+            if let Some((line_content, squiggle_line)) = span.snippet_with_squiggle(s) {
+                out.push_str("\n\n");
+                let (line, _col) = span.line_col(s);
+                let line_num_width = (line.max(1)).to_string().len();
+                let padding = " ".repeat(line_num_width);
+                out.push_str(&format!("  {padding} |\n"));
+                out.push_str(&format!("  {line} | {line_content}\n"));
+                out.push_str(&format!("  {padding} | {squiggle_line}\n"));
+            }
+        }
+        out
     }
 }
 
 impl From<ParseError> for RunError {
     fn from(e: ParseError) -> Self {
-        RunError::Parse(e)
+        RunError {
+            span: e.span,
+            kind: RunErrorKind::Parse(e),
+        }
     }
+}
+
+impl From<RunErrorKind> for RunError {
+    fn from(kind: RunErrorKind) -> Self {
+        RunError::new(kind)
+    }
+}
+
+/// Format a run error for display. When source is provided, includes line/column and
+/// a snippet with squiggle for both parse and runtime errors (when span is present).
+pub fn format_run_error_with_source(err: &RunError, source: Option<&str>) -> String {
+    if let RunErrorKind::Parse(pe) = &err.kind {
+        return pe.format_with_source(source);
+    }
+    let msg = format!("{err}");
+    let span = err.span;
+    if let (Some(span), Some(s)) = (span, source) {
+        if let Some((line_content, squiggle_line)) = span.snippet_with_squiggle(s) {
+            let (line, col) = span.line_col(s);
+            let line_num_width = (line.max(1)).to_string().len();
+            let padding = " ".repeat(line_num_width);
+            return format!(
+                "at line {line}, column {col}: {msg}\n\n  {padding} |\n  {line} | {line_content}\n  {padding} | {squiggle_line}\n"
+            );
+        }
+    }
+    msg
 }
 
 impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RunError::Parse(e) => write!(f, "parse error: {}", e.message),
-            RunError::UnknownUnit(name) => write!(f, "unknown unit: {name}"),
-            RunError::DimensionMismatch { left, right } => {
+        match &self.kind {
+            RunErrorKind::Parse(e) => write!(f, "{e}"),
+            RunErrorKind::UnknownUnit(name) => write!(f, "unknown unit: {name}"),
+            RunErrorKind::DimensionMismatch { left, right } => {
                 write!(f, "dimension mismatch: {left} vs {right}")
             }
-            RunError::DivisionByZero => write!(f, "division by zero"),
-            RunError::SymbolHasNoValue(name) => {
+            RunErrorKind::DivisionByZero => write!(f, "division by zero"),
+            RunErrorKind::SymbolHasNoValue(name) => {
                 write!(f, "symbol '{name}' has no numeric value")
             }
-            RunError::UnknownFunction(name) => write!(f, "unknown function: {name}"),
-            RunError::ExpectedAngle { actual } => {
+            RunErrorKind::UnknownFunction(name) => write!(f, "unknown function: {name}"),
+            RunErrorKind::ExpectedAngle { actual } => {
                 write!(f, "expected angle (rad or degree), got ")?;
                 if actual.is_scalar() {
                     write!(f, "(dimensionless)")?;
@@ -96,63 +219,63 @@ impl std::fmt::Display for RunError {
                 }
                 Ok(())
             }
-            RunError::UnsupportedVectorOperation => {
+            RunErrorKind::UnsupportedVectorOperation => {
                 write!(f, "operation not supported for vector (expected scalar)")
             }
-            RunError::ExpectedVector => {
+            RunErrorKind::ExpectedVector => {
                 write!(f, "transpose (') requires a vector (got scalar or symbolic)")
             }
-            RunError::VectorLengthMismatch { left_len, right_len } => {
+            RunErrorKind::VectorLengthMismatch { left_len, right_len } => {
                 write!(
                     f,
                     "vector length mismatch: left has {left_len} elements, right has {right_len}"
                 )
             }
-            RunError::BooleanResult => {
+            RunErrorKind::BooleanResult => {
                 write!(f, "result is boolean (e.g. comparison), cannot convert to quantity")
             }
-            RunError::ExpectedCondition => {
+            RunErrorKind::ExpectedCondition => {
                 write!(f, "if condition must evaluate to true, false, or uncertain (got number or symbolic)")
             }
-            RunError::IfBranchTypeMismatch => {
+            RunErrorKind::IfBranchTypeMismatch => {
                 write!(f, "if branches must both be numeric or symbolic (cannot blend boolean or vector)")
             }
-            RunError::TildeRequiresNumeric => {
+            RunErrorKind::TildeRequiresNumeric => {
                 write!(f, "both sides of ~ (explicit precision) must be numeric")
             }
-            RunError::PrecisionMustBePositive => {
+            RunErrorKind::PrecisionMustBePositive => {
                 write!(f, "precision (right side of ~) must be strictly positive")
             }
-            RunError::UndefinedResult => {
+            RunErrorKind::UndefinedResult => {
                 write!(f, "result is undefined (e.g. empty block), cannot convert to quantity")
             }
-            RunError::BindingValueNotSupported(msg) => {
+            RunErrorKind::BindingValueNotSupported(msg) => {
                 write!(f, "variable binding: {msg}")
             }
-            RunError::CannotObfuscateBuiltin(name) => {
+            RunErrorKind::CannotObfuscateBuiltin(name) => {
                 write!(f, "cannot shadow built-in function: {name}")
             }
-            RunError::InvalidIndex(msg) => write!(f, "invalid index: {msg}"),
-            RunError::IndexOutOfBounds { index, length } => {
+            RunErrorKind::InvalidIndex(msg) => write!(f, "invalid index: {msg}"),
+            RunErrorKind::IndexOutOfBounds { index, length } => {
                 write!(f, "index {index} out of bounds (vector length {length})")
             }
-            RunError::UnknownProperty(name) => {
+            RunErrorKind::UnknownProperty(name) => {
                 write!(f, "unknown property: {name}")
             }
-            RunError::UnknownMethod(name) => {
+            RunErrorKind::UnknownMethod(name) => {
                 write!(f, "unknown method: {name}")
             }
-            RunError::EmptyVectorReduction(method) => {
+            RunErrorKind::EmptyVectorReduction(method) => {
                 write!(f, "empty vector: {method} requires at least one element")
             }
-            RunError::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
+            RunErrorKind::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
         }
     }
 }
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
+        write!(f, "{}", self.format_with_source(None))
     }
 }
 

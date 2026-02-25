@@ -2,7 +2,7 @@
 //! Used for results like "6 + π" or "2*π m". Supports simplification (collect like terms) and substitution to f64.
 //! Value is the unified result type (Numeric or Symbolic).
 
-use crate::error::RunError;
+use crate::error::{RunError, RunErrorKind};
 use crate::fuzzy::FuzzyBool;
 use crate::quantity::Quantity;
 use crate::symbol_registry::SymbolRegistry;
@@ -388,7 +388,11 @@ impl SymbolicExpr {
                 let av = a.substitute_or_err(registry)?;
                 let bv = b.substitute_or_err(registry)?;
                 if bv == 0.0 {
-                    Err("division by zero".to_string())
+                    if av == 0.0 {
+                        Err("division by zero".to_string()) // 0/0 → indeterminate
+                    } else {
+                        Ok(av / bv) // nonzero/0 → ±∞ in Rust
+                    }
                 } else {
                     Ok(av / bv)
                 }
@@ -565,9 +569,9 @@ impl SymbolicQuantity {
             .map(|v| crate::quantity::Quantity::new(v, self.unit.clone()))
             .map_err(|s| {
                 if s == "division by zero" {
-                    RunError::DivisionByZero
+                    RunError::new(RunErrorKind::DivisionByZero)
                 } else {
-                    RunError::SymbolHasNoValue(s)
+                    RunError::new(RunErrorKind::SymbolHasNoValue(s))
                 }
             })
     }
@@ -621,16 +625,16 @@ impl Value {
             Value::Numeric(q) => Ok(q.clone()),
             Value::Symbolic(sq) => {
                 if sq.expr.is_comparison() {
-                    return Err(RunError::BooleanResult);
+                    return Err(RunError::new(RunErrorKind::BooleanResult));
                 }
                 sq.substitute_or_err(registry)
             }
-            Value::FuzzyBool(_) => Err(RunError::BooleanResult),
-            Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
-            Value::Undefined => Err(RunError::UndefinedResult),
-            Value::Function(_) | Value::BuiltinFunction(_) => Err(RunError::BindingValueNotSupported(
+            Value::FuzzyBool(_) => Err(RunError::new(RunErrorKind::BooleanResult)),
+            Value::Vector(_) => Err(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
+            Value::Undefined => Err(RunError::new(RunErrorKind::UndefinedResult)),
+            Value::Function(_) | Value::BuiltinFunction(_) => Err(RunError::new(RunErrorKind::BindingValueNotSupported(
                 "function value cannot be converted to quantity".to_string(),
-            )),
+            ))),
         }
     }
 
@@ -640,10 +644,10 @@ impl Value {
         registry: &SymbolRegistry,
     ) -> Result<f64, RunError> {
         let q = self.to_quantity(registry)?;
-        q.as_scalar().map_err(|_| RunError::DimensionMismatch {
+        q.as_scalar().map_err(|_| RunError::new(RunErrorKind::DimensionMismatch {
             left: q.unit().clone(),
             right: Unit::scalar(),
-        })
+        }))
     }
 }
 

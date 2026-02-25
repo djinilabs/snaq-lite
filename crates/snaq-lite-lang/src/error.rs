@@ -40,6 +40,10 @@ pub enum RunError {
     InvalidIndex(String),
     /// Vector index out of bounds (single-element access V[i]).
     IndexOutOfBounds { index: usize, length: usize },
+    /// Property not supported on this value (e.g. vector has no property with that name).
+    UnknownProperty(String),
+    /// Method not supported on this value (e.g. vector has no method with that name).
+    UnknownMethod(String),
 }
 
 /// Parse error for expression strings.
@@ -127,6 +131,12 @@ impl std::fmt::Display for RunError {
             RunError::InvalidIndex(msg) => write!(f, "invalid index: {msg}"),
             RunError::IndexOutOfBounds { index, length } => {
                 write!(f, "index {index} out of bounds (vector length {length})")
+            }
+            RunError::UnknownProperty(name) => {
+                write!(f, "unknown property: {name}")
+            }
+            RunError::UnknownMethod(name) => {
+                write!(f, "unknown method: {name}")
             }
         }
     }

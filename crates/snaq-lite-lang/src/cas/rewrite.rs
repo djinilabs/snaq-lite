@@ -121,6 +121,20 @@ fn rewrite_rec(
             let new_index = rewrite_rec(pool, out, *index, registry)?;
             Ok(out.intern(ExprNode::Index(new_base, new_index)))
         }
+        ExprNode::Member(base, name) => {
+            let new_base = rewrite_rec(pool, out, *base, registry)?;
+            Ok(out.intern(ExprNode::Member(new_base, name.clone())))
+        }
+        ExprNode::MethodCall(base, name, args) => {
+            let new_base = rewrite_rec(pool, out, *base, registry)?;
+            let new_args: Vec<(Option<String>, ExprId)> = args
+                .iter()
+                .map(|(n, id)| {
+                    rewrite_rec(pool, out, *id, registry).map(|new_id| (n.clone(), new_id))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(out.intern(ExprNode::MethodCall(new_base, name.clone(), new_args)))
+        }
         ExprNode::Eq(l, r) => {
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;

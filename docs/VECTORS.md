@@ -70,6 +70,19 @@ Same **dimension** (or type) is required where applicable (e.g. element-wise ari
 - **Effect:** The base expression must evaluate to a **vector**. The index is 0-based. The result is the **single element** at that index (a scalar value, not a one-element vector). If the index is out of bounds, the runtime returns **index out of bounds**. The index must be a non-negative integer (numeric); otherwise the runtime returns **invalid index**.
 - **Examples:** `[1, 2, 3, 4][2]` → `3`; `[1, 2, 3, 4].0` → `1`; `[1, 2, 3, 4].1` → `2`.
 
+### Properties and methods (dot notation)
+
+Vectors support **properties** (no arguments) and **methods** (with arguments) using the `.` notation. The base expression must evaluate to a vector; otherwise the runtime returns **transpose requires a vector** (or equivalent).
+
+- **Properties**
+  - **`V.length`** — number of elements (0-based count). Example: `[1, 2, 3].length` → `3`; `[].length` → `0`.
+
+- **Methods**
+  - **`V.map(fn (x) => body)`** — returns a vector where each element is the result of applying the function to the corresponding element. The function must take one parameter. Example: `[1, 2, 3].map(fn (x) => (x+1))` → `[2, 3, 4]`. Evaluation is **eager**: all elements are computed when `.map` is called. The function body can use variables from the surrounding scope (closure).
+  - **`V.take(start, length)`** — same as the built-in `take(V, start, length)`: returns a streaming slice from index `start` (0-based) with up to `length` elements. Example: `[1, 2, 3, 4].take(1, 2)` → `[2, 3]`.
+
+Numeric index access (e.g. `V.0`, `V.1`) is unchanged: use a **number** after the dot for single-element access; use an **identifier** (e.g. `length`, `map`) for property or method access. Unknown property or method names return **unknown property** or **unknown method**.
+
 ## Display
 
 Vectors are displayed in a list-like form, e.g. `[1, 2, 3]` or `[1 m, 2 m]`. Nested vectors may be shown with nested brackets. If the language supports sparse or undefined elements, they may be shown as `?`.

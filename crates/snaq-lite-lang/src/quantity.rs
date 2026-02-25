@@ -203,6 +203,14 @@ impl Quantity {
         }
     }
 
+    /// Dimensionless quantity with zero variance (e.g. exact counts like vector length).
+    pub fn from_exact_scalar(value: f64) -> Self {
+        Self {
+            number: SnaqNumber::new(value, 0.0),
+            unit: Unit::scalar(),
+        }
+    }
+
     /// Numeric value (mean).
     pub fn value(&self) -> f64 {
         self.number.value()

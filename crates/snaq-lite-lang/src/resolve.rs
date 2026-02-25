@@ -120,6 +120,23 @@ pub fn resolve(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, RunErro
             let index = resolve(*index, registry)?;
             Ok(ExprDef::Index(Box::new(base), Box::new(index)))
         }
+        ExprDef::Member(base, name) => {
+            let base = resolve(*base, registry)?;
+            Ok(ExprDef::Member(Box::new(base), name))
+        }
+        ExprDef::MethodCall(base, name, args) => {
+            let base = resolve(*base, registry)?;
+            let args = args
+                .into_iter()
+                .map(|arg| {
+                    Ok(match arg {
+                        CallArg::Positional(e) => CallArg::Positional(Box::new(resolve(*e, registry)?)),
+                        CallArg::Named(n, e) => CallArg::Named(n, Box::new(resolve(*e, registry)?)),
+                    })
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            Ok(ExprDef::MethodCall(Box::new(base), name, args))
+        }
         ExprDef::If(cond, then_b, else_b) => {
             let cond = resolve(*cond, registry)?;
             let then_b = resolve(*then_b, registry)?;
@@ -192,6 +209,8 @@ fn resolve_unit_expr(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, R
         | ExprDef::VecLiteral(..)
         | ExprDef::Transpose(..)
         | ExprDef::Index(..)
+        | ExprDef::Member(..)
+        | ExprDef::MethodCall(..)
         | ExprDef::If(..)
         | ExprDef::Block(..) => Err(RunError::UnknownUnit(
             "as: right side must be a unit or composed units (e.g. m, meters per second)".to_string(),

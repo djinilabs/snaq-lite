@@ -16,7 +16,7 @@ The language combines **numeric quantities with units** (SI and common derivativ
 - **Comparisons** — `==`, `!=`, `<`, `<=`, `>`, `>=` (same dimension). Result is a **FuzzyBool**: `true`, `false`, or `uncertain(prob)` when variance matters. Vectors: element-wise, outer, or row×column reduction.
 - **Variables and blocks** — Immutable bindings `name = expression`; blocks `{ ... }` with multiple expressions (newline or `;`). Result = last expression (or last binding’s RHS). See [docs/VARIABLE_BINDINGS.md](docs/VARIABLE_BINDINGS.md) and [docs/BLOCKS_AND_EXPRESSIONS.md](docs/BLOCKS_AND_EXPRESSIONS.md).
 - **Conditionals** — `if condition then expr else expr`; condition must be FuzzyBool. Crisp true/false evaluate one branch; uncertain conditions blend both branches (numeric or symbolic).
-- **Vectors** — Literals `[ expr, ... ]`, postfix transpose `'`. Vector×scalar maps; vector×vector by orientation (element-wise, outer, dot). Display as `[e1, e2, ...]`.
+- **Vectors** — Literals `[ expr, ... ]`, postfix transpose `'`. Property `.length`; methods `.map(fn (x) => body)` and `.take(start, length)`. Vector×scalar maps; vector×vector by orientation (element-wise, outer, dot). Display as `[e1, e2, ...]`.
 - **Functions** — Built-ins: `sin`, `cos`, `tan` (one argument, angle); `max`, `min` (two same-dimension args). You can define your own with `fn (params) => body` or `fn name(params) => body`; optional default parameters, block bodies, and closures. Positional and named arguments (e.g. `max(a: 1, b: 2)`). See [docs/FUNCTIONS.md](docs/FUNCTIONS.md).
 
 ---

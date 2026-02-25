@@ -44,6 +44,10 @@ The body of a function can use variables from the scope where the function was d
 
 When the result of a program (or block) is a function value—for example, when the last expression is a function definition—it displays as `<function>` and cannot be converted to a numeric quantity.
 
+### Vector `.map`
+
+The vector method `V.map(fn (x) => body)` requires its argument to be a **function of exactly one parameter**. Passing a function with zero or two-or-more parameters (e.g. `[1, 2].map(fn (a, b) => (a+b))`) yields an error. See [VECTORS.md](VECTORS.md) for vector properties and methods.
+
 ## Call syntax
 
 - **Form:** `name ( arg1, arg2, ... )` — the identifier must be immediately followed by `(` so the parser treats it as a function call (see [SYNTAX.md](SYNTAX.md)).

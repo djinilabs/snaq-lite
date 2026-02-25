@@ -13,6 +13,8 @@ pub enum Tok {
     Ident(String),
     /// Identifier that is immediately followed by "(" (function call).
     FuncIdent(String),
+    /// Identifier after "." that is immediately followed by "(" (method call, e.g. V.map(...)).
+    MethodIdent(String),
     LParen,
     RParen,
     Plus,
@@ -83,6 +85,8 @@ pub struct Lexer<'input> {
     last_was_number: bool,
     /// True after we have returned at least one token; so ".5" at start of input is Num (no token yet) and "[1,2].0" gets Dot after ].
     any_token_emitted: bool,
+    /// True after emitting Dot; so ". map (" yields MethodIdent("map") and ". length" yields Ident("length").
+    after_dot: bool,
 }
 
 impl<'input> Lexer<'input> {
@@ -92,6 +96,7 @@ impl<'input> Lexer<'input> {
             pos: 0,
             last_was_number: false,
             any_token_emitted: false,
+            after_dot: false,
         }
     }
 
@@ -316,12 +321,15 @@ impl<'input> Iterator for Lexer<'input> {
                 self.pos -= c.len_utf8(); // put back
                 if let Some(s) = self.take_ident() {
                     let next_non_space = self.peek_next_non_space();
-                    let tok = if next_non_space == Some('(') {
+                    let tok = if self.after_dot && next_non_space == Some('(') {
+                        Tok::MethodIdent(s)
+                    } else if next_non_space == Some('(') {
                         Tok::FuncIdent(s)
                     } else {
                         Tok::Ident(s)
                     };
                     self.last_was_number = false;
+                    self.after_dot = false;
                     tok
                 } else {
                     return None;
@@ -343,6 +351,7 @@ impl<'input> Iterator for Lexer<'input> {
                     }
                 } else {
                     self.last_was_number = false;
+                    self.after_dot = true;
                     Tok::Dot
                 }
             }
@@ -362,6 +371,7 @@ impl<'input> Iterator for Lexer<'input> {
         };
         self.last_was_number = matches!(&tok, Tok::Num(_));
         self.any_token_emitted = true;
+        self.after_dot = matches!(&tok, Tok::Dot);
         let end = self.pos;
         Some(Ok((start, tok, end)))
     }

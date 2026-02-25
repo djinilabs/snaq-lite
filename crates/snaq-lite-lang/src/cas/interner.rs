@@ -30,6 +30,10 @@ pub enum ExprNode {
     Transpose(ExprId),
     /// Index/single-element access: base id, index id. Pass-through in CAS.
     Index(ExprId, ExprId),
+    /// Property access: base id, property name. Pass-through in CAS.
+    Member(ExprId, String),
+    /// Method call: base id, method name, args. Pass-through in CAS.
+    MethodCall(ExprId, String, Vec<(Option<String>, ExprId)>),
     /// Comparison: ==, !=, <, <=, >, >=. Result is FuzzyBool (LitFuzzyBool when constant-folded).
     Eq(ExprId, ExprId),
     Ne(ExprId, ExprId),

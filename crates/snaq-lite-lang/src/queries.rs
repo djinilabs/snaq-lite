@@ -71,9 +71,11 @@ impl futures::stream::Stream for EmptyVectorStream {
 impl std::marker::Unpin for EmptyVectorStream {}
 
 /// Stream that applies a [VectorMapOp] to each element of an inner stream.
+/// When op is [VectorMapOp::UserMap], [db] is used to evaluate the user function per element.
 pub struct MappedVectorStream<'a> {
     inner: Box<VectorStream<'a>>,
     op: VectorMapOp,
+    db: Option<&'a dyn salsa::Database>,
 }
 
 impl<'a> futures::stream::Stream for MappedVectorStream<'a> {
@@ -86,7 +88,9 @@ impl<'a> futures::stream::Stream for MappedVectorStream<'a> {
         let this = self.get_mut();
         match Pin::new(this.inner.as_mut()).poll_next(cx) {
             Poll::Ready(Some(Ok(opt_elem))) => {
-                let result = with_registry(|registry| apply_map_op(&this.op, opt_elem, registry));
+                let result = with_registry(|registry| {
+                    apply_map_op(this.db, &this.op, opt_elem, registry)
+                });
                 Poll::Ready(Some(result))
             }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
@@ -507,7 +511,33 @@ impl std::marker::Unpin for VectorStream<'_> {}
 
 /// Apply a vector map op to one element. For `None` (sparse slot) returns `Ok(None)`.
 /// Used by [MappedVectorStream] when streaming a [LazyVector::Map].
+/// Invoke a user function with a single argument (used by [VectorMapOp::UserMap] per element).
+fn apply_user_map_element(
+    db: &dyn salsa::Database,
+    id: user_function::UserFunctionId,
+    elem: Value,
+    _registry: &UnitRegistry,
+) -> Result<Value, RunError> {
+    let uf = user_function::get(id).ok_or_else(|| {
+        RunError::UnknownFunction("user function not found (wrong thread or stale id)".to_string())
+    })?;
+    if uf.params.len() != 1 {
+        return Err(RunError::UnknownFunction(format!(
+            "map requires a function of one parameter (got {} parameters)",
+            uf.params.len()
+        )));
+    }
+    let param_name = uf.params[0].0.clone();
+    let stored = StoredValue::from_value(&elem)
+        .map_err(|_| RunError::BindingValueNotSupported("map: function parameter value cannot be stored".to_string()))?;
+    let env = uf.closure_env.extend(param_name, stored);
+    let scope = Scope::new(db, env);
+    let body_expr = build_expression(db, *uf.body.clone());
+    value(db, scope, body_expr)
+}
+
 fn apply_map_op(
+    db: Option<&dyn salsa::Database>,
     op: &VectorMapOp,
     elem: Option<Value>,
     registry: &UnitRegistry,
@@ -530,6 +560,12 @@ fn apply_map_op(
         VectorMapOp::Le(scalar) => cmp_values(CmpOp::Le, &v, scalar, registry, None)?,
         VectorMapOp::Gt(scalar) => cmp_values(CmpOp::Gt, &v, scalar, registry, None)?,
         VectorMapOp::Ge(scalar) => cmp_values(CmpOp::Ge, &v, scalar, registry, None)?,
+        VectorMapOp::UserMap(id) => {
+            let db = db.ok_or_else(|| {
+                RunError::UnknownFunction("internal: db required for UserMap".to_string())
+            })?;
+            apply_user_map_element(db, *id, v, registry)?
+        }
     };
     Ok(Some(result))
 }
@@ -608,6 +644,7 @@ pub fn vector_into_stream<'db>(
             VectorStream::Mapped(MappedVectorStream {
                 inner: Box::new(inner),
                 op,
+                db: Some(db),
             })
         }
         LazyVector::FromExprs(_) | LazyVector::Transform { .. } => {
@@ -757,6 +794,21 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
             let base_expr = build_expression(db, *base);
             let index_expr = build_expression(db, *index);
             ExprData::Index(base_expr, index_expr)
+        }
+        ExprDef::Member(base, name) => {
+            let base_expr = build_expression(db, *base);
+            ExprData::Member(base_expr, name)
+        }
+        ExprDef::MethodCall(base, name, args) => {
+            let base_expr = build_expression(db, *base);
+            let arg_exprs: Vec<(Option<String>, Expression<'_>)> = args
+                .into_iter()
+                .map(|arg| match arg {
+                    CallArg::Positional(e) => (None, build_expression(db, *e)),
+                    CallArg::Named(n, e) => (Some(n), build_expression(db, *e)),
+                })
+                .collect();
+            ExprData::MethodCall(base_expr, name, arg_exprs)
         }
         ExprDef::If(cond, then_b, else_b) => {
             let cond_expr = build_expression(db, *cond);
@@ -972,6 +1024,114 @@ pub fn value<'db>(
                 _ => Err(RunError::ExpectedVector),
             }
         }
+        ExprData::Member(base, name) => {
+            let base_val = value(db, scope, *base)?;
+            let VectorValue { inner, .. } = match &base_val {
+                Value::Vector(v) => v.clone(),
+                _ => return Err(RunError::ExpectedVector),
+            };
+            match name.as_str() {
+                "length" => {
+                    let collected = collect_vector_stream(db, inner);
+                    let len = collected.len();
+                    Ok(Value::Numeric(Quantity::from_exact_scalar(len as f64)))
+                }
+                _ => Err(RunError::UnknownProperty(name.clone())),
+            }
+        }
+        ExprData::MethodCall(base, name, args) => {
+            let base_val = value(db, scope, *base)?;
+            let VectorValue { inner, orientation } = match &base_val {
+                Value::Vector(v) => v.clone(),
+                _ => return Err(RunError::ExpectedVector),
+            };
+            match name.as_str() {
+                "take" => {
+                    let arg_vals: Vec<Value> = args
+                        .iter()
+                        .map(|(_, e)| value(db, scope, *e))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if arg_vals.len() != 2 {
+                        return Err(RunError::UnknownMethod(format!(
+                            "take requires 2 arguments (start, length), got {}",
+                            arg_vals.len()
+                        )));
+                    }
+                    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+                    let start_q = arg_vals[0].to_quantity(&sym_reg).map_err(|_| {
+                        RunError::InvalidIndex("take start must be numeric".to_string())
+                    })?;
+                    let length_q = arg_vals[1].to_quantity(&sym_reg).map_err(|_| {
+                        RunError::InvalidIndex("take length must be numeric".to_string())
+                    })?;
+                    let start_f = start_q.value();
+                    let length_f = length_q.value();
+                    if !start_f.is_finite() || start_f < 0.0 {
+                        return Err(RunError::InvalidIndex(
+                            "take start must be a non-negative integer".to_string(),
+                        ));
+                    }
+                    if !length_f.is_finite() || length_f < 0.0 {
+                        return Err(RunError::InvalidIndex(
+                            "take length must be a non-negative integer".to_string(),
+                        ));
+                    }
+                    let start_u = start_f as usize;
+                    let length_u = length_f as usize;
+                    Ok(Value::Vector(VectorValue {
+                        inner: LazyVector::Take {
+                            source: Box::new(inner),
+                            start: start_u,
+                            length: length_u,
+                        },
+                        orientation,
+                    }))
+                }
+                "map" => {
+                    if args.len() != 1 {
+                        return Err(RunError::UnknownMethod(format!(
+                            "map requires 1 argument (a function), got {}",
+                            args.len()
+                        )));
+                    }
+                    let (_, fn_expr) = &args[0];
+                    let fn_val = value(db, scope, *fn_expr)?;
+                    let id = match &fn_val {
+                        Value::Function(id) => *id,
+                        _ => {
+                            return Err(RunError::UnknownMethod(
+                                "map requires a function (e.g. fn (x) => (x+1))".to_string(),
+                            ))
+                        }
+                    };
+                    // Eager evaluation: we're inside a Salsa query, so we can call value() for each element.
+                    // Streaming UserMap would require value() from outside a query (in stream poll), which Salsa forbids.
+                    let collected = collect_vector_stream(db, inner);
+                    let registry = crate::unit_registry::default_si_registry();
+                    let results: Vec<Result<Option<Value>, RunError>> = collected
+                        .into_iter()
+                        .map(|r| {
+                            r.and_then(|opt| {
+                                opt.map(|elem| {
+                                    apply_user_map_element(db, id, elem, &registry)
+                                        .map(Some)
+                                })
+                                .unwrap_or(Ok(None))
+                            })
+                        })
+                        .collect();
+                    let ok_results: Vec<Option<Value>> = results
+                        .into_iter()
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let results = ok_results.into_iter().map(Ok).collect();
+                    Ok(Value::Vector(VectorValue {
+                        inner: LazyVector::FromEvaluated(results),
+                        orientation,
+                    }))
+                }
+                _ => Err(RunError::UnknownMethod(name.clone())),
+            }
+        }
         ExprData::Index(base, index_expr) => {
             let base_val = value(db, scope, *base)?;
             let VectorValue { inner, .. } = match &base_val {
@@ -1170,6 +1330,23 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
         ExprData::Index(base, index) => ExprDef::Index(
             Box::new(expression_to_def(db, *base)),
             Box::new(expression_to_def(db, *index)),
+        ),
+        ExprData::Member(base, name) => ExprDef::Member(
+            Box::new(expression_to_def(db, *base)),
+            name.clone(),
+        ),
+        ExprData::MethodCall(base, name, args) => ExprDef::MethodCall(
+            Box::new(expression_to_def(db, *base)),
+            name.clone(),
+            args.iter()
+                .map(|(opt_n, e)| {
+                    if let Some(n) = opt_n {
+                        CallArg::Named(n.clone(), Box::new(expression_to_def(db, *e)))
+                    } else {
+                        CallArg::Positional(Box::new(expression_to_def(db, *e)))
+                    }
+                })
+                .collect(),
         ),
         ExprData::WithPrecision(l, r) => ExprDef::WithPrecision(
             Box::new(expression_to_def(db, *l)),

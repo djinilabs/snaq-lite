@@ -13,6 +13,7 @@
 use crate::error::RunError;
 use crate::ir::ExprDef;
 use crate::symbolic::Value;
+use crate::user_function;
 use futures::stream::{self, Stream};
 use std::fmt;
 
@@ -100,6 +101,8 @@ pub enum VectorMapOp {
     Le(Box<Value>),
     Gt(Box<Value>),
     Ge(Box<Value>),
+    /// User-defined function applied to each element (e.g. from V.map(fn x => x+1)).
+    UserMap(user_function::UserFunctionId),
 }
 
 /// Binary operation for vector–vector (zip element-wise or outer product).

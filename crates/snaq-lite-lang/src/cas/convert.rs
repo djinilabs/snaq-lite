@@ -65,6 +65,24 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
             let index_id = expr_def_to_interned(index, pool);
             pool.intern(ExprNode::Index(base_id, index_id))
         }
+        ExprDef::Member(base, name) => {
+            let base_id = expr_def_to_interned(base, pool);
+            pool.intern(ExprNode::Member(base_id, name.clone()))
+        }
+        ExprDef::MethodCall(base, name, args) => {
+            let base_id = expr_def_to_interned(base, pool);
+            let arg_ids: Vec<(Option<String>, ExprId)> = args
+                .iter()
+                .map(|arg| {
+                    let (name_opt, def) = match arg {
+                        CallArg::Positional(e) => (None, e.as_ref()),
+                        CallArg::Named(n, e) => (Some(n.clone()), e.as_ref()),
+                    };
+                    (name_opt, expr_def_to_interned(def, pool))
+                })
+                .collect();
+            pool.intern(ExprNode::MethodCall(base_id, name.clone(), arg_ids))
+        }
         ExprDef::Eq(l, r) => {
             let lid = expr_def_to_interned(l, pool);
             let rid = expr_def_to_interned(r, pool);
@@ -191,6 +209,27 @@ pub fn interned_to_expr_def(pool: &ExprInterner, id: ExprId) -> ExprDef {
             Box::new(interned_to_expr_def(pool, *base)),
             Box::new(interned_to_expr_def(pool, *index)),
         ),
+        ExprNode::Member(base_id, name) => ExprDef::Member(
+            Box::new(interned_to_expr_def(pool, *base_id)),
+            name.clone(),
+        ),
+        ExprNode::MethodCall(base_id, name, args) => {
+            let args: Vec<CallArg> = args
+                .iter()
+                .map(|(name_opt, id)| {
+                    let e = interned_to_expr_def(pool, *id);
+                    match name_opt {
+                        None => CallArg::Positional(Box::new(e)),
+                        Some(n) => CallArg::Named(n.clone(), Box::new(e)),
+                    }
+                })
+                .collect();
+            ExprDef::MethodCall(
+                Box::new(interned_to_expr_def(pool, *base_id)),
+                name.clone(),
+                args,
+            )
+        }
         ExprNode::Eq(l, r) => ExprDef::Eq(
             Box::new(interned_to_expr_def(pool, *l)),
             Box::new(interned_to_expr_def(pool, *r)),

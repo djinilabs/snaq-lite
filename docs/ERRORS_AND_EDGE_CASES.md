@@ -22,6 +22,9 @@ This document lists the main error conditions and edge cases you may encounter w
 | **Transpose requires a vector** | The postfix `'` was applied to a non-vector (e.g. a scalar or symbolic expression). |
 | **Invalid index** | A vector index (e.g. `V[i]` or `take(V, start, length)`) used a non-numeric, negative, or non-finite value for the index, start, or length. |
 | **Index out of bounds** | Single-element access `V[index]` or `V.0` was used with an index not less than the vector length. |
+| **Unknown property** | Property access (e.g. `V.length`) used a name that is not supported on the value. Vectors support only `length`. |
+| **Unknown method** | Method call (e.g. `V.map(...)`, `V.take(1, 2)`) used a name that is not supported on the value. Vectors support only `map` and `take`. Wrong number of arguments (e.g. `map` with no args or two) or non-callable argument (e.g. `map(1)`) also yields an error. |
+| **Property/method on non-vector** | Dot access for a property or method (e.g. `(1).length`, `x.map(fn (a)=>a)`) was applied to a non-vector (scalar or symbolic). The runtime returns an error that a vector was expected. |
 | **Vector length mismatch** | A vector operation (element-wise or similar) required two vectors of the same length; the lengths differed. |
 | **Boolean result** | You requested a numeric quantity but the result is a comparison (true/false/uncertain). |
 | **Expected condition** | The condition of `if ... then ... else ...` must evaluate to a boolean (true, false, or uncertain), not a number or symbolic expression. |

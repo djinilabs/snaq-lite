@@ -36,6 +36,15 @@ fn collect_bound_names(def: &ExprDef) -> HashSet<String> {
                 go(base, names);
                 go(index, names);
             }
+            ExprDef::Member(base, _) => go(base, names),
+            ExprDef::MethodCall(base, _, args) => {
+                go(base, names);
+                for arg in args {
+                    match arg {
+                        crate::ir::CallArg::Positional(e) | crate::ir::CallArg::Named(_, e) => go(e, names),
+                    }
+                }
+            }
             ExprDef::If(cond, then_b, else_b) => {
                 go(cond, names);
                 go(then_b, names);
@@ -159,6 +168,37 @@ fn substitute_symbols_inner(
             Box::new(substitute_symbols_inner(*base, symbol_registry, unit_registry, bound_names)?),
             Box::new(substitute_symbols_inner(*index, symbol_registry, unit_registry, bound_names)?),
         )),
+        ExprDef::Member(base, name) => Ok(ExprDef::Member(
+            Box::new(substitute_symbols_inner(*base, symbol_registry, unit_registry, bound_names)?),
+            name,
+        )),
+        ExprDef::MethodCall(base, name, args) => {
+            let args: Vec<crate::ir::CallArg> = args
+                .into_iter()
+                .map(|arg| {
+                    Ok(match arg {
+                        crate::ir::CallArg::Positional(e) => {
+                            crate::ir::CallArg::Positional(Box::new(
+                                substitute_symbols_inner(*e, symbol_registry, unit_registry, bound_names)?,
+                            ))
+                        }
+                        crate::ir::CallArg::Named(n, e) => {
+                            crate::ir::CallArg::Named(
+                                n,
+                                Box::new(substitute_symbols_inner(
+                                    *e, symbol_registry, unit_registry, bound_names,
+                                )?),
+                            )
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            Ok(ExprDef::MethodCall(
+                Box::new(substitute_symbols_inner(*base, symbol_registry, unit_registry, bound_names)?),
+                name,
+                args,
+            ))
+        }
         ExprDef::Eq(l, r) => Ok(ExprDef::Eq(
             Box::new(substitute_symbols_inner(*l, symbol_registry, unit_registry, bound_names)?),
             Box::new(substitute_symbols_inner(*r, symbol_registry, unit_registry, bound_names)?),

@@ -18,6 +18,8 @@ pub enum Rank {
     VecLiteral(Vec<Rank>),
     Transpose(Box<Rank>),
     Index(Box<Rank>, Box<Rank>),
+    Member(Box<Rank>, String),
+    MethodCall(Box<Rank>, String, Vec<Rank>),
     Eq(Box<Rank>, Box<Rank>),
     Ne(Box<Rank>, Box<Rank>),
     Lt(Box<Rank>, Box<Rank>),
@@ -45,17 +47,19 @@ fn tag_order(r: &Rank) -> u8 {
         Rank::VecLiteral(_) => 9,
         Rank::Transpose(_) => 10,
         Rank::Index(..) => 11,
-        Rank::Eq(..) => 12,
-        Rank::Ne(..) => 13,
-        Rank::Lt(..) => 14,
-        Rank::Le(..) => 15,
-        Rank::Gt(..) => 16,
-        Rank::Ge(..) => 17,
-        Rank::If(..) => 18,
-        Rank::WithPrecision(..) => 19,
-        Rank::Block(_) => 20,
-        Rank::Lambda(..) => 21,
-        Rank::CallExpr(..) => 22,
+        Rank::Member(..) => 12,
+        Rank::MethodCall(..) => 13,
+        Rank::Eq(..) => 14,
+        Rank::Ne(..) => 15,
+        Rank::Lt(..) => 16,
+        Rank::Le(..) => 17,
+        Rank::Gt(..) => 18,
+        Rank::Ge(..) => 19,
+        Rank::If(..) => 20,
+        Rank::WithPrecision(..) => 21,
+        Rank::Block(_) => 22,
+        Rank::Lambda(..) => 23,
+        Rank::CallExpr(..) => 24,
     }
 }
 
@@ -84,6 +88,10 @@ impl Ord for Rank {
             (Rank::VecLiteral(a), Rank::VecLiteral(b)) => a.cmp(b),
             (Rank::Transpose(a), Rank::Transpose(b)) => a.cmp(b),
             (Rank::Index(a1, a2), Rank::Index(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
+            (Rank::Member(a, an), Rank::Member(b, bn)) => a.cmp(b).then_with(|| an.cmp(bn)),
+            (Rank::MethodCall(a, an, aargs), Rank::MethodCall(b, bn, bargs)) => {
+                a.cmp(b).then_with(|| an.cmp(bn)).then_with(|| aargs.cmp(bargs))
+            }
             (Rank::Eq(a1, a2), Rank::Eq(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::Ne(a1, a2), Rank::Ne(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::Lt(a1, a2), Rank::Lt(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
@@ -151,6 +159,14 @@ pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
         ExprNode::Index(base, index) => Rank::Index(
             Box::new(rank(pool, *base)),
             Box::new(rank(pool, *index)),
+        ),
+        ExprNode::Member(base, name) => {
+            Rank::Member(Box::new(rank(pool, *base)), name.clone())
+        }
+        ExprNode::MethodCall(base, name, args) => Rank::MethodCall(
+            Box::new(rank(pool, *base)),
+            name.clone(),
+            args.iter().map(|(_, id)| rank(pool, *id)).collect(),
         ),
         ExprNode::Eq(l, r) => Rank::Eq(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
         ExprNode::Ne(l, r) => Rank::Ne(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
@@ -299,6 +315,18 @@ fn canonicalize_rec(
             let new_base = canonicalize_rec(pool, out, *base);
             let new_index = canonicalize_rec(pool, out, *index);
             out.intern(ExprNode::Index(new_base, new_index))
+        }
+        ExprNode::Member(base, name) => {
+            let new_base = canonicalize_rec(pool, out, *base);
+            out.intern(ExprNode::Member(new_base, name.clone()))
+        }
+        ExprNode::MethodCall(base, name, args) => {
+            let new_base = canonicalize_rec(pool, out, *base);
+            let new_args: Vec<(Option<String>, ExprId)> = args
+                .iter()
+                .map(|(n, id)| (n.clone(), canonicalize_rec(pool, out, *id)))
+                .collect();
+            out.intern(ExprNode::MethodCall(new_base, name.clone(), new_args))
         }
         ExprNode::Eq(l, r) => {
             let new_l = canonicalize_rec(pool, out, *l);

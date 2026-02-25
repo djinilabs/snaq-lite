@@ -1992,6 +1992,88 @@ mod tests {
     }
 
     #[test]
+    fn parse_vector_property_length() {
+        use crate::ir::ExprDef;
+        let r = parse("V.length").unwrap();
+        assert!(matches!(r, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Member(_, name) if name == "length")));
+    }
+
+    #[test]
+    fn parse_vector_method_map() {
+        use crate::ir::ExprDef;
+        let r = parse("V.map(fn (x) => (x+1))").unwrap();
+        assert!(matches!(r, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::MethodCall(_, name, _) if name == "map")));
+    }
+
+    #[test]
+    fn parse_vector_method_take() {
+        use crate::ir::ExprDef;
+        let r = parse("V.take(1, 3)").unwrap();
+        assert!(matches!(r, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::MethodCall(_, name, _) if name == "take")));
+    }
+
+    #[test]
+    fn run_vector_length() {
+        assert_eq!(run_format("[1, 2, 3].length").unwrap(), "3");
+        assert_eq!(run_format("[].length").unwrap(), "0");
+        assert_eq!(run_format("[1 m, 2 m].length").unwrap(), "2");
+        // Length is an exact count; variance should be 0.
+        let q = run_numeric("[1, 2, 3].length").unwrap();
+        assert_eq!(q.value(), 3.0);
+        assert_eq!(q.variance(), 0.0);
+    }
+
+    #[test]
+    fn run_vector_map_method() {
+        assert_eq!(run_format("[1, 2, 3].map(fn (x) => (x+1))").unwrap(), "[2, 3, 4]");
+        assert_eq!(run_format("[1, 2, 3].map(fn (x) => (x*2))").unwrap(), "[2, 4, 6]");
+    }
+
+    #[test]
+    fn run_vector_take_method() {
+        assert_eq!(run_format("[1, 2, 3, 4].take(1, 2)").unwrap(), "[2, 3]");
+        assert_eq!(run_format("[1, 2, 3, 4].take(0, 4)").unwrap(), "[1, 2, 3, 4]");
+    }
+
+    #[test]
+    fn run_vector_unknown_property() {
+        let e = run("[1, 2, 3].foo").unwrap_err();
+        assert!(matches!(e, RunError::UnknownProperty(name) if name == "foo"));
+    }
+
+    #[test]
+    fn run_vector_unknown_method() {
+        let e = run("[1, 2, 3].bar(1)").unwrap_err();
+        assert!(matches!(e, RunError::UnknownMethod(name) if name == "bar"));
+    }
+
+    #[test]
+    fn run_vector_member_on_non_vector() {
+        let e = run("(1).length").unwrap_err();
+        assert!(matches!(e, RunError::ExpectedVector));
+    }
+
+    #[test]
+    fn run_vector_map_requires_one_parameter() {
+        let e = run("[1, 2, 3].map(fn (a, b) => (a+b))").unwrap_err();
+        match &e {
+            RunError::UnknownFunction(msg) => assert!(
+                msg.contains("one parameter") && msg.contains("2"),
+                "expected message about one parameter, got: {}", msg
+            ),
+            _ => panic!("expected UnknownFunction, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn run_vector_map_with_closure() {
+        assert_eq!(
+            run_format("{ c = 10; [1, 2, 3].map(fn (x) => (x + c)) }").unwrap(),
+            "[11, 12, 13]"
+        );
+    }
+
+    #[test]
     fn run_vector_stream_yields_elements() {
         use crate::queries::{program, set_eval_registry, value, vector_into_stream};
         use crate::resolve;

@@ -102,6 +102,10 @@ pub enum ExprDef {
     Transpose(Box<ExprDef>),
     /// Index/single-element access: `V[index]` or `V.0`. Base must be vector; index 0-based; yields scalar.
     Index(Box<ExprDef>, Box<ExprDef>),
+    /// Property access: `V.length`. Base and property name; dispatch at eval (e.g. vector.length).
+    Member(Box<ExprDef>, String),
+    /// Method call: `V.map(fn)`, `V.take(1, 3)`. Base, method name, args; dispatch at eval.
+    MethodCall(Box<ExprDef>, String, Vec<CallArg>),
     /// Conditional: if condition then expression else expression. Condition must evaluate to FuzzyBool.
     If(Box<ExprDef>, Box<ExprDef>, Box<ExprDef>),
     /// Explicit precision: left ~ right => value from left with variance = (right.value())². Right must be > 0; right's variance is discarded.
@@ -157,6 +161,10 @@ pub enum ExprData<'db> {
     Transpose(Expression<'db>),
     /// Index/single-element access: base must be vector, index 0-based; yields scalar.
     Index(Expression<'db>, Expression<'db>),
+    /// Property access: base and property name (e.g. vector.length).
+    Member(Expression<'db>, String),
+    /// Method call: base, method name, args (e.g. vector.map(fn), vector.take(1, 3)).
+    MethodCall(Expression<'db>, String, Vec<(Option<String>, Expression<'db>)>),
     /// Conditional: condition, then_branch, else_branch.
     If(Expression<'db>, Expression<'db>, Expression<'db>),
     /// Explicit precision: left ~ right (use right's value as absolute error; variance = error²).

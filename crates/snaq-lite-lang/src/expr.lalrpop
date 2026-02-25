@@ -38,6 +38,8 @@ extern {
         "<=" => Tok::Le,
         ">" => Tok::Gt,
         ">=" => Tok::Ge,
+        "=>" => Tok::Arrow,
+        "fn" => Tok::Fn,
         "~" => Tok::Tilde,
         "{" => Tok::LBrace,
         "}" => Tok::RBrace,
@@ -54,11 +56,40 @@ pub Program: ExprDef = {
     <list:ExprList> => ExprDef::Block(list),
 };
 
-// Block item: binding (Ident = BlockItem, allows chained A = B = 42) or expression. Single "=" is Assign, not "==" (Eq).
-// RHS of "=" is BlockItem so that assignment is right-associative: A = B = 42 => A = (B = 42).
+// Name for a named function: Ident or FuncIdent (lexer emits FuncIdent when ident is followed by "(").
+FnName: String = {
+    Ident => <>,
+    FuncIdent => <>,
+};
+
+// Block item: named function (fn name(params)=>body), binding (Ident = BlockItem), or expression.
 BlockItem: ExprDef = {
+    "fn" <name:FnName> "(" <params:ParamList> ")" "=>" "{" <list:ExprList> "}" => {
+        let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
+        ExprDef::Binding(name, Box::new(ExprDef::Lambda(params, Box::new(ExprDef::Block(list)))))
+    },
+    "fn" <name:FnName> "(" <params:ParamList> ")" "=>" "(" <body:Expr> ")" => {
+        let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
+        ExprDef::Binding(name, Box::new(ExprDef::Lambda(params, Box::new(body))))
+    },
     <name:Ident> "=" <rhs:BlockItem> => ExprDef::Binding(name, Box::new(rhs)),
     <e:Expr> => e,
+};
+
+// One parameter: (name) or (name = default_expr).
+Param: (String, Option<ExprDef>) = {
+    <n:Ident> => (n, None),
+    <n:Ident> "=" <e:Expr> => (n, Some(e)),
+};
+
+// Comma-separated parameter list for lambda.
+ParamList: Vec<(String, Option<ExprDef>)> = {
+    <p:Param> => vec![p],
+    <rest:ParamList> "," <p:Param> => {
+        let mut r = rest;
+        r.push(p);
+        r
+    },
 };
 
 // Expression list for program root and block bodies: zero or more BlockItem, separated by ";" or Newline.
@@ -183,10 +214,20 @@ PostfixFactor: ExprDef = {
 
 Factor: ExprDef = {
     "-" <e:Factor> => ExprDef::Neg(Box::new(e)),
+    // Anonymous lambda: fn ( params ) => body. "fn" required so ( a ) is unambiguous vs ( Expr ).
+    "fn" "(" <params:ParamList> ")" "=>" "{" <list:ExprList> "}" => {
+        let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
+        ExprDef::Lambda(params, Box::new(ExprDef::Block(list)))
+    },
+    "fn" "(" <params:ParamList> ")" "=>" "(" <body:Expr> ")" => {
+        let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
+        ExprDef::Lambda(params, Box::new(body))
+    },
     <ni:NumIdents> => ni,
     <n:Num> => ExprDef::LitScalar(n),
     <pi:PiIdents> => pi,
     <id:FuncIdent> "(" <args:ArgList> ")" => ExprDef::Call(id, args),
+    // Ident "(" ArgList ")" omitted to avoid conflict with BlockItem; use (f)(args) for variable call
     <ii:IdentIdents> => ii,
     "(" <e:Expr> ")" => e,
     "[" <elems:VecExprList> "]" => ExprDef::VecLiteral(elems),

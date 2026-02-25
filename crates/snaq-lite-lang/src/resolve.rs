@@ -133,6 +133,32 @@ pub fn resolve(def: ExprDef, registry: &UnitRegistry) -> Result<ExprDef, RunErro
                 .collect::<Result<Vec<_>, RunError>>()?;
             Ok(ExprDef::Block(exprs))
         }
+        ExprDef::Lambda(params, body) => {
+            let params = params
+                .into_iter()
+                .map(|(name, default)| {
+                    Ok((
+                        name,
+                        default.map(|d| resolve(*d, registry).map(Box::new)).transpose()?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            let body = resolve(*body, registry)?;
+            Ok(ExprDef::Lambda(params, Box::new(body)))
+        }
+        ExprDef::CallExpr(callee, args) => {
+            let callee = resolve(*callee, registry)?;
+            let args = args
+                .into_iter()
+                .map(|arg| {
+                    Ok(match arg {
+                        CallArg::Positional(e) => CallArg::Positional(Box::new(resolve(*e, registry)?)),
+                        CallArg::Named(n, e) => CallArg::Named(n, Box::new(resolve(*e, registry)?)),
+                    })
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            Ok(ExprDef::CallExpr(Box::new(callee), args))
+        }
     }
 }
 

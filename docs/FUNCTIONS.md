@@ -1,6 +1,45 @@
 # Functions
 
-This document describes how to call functions and what the built-in functions do. It does not describe how functions are dispatched or evaluated internally.
+This document describes how to define and call functions (both user-defined and built-in) and what the built-in functions do.
+
+## User-defined functions
+
+You can define functions with optional default parameters and call them by name. Names in the body refer to parameters and to variables from the surrounding scope (closures).
+
+### Defining functions
+
+- **Anonymous:** `fn ( param1, param2, ... ) => ( expression )` or `fn ( param1, ... ) => { block }`
+  - Example: `fn (a, b) => (a + b)` — a function that adds two arguments.
+- **Named:** `fn name ( param1, param2, ... ) => ( expression )` or `fn name ( param1, ... ) => { block }`
+  - Example: `fn mysum(a, b) => (a + b)` — defines `mysum` in the current block; later expressions can call `mysum(1, 2)`.
+
+Parameters can have **default values:** `param = expression`. Defaults are evaluated in the function’s closure scope when the argument is omitted at call time.
+
+- Example: `fn add(a, b = 10) => (a + b)` — `add(5)` gives 15, `add(5, 3)` gives 8.
+
+The body can be a single expression in parentheses or a **block** `{ ... }` (semicolon- or newline-separated expressions; the result is the last expression).
+
+- Example: `fn f(a, b) => { x = a + b; x + 42 }` — block body with a local binding.
+
+### Calling user-defined functions
+
+- **By name:** After a named definition, use the same call syntax as built-ins: `name ( arg1, arg2, ... )`.
+- **Arguments:** Positional and named arguments work the same as for built-ins. Positional arguments are bound in order; named arguments (e.g. `b: 2`) can appear in any order and override or supply parameters by name.
+
+If a name is bound to a user-defined function in the current scope, that function is used. **Built-in names (sin, cos, tan, max, min) cannot be shadowed:** you cannot bind a variable or function to those names (see [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md)).
+
+### Closures
+
+The body of a function can use variables from the scope where the function was defined. Those values are captured when the function is created.
+
+- Example: `x = 100; fn addx(n) => (n + x); addx(5)` → 105.
+
+### Errors and edge cases (user-defined)
+
+- **Required parameters:** Every parameter that has no default must receive an argument (positional or named). Otherwise you get an error such as "missing argument for parameter 'name'".
+- **Duplicate parameter:** Passing the same parameter name more than once in a call (e.g. `f(a: 1, a: 2)`) is an error.
+- **Too many arguments:** Passing more positional arguments than the number of parameters is an error.
+- **Not callable:** If you apply arguments to a value that is not a function (e.g. a number), the runtime reports that the expression is not callable.
 
 ## Call syntax
 
@@ -47,6 +86,7 @@ Positional and named arguments can be mixed. The language binds positional argum
 
 ## See also
 
+- [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md) — bindings and that built-in function names cannot be shadowed
 - [SYNTAX.md](SYNTAX.md) — identifiers and function call tokenization
 - [UNITS_AND_QUANTITIES.md](UNITS_AND_QUANTITIES.md) — angle units (rad, degree)
 - [VECTORS.md](VECTORS.md) — functions applied to vectors

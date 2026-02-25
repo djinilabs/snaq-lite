@@ -28,11 +28,13 @@ Variables are **immutable** and **lexically scoped**. You bind a name to a value
 
 ## Limits (current)
 
-- Variables can hold **numeric** values, **fuzzy booleans**, or **undefined**. Binding a **symbolic** or **vector** value to a variable is not supported yet; the runtime returns an error in those cases.
+- Variables can hold **numeric** values, **fuzzy booleans**, **user-defined functions**, or **undefined**. Binding a **symbolic** or **vector** value to a variable is not supported yet; the runtime returns an error in those cases.
+- **Built-in function names cannot be shadowed.** You cannot bind a variable (or a user-defined function) to the names `sin`, `cos`, `tan`, `max`, or `min`. An attempt to do so (e.g. `sin = 3` or `max = fn (a, b) => (a + b)`) returns a **cannot shadow built-in function** error. See [FUNCTIONS.md](FUNCTIONS.md) for user-defined functions and built-ins.
 - **run_numeric** substitutes identifiers from the symbol and unit registries, but **names that are bound in the same program** are left as identifiers so that evaluation resolves them from scope. So variable bindings that shadow unit names (e.g. `DEF=3; DEF+2`) work in both **run()** and **run_numeric()** — the variable takes precedence over the unit.
 
 ## See also
 
+- [FUNCTIONS.md](FUNCTIONS.md) — user-defined functions and built-ins; built-in names cannot be shadowed
 - [README.md](README.md) — language overview and index
 - [SYNTAX.md](SYNTAX.md) — binding syntax and chained assignment
 - [BLOCKS_AND_EXPRESSIONS.md](BLOCKS_AND_EXPRESSIONS.md) — where bindings appear in programs and blocks

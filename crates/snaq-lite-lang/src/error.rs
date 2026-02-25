@@ -34,6 +34,8 @@ pub enum RunError {
     UndefinedResult,
     /// Variable binding RHS cannot be stored in scope (e.g. symbolic or vector in v1).
     BindingValueNotSupported(String),
+    /// Cannot bind a name that shadows a built-in function (sin, cos, tan, max, min).
+    CannotObfuscateBuiltin(String),
 }
 
 /// Parse error for expression strings.
@@ -114,6 +116,9 @@ impl std::fmt::Display for RunError {
             }
             RunError::BindingValueNotSupported(msg) => {
                 write!(f, "variable binding: {msg}")
+            }
+            RunError::CannotObfuscateBuiltin(name) => {
+                write!(f, "cannot shadow built-in function: {name}")
             }
         }
     }

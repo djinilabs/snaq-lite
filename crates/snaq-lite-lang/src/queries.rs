@@ -8,6 +8,7 @@ use crate::error::RunError;
 use crate::functions;
 use crate::ir::{CallArg, ExprData, ExprDef, Expression, ProgramDef};
 use crate::scope::{Scope, StoredValue};
+use crate::user_function;
 use crate::quantity::Quantity;
 use crate::stat_compare::{
     comparison_probability, probability_to_fuzzy_bool, ComparisonKind, CONFIDENCE_THRESHOLD,
@@ -714,6 +715,30 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
             let rhs_expr = build_expression(db, *rhs);
             ExprData::Binding(name, rhs_expr)
         }
+        ExprDef::Lambda(params, body) => {
+            let param_exprs: Vec<(String, Option<Expression<'_>>)> = params
+                .into_iter()
+                .map(|(name, opt_def)| {
+                    (
+                        name,
+                        opt_def.map(|d| build_expression(db, *d)),
+                    )
+                })
+                .collect();
+            let body_expr = build_expression(db, *body);
+            ExprData::Lambda(param_exprs, body_expr)
+        }
+        ExprDef::CallExpr(callee, args) => {
+            let callee_expr = build_expression(db, *callee);
+            let arg_exprs: Vec<(Option<String>, Expression<'_>)> = args
+                .into_iter()
+                .map(|arg| match arg {
+                    CallArg::Positional(e) => (None, build_expression(db, *e)),
+                    CallArg::Named(n, e) => (Some(n), build_expression(db, *e)),
+                })
+                .collect();
+            ExprData::CallExpr(callee_expr, arg_exprs)
+        }
     };
     Expression::new(db, data)
 }
@@ -727,6 +752,9 @@ fn eval_binding_chain<'db>(
 ) -> Result<(Value, Scope<'db>), RunError> {
     match expr.data(db) {
         ExprData::Binding(name, rhs) => {
+            if functions::param_names(name).is_some() {
+                return Err(RunError::CannotObfuscateBuiltin(name.clone()));
+            }
             let (v, inner_scope) = eval_binding_chain(db, scope, *rhs)?;
             let stored = StoredValue::from_value(&v)?;
             let new_env = inner_scope.env(db).clone().extend(name.clone(), stored);
@@ -856,6 +884,9 @@ pub fn value<'db>(
                 }
                 Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
                 Value::Undefined => Err(RunError::UndefinedResult),
+                Value::Function(_) => Err(RunError::BindingValueNotSupported(
+                    "function value cannot be converted to quantity".to_string(),
+                )),
             }
         }
         ExprData::VecLiteral(exprs) => {
@@ -930,6 +961,31 @@ pub fn value<'db>(
         ExprData::Binding(_, _) => {
             let (v, _) = eval_binding_chain(db, scope, expr)?;
             Ok(v)
+        }
+        ExprData::Lambda(params, body) => {
+            let params_def: Vec<(String, Option<Box<ExprDef>>)> = params
+                .iter()
+                .map(|(name, opt_expr)| {
+                    (
+                        name.clone(),
+                        opt_expr.map(|e| Box::new(expression_to_def(db, e))),
+                    )
+                })
+                .collect();
+            let body_def = Box::new(expression_to_def(db, *body));
+            let closure_env = scope.env(db).clone();
+            let uf = user_function::UserFunction::new(params_def, body_def, closure_env);
+            let id = user_function::register(uf);
+            Ok(Value::Function(id))
+        }
+        ExprData::CallExpr(callee, args) => {
+            let callee_val = value(db, scope, *callee)?;
+            match &callee_val {
+                Value::Function(id) => eval_user_call(db, scope, *id, args, registry),
+                _ => Err(RunError::UnknownFunction(
+                    "expression is not callable (expected a function)".to_string(),
+                )),
+            }
         }
     })
 }
@@ -1023,6 +1079,30 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
         ExprData::Binding(name, rhs) => ExprDef::Binding(
             name.clone(),
             Box::new(expression_to_def(db, *rhs)),
+        ),
+        ExprData::Lambda(params, body) => ExprDef::Lambda(
+            params
+                .iter()
+                .map(|(name, opt_expr)| {
+                    (
+                        name.clone(),
+                        opt_expr.map(|e| Box::new(expression_to_def(db, e))),
+                    )
+                })
+                .collect(),
+            Box::new(expression_to_def(db, *body)),
+        ),
+        ExprData::CallExpr(callee, args) => ExprDef::CallExpr(
+            Box::new(expression_to_def(db, *callee)),
+            args.iter()
+                .map(|(opt_n, e)| {
+                    if let Some(n) = opt_n {
+                        CallArg::Named(n.clone(), Box::new(expression_to_def(db, *e)))
+                    } else {
+                        CallArg::Positional(Box::new(expression_to_def(db, *e)))
+                    }
+                })
+                .collect(),
         ),
     }
 }
@@ -1122,6 +1202,62 @@ fn eval_if(
     Ok(Value::Symbolic(SymbolicQuantity::new(weighted, result_unit)))
 }
 
+/// Evaluate a user-defined function: bind args to params, extend closure env, evaluate body.
+fn eval_user_call(
+    db: &dyn salsa::Database,
+    scope: Scope,
+    id: user_function::UserFunctionId,
+    args: &[(Option<String>, Expression<'_>)],
+    _registry: &UnitRegistry,
+) -> Result<Value, RunError> {
+    let uf = user_function::get(id).ok_or_else(|| {
+        RunError::UnknownFunction("user function not found (wrong thread or stale id)".to_string())
+    })?;
+    let param_names: Vec<String> = uf.params.iter().map(|(n, _)| n.clone()).collect();
+    let mut bound: HashMap<String, Value> = HashMap::new();
+    for (i, (opt_name, expr)) in args.iter().enumerate() {
+        let v = value(db, scope, *expr)?;
+        let param = match opt_name {
+            Some(n) => {
+                if !param_names.contains(n) {
+                    return Err(RunError::UnknownFunction(format!(
+                        "unknown parameter name '{n}'"
+                    )));
+                }
+                if bound.contains_key(n) {
+                    return Err(RunError::UnknownFunction(format!("duplicate parameter '{n}'")));
+                }
+                n.clone()
+            }
+            None => param_names.get(i).cloned().ok_or_else(|| {
+                RunError::UnknownFunction(format!("too many arguments (expected {})", param_names.len()))
+            })?,
+        };
+        bound.insert(param, v);
+    }
+    let closure_scope = Scope::new(db, uf.closure_env.clone());
+    for (name, default) in uf.params.iter() {
+        if bound.contains_key(name) {
+            continue;
+        }
+        let default_def = default.as_ref().ok_or_else(|| {
+            RunError::UnknownFunction(format!("missing argument for parameter '{name}'"))
+        })?;
+        let default_expr = build_expression(db, (**default_def).clone());
+        let v = value(db, closure_scope, default_expr)?;
+        bound.insert(name.clone(), v);
+    }
+    let mut env = uf.closure_env.clone();
+    // Param values must be storable (Numeric, FuzzyBool, Undefined); from_value rejects Vector/Symbolic.
+    for (name, v) in &bound {
+        let stored = StoredValue::from_value(v)?;
+        env = env.extend(name.clone(), stored);
+    }
+    let body_scope = Scope::new(db, env);
+    let body_expr = build_expression(db, *uf.body.clone());
+    value(db, body_scope, body_expr)
+}
+
 /// Bind call args (positional + named) to param names and evaluate.
 fn eval_call(
     db: &dyn salsa::Database,
@@ -1130,6 +1266,11 @@ fn eval_call(
     args: &[(Option<String>, Expression<'_>)],
     registry: &UnitRegistry,
 ) -> Result<Value, RunError> {
+    // Scope first: user-defined function shadows built-in.
+    let env = scope.env(db);
+    if let Some(StoredValue::Function(id)) = env.get(name) {
+        return eval_user_call(db, scope, *id, args, registry);
+    }
     let param_names = functions::param_names(name)
         .ok_or_else(|| RunError::UnknownFunction(name.to_string()))?;
     let mut bound: HashMap<String, Value> = HashMap::new();
@@ -1264,6 +1405,7 @@ fn value_to_symbolic_expr(v: &Value) -> SymbolicExpr {
         Value::FuzzyBool(_) => panic!("value_to_symbolic_expr: fuzzy boolean not supported"),
         Value::Vector(_) => panic!("value_to_symbolic_expr: vector not supported"),
         Value::Undefined => panic!("value_to_symbolic_expr: undefined not supported"),
+        Value::Function(_) => panic!("value_to_symbolic_expr: function not supported"),
     }
 }
 
@@ -1423,6 +1565,9 @@ fn cmp_values(
             Ok(Value::FuzzyBool(fuzzy))
         }
         (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
+        (Value::Function(_), _) | (_, Value::Function(_)) => {
+            Err(RunError::UnknownFunction("function value cannot be used in comparison".to_string()))
+        }
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
@@ -1554,6 +1699,9 @@ fn add_values(
                 _ => RunError::DivisionByZero,
             }),
         (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
+        (Value::Function(_), _) | (_, Value::Function(_)) => {
+            Err(RunError::UnknownFunction("function value cannot be used in arithmetic".to_string()))
+        }
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
@@ -1660,6 +1808,9 @@ fn sub_values(
                 _ => RunError::DivisionByZero,
             }),
         (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
+        (Value::Function(_), _) | (_, Value::Function(_)) => {
+            Err(RunError::UnknownFunction("function value cannot be used in arithmetic".to_string()))
+        }
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
@@ -1742,6 +1893,9 @@ fn mul_values(
         }
         (Value::Numeric(qa), Value::Numeric(qb)) => Ok(Value::Numeric(qa.clone() * qb.clone())),
         (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
+        (Value::Function(_), _) | (_, Value::Function(_)) => {
+            Err(RunError::UnknownFunction("function value cannot be used in arithmetic".to_string()))
+        }
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
@@ -1822,6 +1976,9 @@ fn div_values(
             .map(Value::Numeric)
             .map_err(|_| RunError::DivisionByZero),
         (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
+        (Value::Function(_), _) | (_, Value::Function(_)) => {
+            Err(RunError::UnknownFunction("function value cannot be used in arithmetic".to_string()))
+        }
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
@@ -1837,6 +1994,9 @@ fn div_values(
 fn neg_value(v: &Value) -> Result<Value, RunError> {
     match v {
         Value::FuzzyBool(_) => Err(RunError::BooleanResult),
+        Value::Function(_) => {
+            Err(RunError::UnknownFunction("function value cannot be negated".to_string()))
+        }
         Value::Undefined => Err(RunError::UndefinedResult),
         Value::Vector(v) => Ok(Value::Vector(VectorValue {
             inner: LazyVector::Map {
@@ -1860,6 +2020,7 @@ fn value_to_expr_unit(v: &Value) -> (SymbolicExpr, Unit) {
         Value::FuzzyBool(_) => panic!("value_to_expr_unit: fuzzy boolean not supported"),
         Value::Vector(_) => panic!("value_to_expr_unit: vector not supported"),
         Value::Undefined => panic!("value_to_expr_unit: undefined not supported"),
+        Value::Function(_) => panic!("value_to_expr_unit: function not supported"),
     }
 }
 
@@ -1905,5 +2066,6 @@ fn scale_expr_to_unit(
         Value::FuzzyBool(_) => Err(RunError::BooleanResult),
         Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
         Value::Undefined => Err(RunError::UndefinedResult),
+        Value::Function(_) => Err(RunError::UnsupportedVectorOperation),
     }
 }

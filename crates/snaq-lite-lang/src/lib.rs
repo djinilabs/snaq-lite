@@ -17,6 +17,7 @@ pub mod symbol_registry;
 pub mod symbolic;
 pub mod unit;
 pub mod stat_compare;
+pub mod user_function;
 pub mod unit_registry;
 pub mod vector;
 
@@ -69,6 +70,7 @@ fn format_value_for_display(db: &dyn salsa::Database, value: &Value) -> Result<S
         Value::Symbolic(sq) => Ok(format!("{sq}")),
         Value::FuzzyBool(fb) => Ok(format!("{fb}")),
         Value::Undefined => Ok("undefined".to_string()),
+        Value::Function(_) => Ok("<function>".to_string()),
         Value::Vector(v) => {
             let stream = vector_into_stream(db, v.inner.clone());
             let results: Vec<_> = futures::executor::block_on(async move {
@@ -1486,6 +1488,172 @@ mod tests {
     fn run_unknown_function_errors() {
         let e = run("foo(1)");
         assert!(matches!(e, Err(RunError::UnknownFunction(_))));
+    }
+
+    // --- User-defined functions ---
+
+    #[test]
+    fn parse_anonymous_lambda() {
+        let parsed = parse("fn (a, b) => (a + b)").unwrap();
+        assert!(matches!(parsed, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Lambda(_, _))));
+        if let ExprDef::Block(ref v) = parsed {
+            if let ExprDef::Lambda(params, _) = &v[0] {
+                assert_eq!(params.len(), 2);
+                assert_eq!(params[0].0, "a");
+                assert_eq!(params[1].0, "b");
+                assert!(params[0].1.is_none());
+                assert!(params[1].1.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn parse_named_function() {
+        let parsed = parse("fn mysum(a, b) => (a + b)").unwrap();
+        assert!(matches!(parsed, ExprDef::Block(ref v) if v.len() == 1));
+        if let ExprDef::Block(ref v) = parsed {
+            assert!(matches!(&v[0], ExprDef::Binding(ref n, ref rhs) if n == "mysum" && matches!(rhs.as_ref(), ExprDef::Lambda(_, _))));
+        }
+    }
+
+    #[test]
+    fn parse_lambda_default_param() {
+        let parsed = parse("fn (a, b = 0) => (a + b)").unwrap();
+        assert!(matches!(parsed, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Lambda(_, _))));
+        if let ExprDef::Block(ref v) = parsed {
+            if let ExprDef::Lambda(params, _) = &v[0] {
+                assert_eq!(params.len(), 2);
+                assert!(params[0].1.is_none());
+                assert!(params[1].1.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn run_named_function_call() {
+        let v = run_with_registry(
+            "fn mysum(a, b) => (a + b)\nmysum(1, 2)",
+            &default_si_registry(),
+        )
+        .unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric, got {:?}", v) };
+        assert!((q.value() - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_user_function_default_param() {
+        let v = run_with_registry(
+            "fn add(a, b = 10) => (a + b)\nadd(5)",
+            &default_si_registry(),
+        )
+        .unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 15.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_user_function_named_args() {
+        let v = run_with_registry(
+            "fn sub(a, b) => (a - b)\nsub(b: 2, a: 10)",
+            &default_si_registry(),
+        )
+        .unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 8.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_user_function_closure() {
+        // Function uses variable x defined outside the function (closure over outer scope).
+        let v = run_with_registry(
+            "x = 100\nfn addx(n) => (n + x)\naddx(5)",
+            &default_si_registry(),
+        )
+        .unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 105.0).abs() < 1e-10, "addx(5) = 5 + 100 = 105");
+    }
+
+    #[test]
+    fn run_user_function_closure_multiple_outer_variables() {
+        // Function uses several variables defined outside the function (closure over a, b, c).
+        let v = run_with_registry(
+            "a = 1\nb = 2\nc = 3\nfn sum_outer(_) => (a + b + c)\nsum_outer(0)",
+            &default_si_registry(),
+        )
+        .unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 6.0).abs() < 1e-10, "1 + 2 + 3 = 6");
+    }
+
+    #[test]
+    fn run_user_function_closure_uses_definition_scope_not_call_scope() {
+        // Closure captures bindings at definition time; rebinding the same name at call site does not change the function's view.
+        let v = run_with_registry(
+            "x = 10\nfn get_x(_) => (x)\n{ x = 99; get_x(0) }",
+            &default_si_registry(),
+        )
+        .unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 10.0).abs() < 1e-10, "get_x captures x=10 at definition, not 99 at call site");
+    }
+
+    #[test]
+    fn run_user_function_parameter_shadows_outer() {
+        // Parameter shadows outer variable of the same name; body sees the argument, not the outer binding.
+        let v = run_with_registry(
+            "x = 100\nfn f(x) => (x + 1)\nf(2)",
+            &default_si_registry(),
+        )
+        .unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 3.0).abs() < 1e-10, "f(2) uses param x=2, not outer 100");
+    }
+
+    #[test]
+    fn run_cannot_obfuscate_builtin_sin() {
+        let e = run_with_registry("sin = 3", &default_si_registry()).unwrap_err();
+        assert!(matches!(e, RunError::CannotObfuscateBuiltin(s) if s == "sin"));
+    }
+
+    #[test]
+    fn run_cannot_obfuscate_builtin_max() {
+        let e = run_with_registry("max = fn (a, b) => (a + b)", &default_si_registry()).unwrap_err();
+        assert!(matches!(e, RunError::CannotObfuscateBuiltin(s) if s == "max"));
+    }
+
+    #[test]
+    fn run_user_function_block_body() {
+        let v = run_with_registry(
+            "fn myCrazySumPlus42(param1, param2) => { otherVar = param1 + param2; otherVar + 42 }\nmyCrazySumPlus42(10, 5)",
+            &default_si_registry(),
+        )
+        .unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 57.0).abs() < 1e-10, "10+5=15, 15+42=57");
+    }
+
+    #[test]
+    fn run_user_function_missing_required_arg() {
+        let e = run_with_registry(
+            "fn needTwo(a, b) => (a + b)\nneedTwo(1)",
+            &default_si_registry(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(e, RunError::UnknownFunction(ref s) if s.contains("missing") && s.contains("b")),
+            "expected missing argument for parameter 'b', got {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn run_format_function_result_prints_function() {
+        // Program that only defines a function: result is Value::Function; display as <function>.
+        assert_eq!(
+            run_format("fn ABCDFFF(n) => { 32 + n }").unwrap(),
+            "<function>"
+        );
     }
 
     // --- Vector literal and vector type ---

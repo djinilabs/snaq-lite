@@ -43,6 +43,10 @@ pub enum ExprNode {
     Block(Vec<ExprId>),
     /// Variable binding (in block context): name = value_expr. Pass-through in CAS.
     Binding(String, ExprId),
+    /// User-defined function: (param name, optional default expr id), body id.
+    Lambda(Vec<(String, Option<ExprId>)>, ExprId),
+    /// Call expression that evaluates to a function: callee id, args.
+    CallExpr(ExprId, Vec<(Option<String>, ExprId)>),
 }
 
 /// Central cache: same structure => same ExprId. New nodes are interned on construction.

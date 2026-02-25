@@ -26,6 +26,8 @@ pub enum Rank {
     If(Box<Rank>, Box<Rank>, Box<Rank>),
     WithPrecision(Box<Rank>, Box<Rank>),
     Block(Vec<Rank>),
+    Lambda(Vec<(String, Option<Rank>)>, Box<Rank>),
+    CallExpr(Box<Rank>, Vec<Rank>),
 }
 
 fn tag_order(r: &Rank) -> u8 {
@@ -50,6 +52,8 @@ fn tag_order(r: &Rank) -> u8 {
         Rank::If(..) => 17,
         Rank::WithPrecision(..) => 18,
         Rank::Block(_) => 19,
+        Rank::Lambda(..) => 20,
+        Rank::CallExpr(..) => 21,
     }
 }
 
@@ -86,6 +90,33 @@ impl Ord for Rank {
             (Rank::If(a1, a2, a3), Rank::If(b1, b2, b3)) => a1.cmp(b1).then(a2.cmp(b2)).then(a3.cmp(b3)),
             (Rank::WithPrecision(a1, a2), Rank::WithPrecision(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::Block(a), Rank::Block(b)) => a.cmp(b),
+            (Rank::Lambda(ap, ab), Rank::Lambda(bp, bb)) => {
+                ap.len().cmp(&bp.len())
+                    .then_with(|| {
+                        ap.iter()
+                            .zip(bp.iter())
+                            .find_map(|(a, b)| {
+                                let c = a.0.cmp(&b.0).then_with(|| {
+                                    match (&a.1, &b.1) {
+                                        (Some(aa), Some(bb)) => aa.cmp(bb),
+                                        (None, None) => Ordering::Equal,
+                                        (None, Some(_)) => Ordering::Less,
+                                        (Some(_), None) => Ordering::Greater,
+                                    }
+                                });
+                                if c != Ordering::Equal {
+                                    Some(c)
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(Ordering::Equal)
+                    })
+                    .then_with(|| ab.cmp(bb))
+            }
+            (Rank::CallExpr(ac, aargs), Rank::CallExpr(bc, bargs)) => {
+                ac.cmp(bc).then(aargs.cmp(bargs))
+            }
             _ => Ordering::Equal,
         }
     }
@@ -131,6 +162,22 @@ pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
         ),
         ExprNode::Block(ids) => Rank::Block(ids.iter().map(|&i| rank(pool, i)).collect()),
         ExprNode::Binding(_, rhs) => rank(pool, *rhs),
+        ExprNode::Lambda(params, body_id) => {
+            let param_ranks: Vec<(String, Option<Rank>)> = params
+                .iter()
+                .map(|(name, opt_id)| {
+                    (
+                        name.clone(),
+                        opt_id.map(|id| rank(pool, id)),
+                    )
+                })
+                .collect();
+            Rank::Lambda(param_ranks, Box::new(rank(pool, *body_id)))
+        }
+        ExprNode::CallExpr(callee_id, args) => Rank::CallExpr(
+            Box::new(rank(pool, *callee_id)),
+            args.iter().map(|(_, id)| rank(pool, *id)).collect(),
+        ),
     }
 }
 
@@ -292,6 +339,27 @@ fn canonicalize_rec(
         ExprNode::Binding(name, rhs) => {
             let new_rhs = canonicalize_rec(pool, out, *rhs);
             out.intern(ExprNode::Binding(name.clone(), new_rhs))
+        }
+        ExprNode::Lambda(params, body_id) => {
+            let new_params: Vec<(String, Option<ExprId>)> = params
+                .iter()
+                .map(|(name, opt_id)| {
+                    (
+                        name.clone(),
+                        opt_id.map(|id| canonicalize_rec(pool, out, id)),
+                    )
+                })
+                .collect();
+            let new_body = canonicalize_rec(pool, out, *body_id);
+            out.intern(ExprNode::Lambda(new_params, new_body))
+        }
+        ExprNode::CallExpr(callee_id, args) => {
+            let new_callee = canonicalize_rec(pool, out, *callee_id);
+            let new_args: Vec<(Option<String>, ExprId)> = args
+                .iter()
+                .map(|(name_opt, id)| (name_opt.clone(), canonicalize_rec(pool, out, *id)))
+                .collect();
+            out.intern(ExprNode::CallExpr(new_callee, new_args))
         }
     }
 }

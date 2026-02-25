@@ -598,6 +598,8 @@ pub enum Value {
     Vector(crate::vector::VectorValue),
     /// Undefined (e.g. empty block or empty program).
     Undefined,
+    /// User-defined function (id into user_function registry).
+    Function(crate::user_function::UserFunctionId),
 }
 
 impl Value {
@@ -624,6 +626,9 @@ impl Value {
             Value::FuzzyBool(_) => Err(RunError::BooleanResult),
             Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
             Value::Undefined => Err(RunError::UndefinedResult),
+            Value::Function(_) => Err(RunError::BindingValueNotSupported(
+                "function value cannot be converted to quantity".to_string(),
+            )),
         }
     }
 
@@ -648,6 +653,7 @@ impl fmt::Display for Value {
             Value::FuzzyBool(fb) => write!(f, "{fb}"),
             Value::Vector(v) => write!(f, "{v}"),
             Value::Undefined => write!(f, "undefined"),
+            Value::Function(_) => write!(f, "<function>"),
         }
     }
 }

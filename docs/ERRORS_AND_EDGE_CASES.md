@@ -15,7 +15,8 @@ This document lists the main error conditions and edge cases you may encounter w
 | **Dimension mismatch** | Two values that must have the same dimension do not (e.g. `1 m + 1 s`, or converting to an incompatible unit with `as`). |
 | **Division by zero** | Division where the divisor is zero. See below for nonzero/0 vs 0/0. |
 | **Symbol has no value** | You requested a numeric result (`run_numeric`) but a symbol (or unbound identifier) has no value in the symbol registry and is not bound in the program. |
-| **Unknown function** | The call uses a name that is not a built-in function. |
+| **Unknown function** | The call uses a name that is not a built-in and not bound to a user-defined function in scope. For user-defined functions: missing required argument (no default), duplicate parameter name in a call, or too many arguments also yield an error. Calling a non-function value (e.g. applying arguments to a number) yields "expression is not callable". |
+| **Cannot shadow built-in function** | You tried to bind a variable or user-defined function to a built-in name (`sin`, `cos`, `tan`, `max`, `min`). Those names cannot be redefined. |
 | **Expected angle** | A trig function (sin, cos, tan) received an argument that is not an angle (e.g. length or dimensionless number without unit). The message may suggest adding `rad` (e.g. `sin(pi * rad)`). |
 | **Operation not supported for vector** | An operation that expects a scalar was given a vector (e.g. converting the result to a single quantity when the result is a vector). |
 | **Transpose requires a vector** | The postfix `'` was applied to a non-vector (e.g. a scalar or symbolic expression). |
@@ -26,7 +27,7 @@ This document lists the main error conditions and edge cases you may encounter w
 | **Both sides of ~ must be numeric** | The explicit-precision operator `~` was used with a symbolic, boolean, or vector operand. |
 | **Precision must be strictly positive** | The right-hand side of `~` was ≤ 0 or non-finite. |
 | **Result is undefined** | You requested a numeric quantity (or scalar) but the result is undefined (e.g. empty program or empty block). |
-| **Binding value not supported** | You tried to bind a symbolic or vector value to a variable; only numeric, FuzzyBool, or undefined can be bound in the current version. |
+| **Binding value not supported** | You tried to bind a symbolic or vector value to a variable; only numeric, FuzzyBool, user-defined function, or undefined can be bound. Converting a function to a quantity (e.g. in unit conversion) also yields this (or a similar) error. |
 
 ## Division by zero
 
@@ -43,13 +44,15 @@ There is **no NaN** in the language; only +∞ and −∞ for infinite values.
 
 ## Binding limits
 
-- **Allowed:** Binding a **numeric** value, a **FuzzyBool** (true/false/uncertain), or **undefined** to a variable.
+- **Allowed:** Binding a **numeric** value, a **FuzzyBool** (true/false/uncertain), a **user-defined function**, or **undefined** to a variable.
 - **Not allowed (current):** Binding a **symbolic** or **vector** value. The runtime returns an error: **binding value not supported** (or similar message).
+- **Built-in names:** You cannot bind to `sin`, `cos`, `tan`, `max`, or `min`; the runtime returns **cannot shadow built-in function**.
 
-See [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md) for scope and shadowing.
+See [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md) and [FUNCTIONS.md](FUNCTIONS.md) for scope and user-defined functions.
 
 ## See also
 
+- [FUNCTIONS.md](FUNCTIONS.md) — user-defined functions and built-ins; cannot shadow built-in names
 - [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md) — binding limits
 - [BLOCKS_AND_EXPRESSIONS.md](BLOCKS_AND_EXPRESSIONS.md) — undefined and empty blocks
 - [PRECISION.md](PRECISION.md) — requirements for `~`

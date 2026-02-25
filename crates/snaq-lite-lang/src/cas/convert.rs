@@ -109,6 +109,33 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
             let rid = expr_def_to_interned(rhs, pool);
             pool.intern(ExprNode::Binding(name.clone(), rid))
         }
+        ExprDef::Lambda(params, body) => {
+            let param_ids: Vec<(String, Option<ExprId>)> = params
+                .iter()
+                .map(|(name, default)| {
+                    (
+                        name.clone(),
+                        default.as_ref().map(|d| expr_def_to_interned(d, pool)),
+                    )
+                })
+                .collect();
+            let body_id = expr_def_to_interned(body, pool);
+            pool.intern(ExprNode::Lambda(param_ids, body_id))
+        }
+        ExprDef::CallExpr(callee, args) => {
+            let callee_id = expr_def_to_interned(callee, pool);
+            let arg_ids: Vec<(Option<String>, ExprId)> = args
+                .iter()
+                .map(|arg| {
+                    let (name_opt, def) = match arg {
+                        CallArg::Positional(e) => (None, e.as_ref()),
+                        CallArg::Named(n, e) => (Some(n.clone()), e.as_ref()),
+                    };
+                    (name_opt, expr_def_to_interned(def, pool))
+                })
+                .collect();
+            pool.intern(ExprNode::CallExpr(callee_id, arg_ids))
+        }
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved ExprDef: resolve() must be called before CAS")
         }
@@ -197,6 +224,32 @@ pub fn interned_to_expr_def(pool: &ExprInterner, id: ExprId) -> ExprDef {
             name.clone(),
             Box::new(interned_to_expr_def(pool, *rhs_id)),
         ),
+        ExprNode::Lambda(params, body_id) => {
+            let params: Vec<(String, Option<Box<ExprDef>>)> = params
+                .iter()
+                .map(|(name, default_id)| {
+                    (
+                        name.clone(),
+                        default_id.map(|id| Box::new(interned_to_expr_def(pool, id))),
+                    )
+                })
+                .collect();
+            ExprDef::Lambda(params, Box::new(interned_to_expr_def(pool, *body_id)))
+        }
+        ExprNode::CallExpr(callee_id, args) => {
+            let callee = interned_to_expr_def(pool, *callee_id);
+            let args: Vec<CallArg> = args
+                .iter()
+                .map(|(name_opt, id)| {
+                    let e = interned_to_expr_def(pool, *id);
+                    match name_opt {
+                        None => CallArg::Positional(Box::new(e)),
+                        Some(n) => CallArg::Named(n.clone(), Box::new(e)),
+                    }
+                })
+                .collect();
+            ExprDef::CallExpr(Box::new(callee), args)
+        }
     }
 }
 

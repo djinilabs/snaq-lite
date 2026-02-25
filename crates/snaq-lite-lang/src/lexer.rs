@@ -37,6 +37,9 @@ pub enum Tok {
     Apostrophe,
     /// Variable binding: `=` (e.g. x = 10). Distinct from comparison `==`.
     Assign,
+    /// Lambda / function body: `=>`. Keyword: `fn` for anonymous or named function.
+    Arrow,
+    Fn,
     /// Comparison: `==`, `!=`, `<`, `<=`, `>`, `>=`
     Eq,
     Ne,
@@ -215,6 +218,10 @@ impl<'input> Iterator for Lexer<'input> {
             self.pos += 4;
             return Some(Ok((start, Tok::Else, self.pos)));
         }
+        if rest.starts_with("fn") && !rest[2..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            self.pos += 2;
+            return Some(Ok((start, Tok::Fn, self.pos)));
+        }
         if rest.starts_with("π") {
             self.pos += "π".len();
             return Some(Ok((start, Tok::Pi, self.pos)));
@@ -235,6 +242,10 @@ impl<'input> Iterator for Lexer<'input> {
         if rest.starts_with(">=") {
             self.pos += 2;
             return Some(Ok((start, Tok::Ge, self.pos)));
+        }
+        if rest.starts_with("=>") {
+            self.pos += 2;
+            return Some(Ok((start, Tok::Arrow, self.pos)));
         }
 
         let mut it = rest.chars();

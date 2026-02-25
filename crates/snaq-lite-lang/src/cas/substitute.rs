@@ -44,6 +44,23 @@ fn collect_bound_names(def: &ExprDef) -> HashSet<String> {
                     }
                 }
             }
+            ExprDef::Lambda(params, body) => {
+                for (name, default) in params {
+                    names.insert(name.clone());
+                    if let Some(d) = default {
+                        go(d, names);
+                    }
+                }
+                go(body, names);
+            }
+            ExprDef::CallExpr(callee, args) => {
+                go(callee, names);
+                for arg in args {
+                    match arg {
+                        crate::ir::CallArg::Positional(e) | crate::ir::CallArg::Named(_, e) => go(e, names),
+                    }
+                }
+            }
             ExprDef::VecLiteral(elems) => {
                 for e in elems {
                     go(e, names);
@@ -177,6 +194,42 @@ fn substitute_symbols_inner(
                 .map(|e| substitute_symbols_inner(e, symbol_registry, unit_registry, bound_names))
                 .collect::<Result<Vec<_>, RunError>>()?;
             Ok(ExprDef::Block(exprs))
+        }
+        ExprDef::Lambda(params, body) => {
+            let mut lambda_bound = bound_names.clone();
+            for (name, _) in &params {
+                lambda_bound.insert(name.clone());
+            }
+            let params = params
+                .into_iter()
+                .map(|(name, default)| {
+                    Ok((
+                        name,
+                        default
+                            .map(|d| substitute_symbols_inner(*d, symbol_registry, unit_registry, &lambda_bound).map(Box::new))
+                            .transpose()?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            let body = substitute_symbols_inner(*body, symbol_registry, unit_registry, &lambda_bound)?;
+            Ok(ExprDef::Lambda(params, Box::new(body)))
+        }
+        ExprDef::CallExpr(callee, args) => {
+            let callee = substitute_symbols_inner(*callee, symbol_registry, unit_registry, bound_names)?;
+            let args = args
+                .into_iter()
+                .map(|arg| {
+                    Ok(match arg {
+                        crate::ir::CallArg::Positional(e) => {
+                            crate::ir::CallArg::Positional(Box::new(substitute_symbols_inner(*e, symbol_registry, unit_registry, bound_names)?))
+                        }
+                        crate::ir::CallArg::Named(n, e) => {
+                            crate::ir::CallArg::Named(n, Box::new(substitute_symbols_inner(*e, symbol_registry, unit_registry, bound_names)?))
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            Ok(ExprDef::CallExpr(Box::new(callee), args))
         }
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved ExprDef: resolve() must be called before substitute_symbols")

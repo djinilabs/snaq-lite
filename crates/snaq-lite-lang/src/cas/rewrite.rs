@@ -198,6 +198,28 @@ fn rewrite_rec(
             let new_rhs = rewrite_rec(pool, out, *rhs, registry)?;
             Ok(out.intern(ExprNode::Binding(name.clone(), new_rhs)))
         }
+        ExprNode::Lambda(params, body_id) => {
+            let new_params: Vec<(String, Option<ExprId>)> = params
+                .iter()
+                .map(|(name, opt_id)| {
+                    let new_opt = match opt_id {
+                        Some(id) => Some(rewrite_rec(pool, out, *id, registry)?),
+                        None => None,
+                    };
+                    Ok((name.clone(), new_opt))
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            let new_body = rewrite_rec(pool, out, *body_id, registry)?;
+            Ok(out.intern(ExprNode::Lambda(new_params, new_body)))
+        }
+        ExprNode::CallExpr(callee_id, args) => {
+            let new_callee = rewrite_rec(pool, out, *callee_id, registry)?;
+            let new_args: Vec<(Option<String>, ExprId)> = args
+                .iter()
+                .map(|(name_opt, id)| Ok((name_opt.clone(), rewrite_rec(pool, out, *id, registry)?)))
+                .collect::<Result<Vec<_>, RunError>>()?;
+            Ok(out.intern(ExprNode::CallExpr(new_callee, new_args)))
+        }
     }
 }
 

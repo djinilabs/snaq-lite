@@ -18,6 +18,8 @@ pub enum StoredValue {
     Numeric(Quantity),
     FuzzyBool(FuzzyBool),
     Undefined,
+    /// User-defined function (id into user_function registry).
+    Function(crate::user_function::UserFunctionId),
 }
 
 impl StoredValue {
@@ -33,6 +35,7 @@ impl StoredValue {
             Value::Vector(_) => Err(crate::error::RunError::BindingValueNotSupported(
                 "vector value not yet supported".to_string(),
             )),
+            Value::Function(id) => Ok(StoredValue::Function(*id)),
         }
     }
 
@@ -42,6 +45,7 @@ impl StoredValue {
             StoredValue::Numeric(q) => Value::Numeric(q.clone()),
             StoredValue::FuzzyBool(fb) => Value::FuzzyBool(fb.clone()),
             StoredValue::Undefined => Value::Undefined,
+            StoredValue::Function(id) => Value::Function(*id),
         }
     }
 }

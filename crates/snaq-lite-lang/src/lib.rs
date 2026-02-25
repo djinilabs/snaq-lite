@@ -71,7 +71,7 @@ fn format_value_for_display(db: &dyn salsa::Database, value: &Value) -> Result<S
         Value::Symbolic(sq) => Ok(format!("{sq}")),
         Value::FuzzyBool(fb) => Ok(format!("{fb}")),
         Value::Undefined => Ok("undefined".to_string()),
-        Value::Function(_) => Ok("<function>".to_string()),
+        Value::Function(_) | Value::BuiltinFunction(_) => Ok("<function>".to_string()),
         Value::Vector(v) => {
             let stream = vector_into_stream(db, v.inner.clone());
             let results: Vec<_> = futures::executor::block_on(async move {
@@ -2063,6 +2063,95 @@ mod tests {
         assert_eq!(run_format("[1, 2, 3].map(fn (x) => (x+1))").unwrap(), "[2, 3, 4]");
         assert_eq!(run_format("[1, 2, 3].map(fn (x) => (x*2))").unwrap(), "[2, 4, 6]");
         assert_eq!(run_format("[1, 2, 3].map(fn n => (n * 10))").unwrap(), "[10, 20, 30]");
+    }
+
+    #[test]
+    fn run_vector_map_sqrt() {
+        let v = run("[1, 2, 3].map(sqrt)").unwrap();
+        let w = match &v {
+            Value::Vector(w) => w,
+            _ => panic!("expected vector"),
+        };
+        let db = salsa::DatabaseImpl::new();
+        let stream = crate::queries::vector_into_stream(&db, w.inner.clone());
+        let results: Vec<_> = futures::executor::block_on(async move {
+            use futures::stream::StreamExt;
+            stream.collect().await
+        });
+        let vals: Vec<Value> = results
+            .into_iter()
+            .map(|r| r.unwrap().unwrap())
+            .collect();
+        assert_eq!(vals.len(), 3);
+        let check = |v: &Value, expected: f64| {
+            let Value::Numeric(q) = v else { panic!("expected numeric") };
+            assert!((q.value() - expected).abs() < 1e-10, "expected {} got {}", expected, q.value());
+        };
+        check(&vals[0], 1.0);
+        check(&vals[1], 2.0_f64.sqrt());
+        check(&vals[2], 3.0_f64.sqrt());
+    }
+
+    #[test]
+    fn run_vector_map_builtin_variable() {
+        assert_eq!(
+            run_format("f = sqrt; [1, 4, 9].map(f)").unwrap(),
+            "[1, 2, 3]"
+        );
+    }
+
+    #[test]
+    fn run_vector_map_sin() {
+        // sin(0 rad) = 0, sin(pi/2 rad) = 1 (exact or numeric)
+        assert_eq!(
+            run_format("[0 rad, 1.5707963267948966 rad].map(sin)").unwrap(),
+            "[0, 1]"
+        );
+    }
+
+    #[test]
+    fn run_vector_map_max_requires_one_parameter() {
+        let e = run("[1, 2, 3].map(max)").unwrap_err();
+        match &e {
+            RunError::UnknownMethod(msg) => assert!(
+                msg.contains("one parameter") && msg.contains("max"),
+                "expected message about one parameter and max, got: {}", msg
+            ),
+            _ => panic!("expected UnknownMethod, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn run_builtin_function_displays_as_function() {
+        assert_eq!(run_format("sqrt").unwrap(), "<function>");
+    }
+
+    #[test]
+    fn run_vector_map_sqrt_uses_eval_registry() {
+        // .map(sqrt) must use the registry from run_with_registry (not a hardcoded default).
+        let registry = default_si_registry();
+        let v = run_with_registry("[1, 4, 9].map(sqrt)", &registry).unwrap();
+        let w = match &v {
+            Value::Vector(w) => w,
+            _ => panic!("expected vector"),
+        };
+        let db = salsa::DatabaseImpl::new();
+        let stream = crate::queries::vector_into_stream(&db, w.inner.clone());
+        let results: Vec<_> = futures::executor::block_on(async move {
+            use futures::stream::StreamExt;
+            stream.collect().await
+        });
+        let vals: Vec<Value> = results
+            .into_iter()
+            .map(|r| r.unwrap().unwrap())
+            .collect();
+        assert_eq!(vals.len(), 3);
+        let Value::Numeric(q0) = &vals[0] else { panic!("numeric") };
+        let Value::Numeric(q1) = &vals[1] else { panic!("numeric") };
+        let Value::Numeric(q2) = &vals[2] else { panic!("numeric") };
+        assert!((q0.value() - 1.0).abs() < 1e-10);
+        assert!((q1.value() - 2.0).abs() < 1e-10);
+        assert!((q2.value() - 3.0).abs() < 1e-10);
     }
 
     #[test]

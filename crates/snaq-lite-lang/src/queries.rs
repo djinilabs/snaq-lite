@@ -899,9 +899,11 @@ pub fn value<'db>(
         ExprData::Lit(q) => Ok(Value::Numeric(q.clone())),
         ExprData::LitFuzzyBool(f) => Ok(Value::FuzzyBool(f.clone())),
         ExprData::LitSymbol(name) => {
-            // Scope first (variables shadow units), then unit (1 in that unit), then symbolic.
+            // Scope first (variables shadow units), then built-in function name, then unit, then symbolic.
             if let Some(stored) = env.get(name) {
                 Ok(stored.to_value())
+            } else if functions::param_names(name).is_some() {
+                Ok(Value::BuiltinFunction(name.clone()))
             } else if let Some(unit) = registry.get_unit_with_prefix(name) {
                 Ok(Value::Numeric(Quantity::new(1.0, unit)))
             } else {
@@ -1001,7 +1003,7 @@ pub fn value<'db>(
                 }
                 Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
                 Value::Undefined => Err(RunError::UndefinedResult),
-                Value::Function(_) => Err(RunError::BindingValueNotSupported(
+                Value::Function(_) | Value::BuiltinFunction(_) => Err(RunError::BindingValueNotSupported(
                     "function value cannot be converted to quantity".to_string(),
                 )),
             }
@@ -1096,30 +1098,55 @@ pub fn value<'db>(
                     }
                     let (_, fn_expr) = &args[0];
                     let fn_val = value(db, scope, *fn_expr)?;
-                    let uf = match &fn_val {
-                        Value::Function(uf) => uf.clone(),
+                    let collected = collect_vector_stream(db, inner);
+                    let results: Vec<Result<Option<Value>, RunError>> = match &fn_val {
+                        Value::Function(uf) => {
+                            // Eager evaluation: we're inside a Salsa query, so we can call value() for each element.
+                            collected
+                                .into_iter()
+                                .map(|r| {
+                                    r.and_then(|opt| {
+                                        opt.map(|elem| {
+                                            apply_user_map_element(db, uf, elem, registry)
+                                                .map(Some)
+                                        })
+                                        .unwrap_or(Ok(None))
+                                    })
+                                })
+                                .collect()
+                        }
+                        Value::BuiltinFunction(name) => {
+                            let params = functions::param_names(name).ok_or_else(|| {
+                                RunError::UnknownMethod(
+                                    "map requires a function (e.g. sqrt or fn (x) => (x+1))"
+                                        .to_string(),
+                                )
+                            })?;
+                            if params.len() != 1 {
+                                return Err(RunError::UnknownMethod(format!(
+                                    "map requires a function of one parameter (e.g. sqrt or fn x => (x+1)), got built-in '{}' which takes {}",
+                                    name,
+                                    params.len()
+                                )));
+                            }
+                            collected
+                                .into_iter()
+                                .map(|r| {
+                                    r.and_then(|opt| {
+                                        opt.map(|elem| {
+                                            apply_unary_builtin(name, &elem, registry).map(Some)
+                                        })
+                                        .unwrap_or(Ok(None))
+                                    })
+                                })
+                                .collect()
+                        }
                         _ => {
                             return Err(RunError::UnknownMethod(
-                                "map requires a function (e.g. fn (x) => (x+1))".to_string(),
+                                "map requires a function (e.g. fn (x) => (x+1) or sqrt)".to_string(),
                             ))
                         }
                     };
-                    // Eager evaluation: we're inside a Salsa query, so we can call value() for each element.
-                    // Streaming UserMap would require value() from outside a query (in stream poll), which Salsa forbids.
-                    let collected = collect_vector_stream(db, inner);
-                    let registry = crate::unit_registry::default_si_registry();
-                    let results: Vec<Result<Option<Value>, RunError>> = collected
-                        .into_iter()
-                        .map(|r| {
-                            r.and_then(|opt| {
-                                opt.map(|elem| {
-                                    apply_user_map_element(db, &uf, elem, &registry)
-                                        .map(Some)
-                                })
-                                .unwrap_or(Ok(None))
-                            })
-                        })
-                        .collect();
                     let ok_results: Vec<Option<Value>> = results
                         .into_iter()
                         .collect::<Result<Vec<_>, _>>()?;
@@ -1909,7 +1936,7 @@ fn value_to_symbolic_expr(v: &Value) -> SymbolicExpr {
         Value::FuzzyBool(_) => panic!("value_to_symbolic_expr: fuzzy boolean not supported"),
         Value::Vector(_) => panic!("value_to_symbolic_expr: vector not supported"),
         Value::Undefined => panic!("value_to_symbolic_expr: undefined not supported"),
-        Value::Function(_) => panic!("value_to_symbolic_expr: function not supported"),
+        Value::Function(_) | Value::BuiltinFunction(_) => panic!("value_to_symbolic_expr: function not supported"),
     }
 }
 
@@ -2151,7 +2178,7 @@ fn cmp_values(
             Ok(Value::FuzzyBool(fuzzy))
         }
         (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
-        (Value::Function(_), _) | (_, Value::Function(_)) => {
+        (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
             Err(RunError::UnknownFunction("function value cannot be used in comparison".to_string()))
         }
         _ => {
@@ -2285,7 +2312,7 @@ fn add_values(
                 _ => RunError::DivisionByZero,
             }),
         (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
-        (Value::Function(_), _) | (_, Value::Function(_)) => {
+        (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
             Err(RunError::UnknownFunction("function value cannot be used in arithmetic".to_string()))
         }
         _ => {
@@ -2394,7 +2421,7 @@ fn sub_values(
                 _ => RunError::DivisionByZero,
             }),
         (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
-        (Value::Function(_), _) | (_, Value::Function(_)) => {
+        (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
             Err(RunError::UnknownFunction("function value cannot be used in arithmetic".to_string()))
         }
         _ => {
@@ -2479,7 +2506,7 @@ fn mul_values(
         }
         (Value::Numeric(qa), Value::Numeric(qb)) => Ok(Value::Numeric(qa.clone() * qb.clone())),
         (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
-        (Value::Function(_), _) | (_, Value::Function(_)) => {
+        (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
             Err(RunError::UnknownFunction("function value cannot be used in arithmetic".to_string()))
         }
         _ => {
@@ -2562,7 +2589,7 @@ fn div_values(
             .map(Value::Numeric)
             .map_err(|_| RunError::DivisionByZero),
         (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(RunError::BooleanResult),
-        (Value::Function(_), _) | (_, Value::Function(_)) => {
+        (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
             Err(RunError::UnknownFunction("function value cannot be used in arithmetic".to_string()))
         }
         _ => {
@@ -2580,7 +2607,7 @@ fn div_values(
 fn neg_value(v: &Value) -> Result<Value, RunError> {
     match v {
         Value::FuzzyBool(_) => Err(RunError::BooleanResult),
-        Value::Function(_) => {
+        Value::Function(_) | Value::BuiltinFunction(_) => {
             Err(RunError::UnknownFunction("function value cannot be negated".to_string()))
         }
         Value::Undefined => Err(RunError::UndefinedResult),
@@ -2606,7 +2633,7 @@ fn value_to_expr_unit(v: &Value) -> (SymbolicExpr, Unit) {
         Value::FuzzyBool(_) => panic!("value_to_expr_unit: fuzzy boolean not supported"),
         Value::Vector(_) => panic!("value_to_expr_unit: vector not supported"),
         Value::Undefined => panic!("value_to_expr_unit: undefined not supported"),
-        Value::Function(_) => panic!("value_to_expr_unit: function not supported"),
+        Value::Function(_) | Value::BuiltinFunction(_) => panic!("value_to_expr_unit: function not supported"),
     }
 }
 
@@ -2652,6 +2679,6 @@ fn scale_expr_to_unit(
         Value::FuzzyBool(_) => Err(RunError::BooleanResult),
         Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
         Value::Undefined => Err(RunError::UndefinedResult),
-        Value::Function(_) => Err(RunError::UnsupportedVectorOperation),
+        Value::Function(_) | Value::BuiltinFunction(_) => Err(RunError::UnsupportedVectorOperation),
     }
 }

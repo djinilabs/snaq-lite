@@ -78,7 +78,7 @@ Vectors support **properties** (no arguments) and **methods** (with arguments) u
   - **`V.length`** — number of elements (0-based count). Example: `[1, 2, 3].length` → `3`; `[].length` → `0`.
 
 - **Methods**
-  - **`V.map(fn (x) => body)`** or **`V.map(fn x => (body))`** — returns a vector where each element is the result of applying the function to the corresponding element. The function must take one parameter. Example: `[1, 2, 3].map(fn (x) => (x+1))` or `[1, 2, 3].map(fn n => (n+1))` → `[2, 3, 4]`. Evaluation is **eager**: all elements are computed when `.map` is called. The function body can use variables from the surrounding scope (closure).
+  - **`V.map(fn (x) => body)`** or **`V.map(fn x => (body))`** — returns a vector where each element is the result of applying the function to the corresponding element. The argument can be a **user function** (one parameter) or a **single-argument built-in** (e.g. `sqrt`, `sin`, `cos`, `tan`). Example: `[1, 2, 3].map(fn (x) => (x+1))` → `[2, 3, 4]`; `[1, 2, 3].map(sqrt)` → `[1, 1.414..., 1.732...]`. You can pass a variable that holds a built-in: `f = sqrt; [1, 4, 9].map(f)` → `[1, 2, 3]`. Evaluation is **eager**: all elements are computed when `.map` is called. The function body can use variables from the surrounding scope (closure).
   - **`V.take(start, length)`** — same as the built-in `take(V, start, length)`: returns a streaming slice from index `start` (0-based) with up to `length` elements. Example: `[1, 2, 3, 4].take(1, 2)` → `[2, 3]`.
   - **`V.sum()`** — sum of all elements (scalar). Empty vector → `0`. Same dimension required.
   - **`V.mean()`** — arithmetic mean (sum / length). Empty vector → error.

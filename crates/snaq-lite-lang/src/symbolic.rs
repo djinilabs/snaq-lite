@@ -600,6 +600,8 @@ pub enum Value {
     Undefined,
     /// User-defined function (inline hashable value; closure env in scope's registry).
     Function(Box<crate::user_function::UserFunction>),
+    /// Built-in function by name (e.g. sqrt, sin); usable where a lambda is required (e.g. .map()).
+    BuiltinFunction(String),
 }
 
 impl Value {
@@ -626,7 +628,7 @@ impl Value {
             Value::FuzzyBool(_) => Err(RunError::BooleanResult),
             Value::Vector(_) => Err(RunError::UnsupportedVectorOperation),
             Value::Undefined => Err(RunError::UndefinedResult),
-            Value::Function(_) => Err(RunError::BindingValueNotSupported(
+            Value::Function(_) | Value::BuiltinFunction(_) => Err(RunError::BindingValueNotSupported(
                 "function value cannot be converted to quantity".to_string(),
             )),
         }
@@ -653,7 +655,7 @@ impl fmt::Display for Value {
             Value::FuzzyBool(fb) => write!(f, "{fb}"),
             Value::Vector(v) => write!(f, "{v}"),
             Value::Undefined => write!(f, "undefined"),
-            Value::Function(_) => write!(f, "<function>"),
+            Value::Function(_) | Value::BuiltinFunction(_) => write!(f, "<function>"),
         }
     }
 }

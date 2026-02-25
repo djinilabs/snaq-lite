@@ -48,7 +48,7 @@ When the result of a program (or block) is a function value—for example, when 
 
 ### Vector `.map`
 
-The vector method `V.map(fn (x) => body)` (or the shorthand `V.map(fn x => (body))`) requires its argument to be a **function of exactly one parameter**. Passing a function with zero or two-or-more parameters (e.g. `[1, 2].map(fn (a, b) => (a+b))`) yields an error. See [VECTORS.md](VECTORS.md) for vector properties and methods.
+The vector method `V.map(...)` accepts either a **user function** or a **single-argument built-in** (e.g. `sqrt`, `sin`, `cos`, `tan`). The function must take exactly one parameter. Examples: `[1, 2, 3].map(fn (x) => (x+1))`, `[1, 2, 3].map(sqrt)`, `f = sqrt; [1, 4, 9].map(f)`. Passing a function with zero or two-or-more parameters (e.g. `[1, 2].map(fn (a, b) => (a+b))`) or a multi-argument built-in like `max` yields an error. See [VECTORS.md](VECTORS.md) for vector properties and methods.
 
 ## Call syntax
 

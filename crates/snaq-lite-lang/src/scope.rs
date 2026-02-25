@@ -31,6 +31,8 @@ pub enum StoredValue {
     Function(Box<UserFunction>),
     /// Vector (id into vector_registry; payload stored there because VectorValue is not Eq+Hash).
     Vector(vector_registry::VectorId),
+    /// Built-in function by name (e.g. sqrt, sin); storable so e.g. f = sqrt works.
+    BuiltinFunction(String),
 }
 
 impl StoredValue {
@@ -48,6 +50,7 @@ impl StoredValue {
                 Ok(StoredValue::Vector(id))
             }
             Value::Function(uf) => Ok(StoredValue::Function(uf.clone())),
+            Value::BuiltinFunction(name) => Ok(StoredValue::BuiltinFunction(name.clone())),
         }
     }
 
@@ -61,6 +64,7 @@ impl StoredValue {
             StoredValue::Vector(id) => vector_registry::get(*id)
                 .map(Value::Vector)
                 .unwrap_or(Value::Undefined),
+            StoredValue::BuiltinFunction(name) => Value::BuiltinFunction(name.clone()),
         }
     }
 }

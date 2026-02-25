@@ -20,6 +20,7 @@ pub mod stat_compare;
 pub mod user_function;
 pub mod unit_registry;
 pub mod vector;
+pub mod vector_registry;
 
 pub use error::{ParseError, RunError};
 pub use quantity::{Quantity, QuantityError, SnaqNumber};
@@ -1035,12 +1036,18 @@ mod tests {
     }
 
     #[test]
-    fn run_binding_vector_returns_binding_value_not_supported() {
-        let err = run("x = [1, 2, 3]").unwrap_err();
+    fn run_binding_vector_succeeds() {
+        let v = run("V = [1, 2, 3]").unwrap();
         assert!(
-            matches!(err, RunError::BindingValueNotSupported(_)),
-            "binding vector should return BindingValueNotSupported, got {:?}",
-            err
+            matches!(v, Value::Vector(_)),
+            "binding vector should succeed and yield vector, got {:?}",
+            v
+        );
+        let v = run("V = [1, 2, 3]\nV").unwrap();
+        assert!(
+            matches!(v, Value::Vector(_)),
+            "bound variable V should evaluate to vector, got {:?}",
+            v
         );
     }
 

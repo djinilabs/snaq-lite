@@ -1358,7 +1358,7 @@ fn eval_user_call(
         bound.insert(name.clone(), v);
     }
     let mut env = uf.closure_env.clone();
-    // Param values must be storable (Numeric, FuzzyBool, Undefined); from_value rejects Vector/Symbolic.
+    // Param values must be storable; from_value rejects only Symbolic (Vector is stored via registry).
     for (name, v) in &bound {
         let stored = StoredValue::from_value(v)?;
         env = env.extend(name.clone(), stored);

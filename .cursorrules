@@ -78,3 +78,7 @@ Whenever you create or change the language syntax and capabilities, you should c
 - focus on the syntax and semantics
 - show use cases
 - clarify important edge cases
+
+## Async behaviour
+
+8. Never block the language runtime. Vectors should be streamed, never fully materialized. This saves memory and allows asynchronous work to be completed while streamming.

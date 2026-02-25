@@ -29,9 +29,17 @@ fn main() {
     }
 
     if numeric {
-        // Single evaluation: run once, then branch on result (function → "<function>", else → quantity).
+        // Single evaluation: run once, then branch on result (function → "<function>", vector/undefined → formatted, else → quantity).
         match snaq_lite_lang::run(&expression) {
             Ok(snaq_lite_lang::Value::Function(_)) => println!("<function>"),
+            Ok(snaq_lite_lang::Value::Vector(_)) | Ok(snaq_lite_lang::Value::Undefined) => {
+                if let Ok(formatted) = snaq_lite_lang::run_format(&expression) {
+                    println!("{formatted}");
+                } else {
+                    eprintln!("error: failed to format result");
+                    std::process::exit(1);
+                }
+            }
             Ok(v) => {
                 let sym_reg = snaq_lite_lang::SymbolRegistry::default_registry();
                 match v.to_quantity(&sym_reg) {

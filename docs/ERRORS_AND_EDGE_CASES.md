@@ -29,7 +29,7 @@ This document lists the main error conditions and edge cases you may encounter w
 | **Both sides of ~ must be numeric** | The explicit-precision operator `~` was used with a symbolic, boolean, or vector operand. |
 | **Precision must be strictly positive** | The right-hand side of `~` was ≤ 0 or non-finite. |
 | **Result is undefined** | You requested a numeric quantity (or scalar) but the result is undefined (e.g. empty program or empty block). |
-| **Binding value not supported** | You tried to bind a symbolic or vector value to a variable; only numeric, FuzzyBool, user-defined function, or undefined can be bound. Converting a function to a quantity (e.g. in unit conversion) also yields this (or a similar) error. |
+| **Binding value not supported** | You tried to bind a symbolic value to a variable (vectors are supported; only symbolic is not). Converting a function to a quantity (e.g. in unit conversion) also yields this (or a similar) error. |
 
 ## Division by zero
 
@@ -46,8 +46,8 @@ There is **no NaN** in the language; only +∞ and −∞ for infinite values.
 
 ## Binding limits
 
-- **Allowed:** Binding a **numeric** value, a **FuzzyBool** (true/false/uncertain), a **user-defined function**, or **undefined** to a variable.
-- **Not allowed (current):** Binding a **symbolic** or **vector** value. The runtime returns an error: **binding value not supported** (or similar message).
+- **Allowed:** Binding a **numeric** value, a **FuzzyBool** (true/false/uncertain), a **user-defined function**, a **vector**, or **undefined** to a variable.
+- **Not allowed (current):** Binding a **symbolic** value. The runtime returns an error: **binding value not supported** (or similar message).
 - **Built-in names:** You cannot bind to `sin`, `cos`, `tan`, `max`, `min`, or `take`; the runtime returns **cannot shadow built-in function**.
 
 See [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md) and [FUNCTIONS.md](FUNCTIONS.md) for scope and user-defined functions.

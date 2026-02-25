@@ -7,12 +7,14 @@
 use crate::fuzzy::FuzzyBool;
 use crate::quantity::Quantity;
 use crate::symbolic::Value;
+use crate::vector_registry;
 use im::OrdMap;
 use std::hash::{Hash, Hasher};
 use std::fmt;
 
-/// Value that can be stored in the scope map. Must be Eq + Hash for Salsa interning.
-/// Vectors and Symbolic are excluded in v1 (variables are numeric, fuzzy bool, or undefined only).
+/// Value that can be stored in the scope map. Must be Eq + Hash (Scope is Salsa-interned by Env).
+/// Bindings are unified here: each variable name maps to exactly one StoredValue.
+/// For vectors we store an id; the actual payload lives in [vector_registry](crate::vector_registry) (VectorValue is not Hash).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum StoredValue {
     Numeric(Quantity),
@@ -20,6 +22,8 @@ pub enum StoredValue {
     Undefined,
     /// User-defined function (id into user_function registry).
     Function(crate::user_function::UserFunctionId),
+    /// Vector (id into vector_registry; payload stored there because VectorValue is not Eq+Hash).
+    Vector(vector_registry::VectorId),
 }
 
 impl StoredValue {
@@ -32,9 +36,10 @@ impl StoredValue {
             )),
             Value::FuzzyBool(fb) => Ok(StoredValue::FuzzyBool(fb.clone())),
             Value::Undefined => Ok(StoredValue::Undefined),
-            Value::Vector(_) => Err(crate::error::RunError::BindingValueNotSupported(
-                "vector value not yet supported".to_string(),
-            )),
+            Value::Vector(v) => {
+                let id = vector_registry::register(v.clone());
+                Ok(StoredValue::Vector(id))
+            }
             Value::Function(id) => Ok(StoredValue::Function(*id)),
         }
     }
@@ -46,6 +51,9 @@ impl StoredValue {
             StoredValue::FuzzyBool(fb) => Value::FuzzyBool(fb.clone()),
             StoredValue::Undefined => Value::Undefined,
             StoredValue::Function(id) => Value::Function(*id),
+            StoredValue::Vector(id) => vector_registry::get(*id)
+                .map(Value::Vector)
+                .unwrap_or(Value::Undefined),
         }
     }
 }

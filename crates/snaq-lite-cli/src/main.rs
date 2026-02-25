@@ -29,37 +29,43 @@ fn main() {
     }
 
     if numeric {
-        // If the result is a function, print <function> instead of requiring a quantity.
-        if let Ok(snaq_lite_lang::Value::Function(_)) = snaq_lite_lang::run(&expression) {
-            println!("<function>");
-        } else {
-            match snaq_lite_lang::run_numeric(&expression) {
-                Ok(result) => {
-                    let value = result.value();
-                    let value_str = format_value(value);
-                    let variance = result.variance();
-                    if variance > 0.0 {
-                        let std_dev = variance.sqrt();
-                        let dev_str = if std_dev > 0.0 && !(1e-6..1e10).contains(&std_dev) {
-                            format!("{std_dev:.4e}")
+        // Single evaluation: run once, then branch on result (function → "<function>", else → quantity).
+        match snaq_lite_lang::run(&expression) {
+            Ok(snaq_lite_lang::Value::Function(_)) => println!("<function>"),
+            Ok(v) => {
+                let sym_reg = snaq_lite_lang::SymbolRegistry::default_registry();
+                match v.to_quantity(&sym_reg) {
+                    Ok(result) => {
+                        let value = result.value();
+                        let value_str = format_value(value);
+                        let variance = result.variance();
+                        if variance > 0.0 {
+                            let std_dev = variance.sqrt();
+                            let dev_str = if std_dev > 0.0 && !(1e-6..1e10).contains(&std_dev) {
+                                format!("{std_dev:.4e}")
+                            } else {
+                                format!("{std_dev}")
+                            };
+                            if result.unit().is_scalar() {
+                                println!("{value_str} (± {dev_str})");
+                            } else {
+                                println!("{value_str} (± {dev_str}) {}", result.unit());
+                            }
+                        } else if result.unit().is_scalar() {
+                            println!("{value_str}");
                         } else {
-                            format!("{std_dev}")
-                        };
-                        if result.unit().is_scalar() {
-                            println!("{value_str} (± {dev_str})");
-                        } else {
-                            println!("{value_str} (± {dev_str}) {}", result.unit());
+                            println!("{value_str} {}", result.unit());
                         }
-                    } else if result.unit().is_scalar() {
-                        println!("{value_str}");
-                    } else {
-                        println!("{value_str} {}", result.unit());
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
                     }
                 }
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
             }
         }
     } else {

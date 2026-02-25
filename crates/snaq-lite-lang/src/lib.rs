@@ -1399,6 +1399,8 @@ mod tests {
             ExprDef::Call(name, args) => {
                 assert_eq!(name, "max");
                 assert_eq!(args.len(), 2);
+                assert!(matches!(&args[0], CallArg::Positional(_)), "first arg positional");
+                assert!(matches!(&args[1], CallArg::Positional(_)), "second arg positional");
             }
             _ => panic!("expected Call"),
         }
@@ -1552,6 +1554,17 @@ mod tests {
     }
 
     #[test]
+    fn run_user_function_positional_args() {
+        let v = run_with_registry(
+            "fn sub(a, b) => (a - b)\nsub(10, 2)",
+            &default_si_registry(),
+        )
+        .unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 8.0).abs() < 1e-10, "sub(10, 2) = 8");
+    }
+
+    #[test]
     fn run_user_function_named_args() {
         let v = run_with_registry(
             "fn sub(a, b) => (a - b)\nsub(b: 2, a: 10)",
@@ -1559,7 +1572,67 @@ mod tests {
         )
         .unwrap();
         let Value::Numeric(q) = v else { panic!("expected numeric") };
-        assert!((q.value() - 8.0).abs() < 1e-10);
+        assert!((q.value() - 8.0).abs() < 1e-10, "named order b,a => a - b = 10 - 2 = 8");
+    }
+
+    #[test]
+    fn run_user_function_mixed_positional_and_named_args() {
+        let v = run_with_registry(
+            "fn sub(a, b) => (a - b)\nsub(10, b: 2)",
+            &default_si_registry(),
+        )
+        .unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 8.0).abs() < 1e-10, "sub(10, b: 2) => a=10, b=2 => 8");
+        let v = run_with_registry(
+            "fn sub(a, b) => (a - b)\nsub(a: 10, 2)",
+            &default_si_registry(),
+        )
+        .unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 8.0).abs() < 1e-10, "sub(a: 10, 2) => a=10, b=2 => 8");
+    }
+
+    #[test]
+    fn run_user_function_unknown_parameter_name() {
+        let e = run_with_registry(
+            "fn sub(a, b) => (a - b)\nsub(z: 1, b: 2)",
+            &default_si_registry(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(e, RunError::UnknownFunction(ref s) if s.contains("unknown parameter") && s.contains("z")),
+            "expected unknown parameter 'z', got {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn run_user_function_duplicate_parameter() {
+        let e = run_with_registry(
+            "fn sub(a, b) => (a - b)\nsub(a: 10, a: 2)",
+            &default_si_registry(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(e, RunError::UnknownFunction(ref s) if s.contains("duplicate parameter") && s.contains("a")),
+            "expected duplicate parameter 'a', got {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn run_user_function_too_many_args() {
+        let e = run_with_registry(
+            "fn sub(a, b) => (a - b)\nsub(1, 2, 3)",
+            &default_si_registry(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(e, RunError::UnknownFunction(ref s) if s.contains("too many arguments") && s.contains("expected 2")),
+            "expected too many arguments (expected 2), got {:?}",
+            e
+        );
     }
 
     #[test]

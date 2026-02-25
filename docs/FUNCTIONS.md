@@ -37,9 +37,12 @@ The body of a function can use variables from the scope where the function was d
 ### Errors and edge cases (user-defined)
 
 - **Required parameters:** Every parameter that has no default must receive an argument (positional or named). Otherwise you get an error such as "missing argument for parameter 'name'".
+- **Unknown parameter name:** Using a named argument whose name is not a parameter (e.g. `f(z: 1)` when `f` has no parameter `z`) is an error.
 - **Duplicate parameter:** Passing the same parameter name more than once in a call (e.g. `f(a: 1, a: 2)`) is an error.
 - **Too many arguments:** Passing more positional arguments than the number of parameters is an error.
 - **Not callable:** If you apply arguments to a value that is not a function (e.g. a number), the runtime reports that the expression is not callable.
+
+When the result of a program (or block) is a function value—for example, when the last expression is a function definition—it displays as `<function>` and cannot be converted to a numeric quantity.
 
 ## Call syntax
 

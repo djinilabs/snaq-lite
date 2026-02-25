@@ -1129,6 +1129,184 @@ pub fn value<'db>(
                         orientation,
                     }))
                 }
+                "sum" => {
+                    if !args.is_empty() {
+                        return Err(RunError::UnknownMethod(
+                            "sum takes no arguments".to_string(),
+                        ));
+                    }
+                    let collected = collect_vector_stream(db, inner);
+                    let sum_val = sum_vector_elements(&collected, registry)?;
+                    Ok(sum_val)
+                }
+                "mean" => {
+                    if !args.is_empty() {
+                        return Err(RunError::UnknownMethod(
+                            "mean takes no arguments".to_string(),
+                        ));
+                    }
+                    let collected = collect_vector_stream(db, inner);
+                    let n = collected
+                        .iter()
+                        .filter(|r| r.as_ref().is_ok_and(|o| o.is_some()))
+                        .count();
+                    if n == 0 {
+                        return Err(RunError::EmptyVectorReduction("mean".to_string()));
+                    }
+                    let sum_val = sum_vector_elements(&collected, registry)?;
+                    let len_val = Value::Numeric(Quantity::from_exact_scalar(n as f64));
+                    div_values(&sum_val, &len_val, registry, None)
+                }
+                "min" => {
+                    if !args.is_empty() {
+                        return Err(RunError::UnknownMethod(
+                            "min takes no arguments".to_string(),
+                        ));
+                    }
+                    let collected = collect_vector_stream(db, inner);
+                    reduce_min_max(&collected, registry, false, "min")
+                }
+                "max" => {
+                    if !args.is_empty() {
+                        return Err(RunError::UnknownMethod(
+                            "max takes no arguments".to_string(),
+                        ));
+                    }
+                    let collected = collect_vector_stream(db, inner);
+                    reduce_min_max(&collected, registry, true, "max")
+                }
+                "dot" => {
+                    if args.len() != 1 {
+                        return Err(RunError::UnknownMethod(format!(
+                            "dot requires 1 argument (another vector), got {}",
+                            args.len()
+                        )));
+                    }
+                    let (_, other_expr) = &args[0];
+                    let other_val = value(db, scope, *other_expr)?;
+                    let VectorValue { inner: other_inner, .. } = match &other_val {
+                        Value::Vector(v) => v.clone(),
+                        _ => {
+                            return Err(RunError::UnknownMethod(
+                                "dot requires a vector argument".to_string(),
+                            ))
+                        }
+                    };
+                    let left_elems = collect_vector_stream(db, inner);
+                    let right_elems = collect_vector_stream(db, other_inner);
+                    dot_product(&left_elems, &right_elems, registry)
+                }
+                "norm" => {
+                    if !args.is_empty() {
+                        return Err(RunError::UnknownMethod(
+                            "norm takes no arguments".to_string(),
+                        ));
+                    }
+                    let collected = collect_vector_stream(db, inner);
+                    let mut sum_sq = Value::Numeric(Quantity::from_scalar(0.0));
+                    for r in &collected {
+                        let opt = r.as_ref().map_err(|e| e.clone())?;
+                        if let Some(v) = opt {
+                            let sq = mul_values(v, v, registry, None)?;
+                            sum_sq = add_values(&sum_sq, &sq, registry, None)?;
+                        }
+                    }
+                    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+                    let sum_sq_q = sum_sq.to_quantity(&sym_reg).map_err(|_| {
+                        RunError::UnknownMethod(
+                            "norm: elements must be numeric (same dimension)".to_string(),
+                        )
+                    })?;
+                    functions::call_builtin("sqrt", &[sum_sq_q], registry)
+                }
+                "product" => {
+                    if !args.is_empty() {
+                        return Err(RunError::UnknownMethod(
+                            "product takes no arguments".to_string(),
+                        ));
+                    }
+                    let collected = collect_vector_stream(db, inner);
+                    product_vector_elements(&collected, registry)
+                }
+                "variance" => {
+                    if !args.is_empty() {
+                        return Err(RunError::UnknownMethod(
+                            "variance takes no arguments".to_string(),
+                        ));
+                    }
+                    let collected = collect_vector_stream(db, inner);
+                    compute_variance_value(&collected, registry)
+                }
+                "stddev" => {
+                    if !args.is_empty() {
+                        return Err(RunError::UnknownMethod(
+                            "stddev takes no arguments".to_string(),
+                        ));
+                    }
+                    let collected = collect_vector_stream(db, inner);
+                    let variance_val = compute_variance_value(&collected, registry)?;
+                    let sym_reg =
+                        crate::symbol_registry::SymbolRegistry::default_registry();
+                    let variance_q = variance_val.to_quantity(&sym_reg).map_err(|_| {
+                        RunError::UnknownMethod(
+                            "stddev: elements must be numeric (same dimension)"
+                                .to_string(),
+                        )
+                    })?;
+                    functions::call_builtin("sqrt", &[variance_q], registry)
+                }
+                "all" => {
+                    if !args.is_empty() {
+                        return Err(RunError::UnknownMethod(
+                            "all takes no arguments".to_string(),
+                        ));
+                    }
+                    let collected = collect_vector_stream(db, inner);
+                    let defined: Vec<Value> = collected
+                        .iter()
+                        .filter_map(|r| r.as_ref().ok().and_then(|o| o.clone()))
+                        .collect();
+                    let mut acc = crate::fuzzy::FuzzyBool::True;
+                    for v in &defined {
+                        let f = match v {
+                            Value::FuzzyBool(f) => f.clone(),
+                            _ => {
+                                return Err(RunError::UnknownMethod(
+                                    "all: elements must be boolean (e.g. from comparison)"
+                                        .to_string(),
+                                ))
+                            }
+                        };
+                        acc = acc.and_(&f);
+                    }
+                    Ok(Value::FuzzyBool(acc))
+                }
+                "any" => {
+                    if !args.is_empty() {
+                        return Err(RunError::UnknownMethod(
+                            "any takes no arguments".to_string(),
+                        ));
+                    }
+                    let collected = collect_vector_stream(db, inner);
+                    let defined: Vec<Value> = collected
+                        .iter()
+                        .filter_map(|r| r.as_ref().ok().and_then(|o| o.clone()))
+                        .collect();
+                    let mut acc = crate::fuzzy::FuzzyBool::False;
+                    for v in &defined {
+                        let f = match v {
+                            Value::FuzzyBool(f) => f.clone(),
+                            _ => {
+                                return Err(RunError::UnknownMethod(
+                                    "any: elements must be boolean (e.g. from comparison)"
+                                        .to_string(),
+                                ))
+                            }
+                        };
+                        acc = acc.or_(&f);
+                    }
+                    Ok(Value::FuzzyBool(acc))
+                }
                 _ => Err(RunError::UnknownMethod(name.clone())),
             }
         }
@@ -1599,8 +1777,8 @@ fn eval_call(
             )));
         }
     }
-    // Unary built-ins (sin, cos, tan): map over vector when the single argument is a vector.
-    if param_names.len() == 1 && matches!(name, "sin" | "cos" | "tan") {
+    // Unary built-ins (sin, cos, tan, sqrt): map over vector when the single argument is a vector.
+    if param_names.len() == 1 && matches!(name, "sin" | "cos" | "tan" | "sqrt") {
         let v = bound.get(param_names[0]).unwrap();
         if let Value::Vector(v) = v {
             return Ok(Value::Vector(VectorValue {
@@ -1748,6 +1926,88 @@ fn sum_vector_elements(
         }
     }
     Ok(acc)
+}
+
+/// Product of all elements of a collected vector. Skips None (sparse); empty → 1.
+fn product_vector_elements(
+    elems: &[Result<Option<Value>, RunError>],
+    registry: &UnitRegistry,
+) -> Result<Value, RunError> {
+    let mut acc = Value::Numeric(Quantity::from_scalar(1.0));
+    for r in elems {
+        let opt = r.as_ref().map_err(|e| e.clone())?;
+        if let Some(v) = opt {
+            acc = mul_values(&acc, v, registry, None)?;
+        }
+    }
+    Ok(acc)
+}
+
+/// Population variance (mean of squares minus square of mean) over collected vector elements.
+/// Empty or all-sparse → EmptyVectorReduction("variance").
+fn compute_variance_value(
+    collected: &[Result<Option<Value>, RunError>],
+    registry: &UnitRegistry,
+) -> Result<Value, RunError> {
+    let defined_count = collected
+        .iter()
+        .filter(|r| r.as_ref().is_ok_and(|o| o.is_some()))
+        .count();
+    if defined_count == 0 {
+        return Err(RunError::EmptyVectorReduction("variance".to_string()));
+    }
+    let n = defined_count as f64;
+    let sum_x = sum_vector_elements(collected, registry)?;
+    let mut sum_sq = Value::Numeric(Quantity::from_scalar(0.0));
+    for r in collected {
+        let opt = r.as_ref().map_err(|e| e.clone())?;
+        if let Some(v) = opt {
+            let sq = mul_values(v, v, registry, None)?;
+            sum_sq = add_values(&sum_sq, &sq, registry, None)?;
+        }
+    }
+    let len_val = Value::Numeric(Quantity::from_exact_scalar(n));
+    let mean_val = div_values(&sum_x, &len_val, registry, None)?;
+    let mean_sq_val = div_values(&sum_sq, &len_val, registry, None)?;
+    let mean_sq_mean = mul_values(&mean_val, &mean_val, registry, None)?;
+    sub_values(&mean_sq_val, &mean_sq_mean, registry, None)
+}
+
+/// Min or max over collected vector elements (numeric only). Empty → EmptyVectorReduction.
+fn reduce_min_max(
+    elems: &[Result<Option<Value>, RunError>],
+    registry: &UnitRegistry,
+    is_max: bool,
+    method_name: &str,
+) -> Result<Value, RunError> {
+    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+    let values: Vec<Value> = elems
+        .iter()
+        .filter_map(|r| r.as_ref().ok().and_then(|o| o.clone()))
+        .collect();
+    if values.is_empty() {
+        return Err(RunError::EmptyVectorReduction(method_name.to_string()));
+    }
+    let name = if is_max { "max" } else { "min" };
+    let mut acc_q = values[0].clone().to_quantity(&sym_reg).map_err(|_| {
+        RunError::UnknownMethod(format!(
+            "{method_name}: elements must be numeric (same dimension)"
+        ))
+    })?;
+    for v in values.iter().skip(1) {
+        let q = v.to_quantity(&sym_reg).map_err(|_| {
+            RunError::UnknownMethod(format!(
+                "{method_name}: elements must be numeric (same dimension)"
+            ))
+        })?;
+        let result = functions::call_builtin(name, &[acc_q, q], registry)?;
+        acc_q = result.to_quantity(&sym_reg).map_err(|_| {
+            RunError::UnknownMethod(format!(
+                "{method_name}: elements must be numeric (same dimension)"
+            ))
+        })?;
+    }
+    Ok(Value::Numeric(acc_q))
 }
 
 /// Comparison operator used by [cmp_values].

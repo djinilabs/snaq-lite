@@ -2084,6 +2084,93 @@ mod tests {
     }
 
     #[test]
+    fn run_vector_sum() {
+        assert_eq!(run_format("[1, 2, 3].sum()").unwrap(), "6");
+        assert_eq!(run_format("[].sum()").unwrap(), "0");
+        assert_eq!(run_format("[1 m, 2 m, 3 m].sum()").unwrap(), "6 m");
+        let q = run_numeric("[1, 2, 3].sum()").unwrap();
+        assert_eq!(q.value(), 6.0);
+    }
+
+    #[test]
+    fn run_vector_mean() {
+        assert_eq!(run_format("[2, 4, 6].mean()").unwrap(), "4");
+        assert_eq!(run_format("[1 m, 3 m, 5 m].mean()").unwrap(), "3 m");
+        let e = run("[].mean()").unwrap_err();
+        assert!(matches!(e, RunError::EmptyVectorReduction(_)));
+    }
+
+    #[test]
+    fn run_vector_min_max() {
+        assert_eq!(run_format("[3, 1, 2].min()").unwrap(), "1");
+        assert_eq!(run_format("[3, 1, 2].max()").unwrap(), "3");
+        assert_eq!(run_format("[1 m, 5 m, 2 m].min()").unwrap(), "1 m");
+        assert_eq!(run_format("[1 m, 5 m, 2 m].max()").unwrap(), "5 m");
+        let e = run("[].min()").unwrap_err();
+        assert!(matches!(e, RunError::EmptyVectorReduction(_)));
+        let e = run("[].max()").unwrap_err();
+        assert!(matches!(e, RunError::EmptyVectorReduction(_)));
+    }
+
+    #[test]
+    fn run_sqrt_builtin() {
+        assert_eq!(run_format("sqrt(4)").unwrap(), "2");
+        assert_eq!(run_format("sqrt(9)").unwrap(), "3");
+        // sqrt(4 m²) = 2 m (length); display format may show unit as m or m2^1/2
+        let sqrt_area = run_format("sqrt(4 m2)").unwrap();
+        assert!(sqrt_area.starts_with("2 "));
+        let q = run_numeric("sqrt(4 m2)").unwrap();
+        assert!((q.value() - 2.0).abs() < 1e-10);
+        let e = run("sqrt(-1)").unwrap_err();
+        assert!(matches!(e, RunError::InvalidArgument(msg) if msg.contains("non-negative")));
+    }
+
+    #[test]
+    fn run_sqrt_vector() {
+        assert_eq!(run_format("sqrt([1, 4, 9])").unwrap(), "[1, 2, 3]");
+    }
+
+    #[test]
+    fn run_vector_dot_norm() {
+        assert_eq!(run_format("[1, 2, 3].dot([4, 5, 6])").unwrap(), "32");
+        assert_eq!(run_format("[1, 0, 0].dot([1, 0, 0])").unwrap(), "1");
+        assert_eq!(run_format("[3, 4].norm()").unwrap(), "5");
+        assert_eq!(run_format("[].norm()").unwrap(), "0");
+        let e = run("[1, 2].dot([1, 2, 3])").unwrap_err();
+        assert!(matches!(e, RunError::VectorLengthMismatch { .. }));
+    }
+
+    #[test]
+    fn run_vector_product_variance_stddev() {
+        assert_eq!(run_format("[2, 3, 4].product()").unwrap(), "24");
+        assert_eq!(run_format("[].product()").unwrap(), "1");
+        assert_eq!(run_format("[2, 4, 4, 4, 5, 5, 7, 9].variance()").unwrap(), "4");
+        assert_eq!(run_format("[2, 4, 4, 4, 5, 5, 7, 9].stddev()").unwrap(), "2");
+        let e = run("[].variance()").unwrap_err();
+        assert!(matches!(e, RunError::EmptyVectorReduction(_)));
+        let e = run("[].stddev()").unwrap_err();
+        assert!(matches!(e, RunError::EmptyVectorReduction(_)));
+        // Single element: variance 0, stddev 0
+        assert_eq!(run_format("[7].variance()").unwrap(), "0");
+        assert_eq!(run_format("[7].stddev()").unwrap(), "0");
+    }
+
+    #[test]
+    fn run_vector_all_any() {
+        // With variance, comparisons can be Uncertain; all()/any() combine FuzzyBools
+        let all_true = run_format("[1 < 2, 2 < 3, 3 < 4].all()").unwrap();
+        assert!(all_true == "true" || all_true.starts_with("uncertain"));
+        let all_one_false = run_format("[1 < 2, 2 > 3, 3 < 4].all()").unwrap();
+        assert!(all_one_false == "false" || all_one_false.starts_with("uncertain"));
+        let any_true = run_format("[1 > 2, 2 > 3, 3 < 4].any()").unwrap();
+        assert!(any_true == "true" || any_true.starts_with("uncertain"));
+        let any_all_false = run_format("[1 > 2, 2 > 3, 3 > 4].any()").unwrap();
+        assert!(any_all_false == "false" || any_all_false.starts_with("uncertain"));
+        assert_eq!(run_format("[].all()").unwrap(), "true");
+        assert_eq!(run_format("[].any()").unwrap(), "false");
+    }
+
+    #[test]
     fn run_vector_member_on_non_vector() {
         let e = run("(1).length").unwrap_err();
         assert!(matches!(e, RunError::ExpectedVector));

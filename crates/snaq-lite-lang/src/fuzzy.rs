@@ -24,6 +24,30 @@ impl FuzzyBool {
             _ => None,
         }
     }
+
+    /// Logical AND: both must be true. Uncertain(p) and Uncertain(q) => Uncertain(p*q).
+    pub fn and_(self, other: &FuzzyBool) -> FuzzyBool {
+        match (&self, other) {
+            (FuzzyBool::False, _) | (_, FuzzyBool::False) => FuzzyBool::False,
+            (FuzzyBool::True, x) => x.clone(),
+            (x, FuzzyBool::True) => x.clone(),
+            (FuzzyBool::Uncertain(p), FuzzyBool::Uncertain(q)) => {
+                FuzzyBool::Uncertain(OrderedFloat(p.0 * q.0))
+            }
+        }
+    }
+
+    /// Logical OR: at least one true. Uncertain(p) or Uncertain(q) => Uncertain(1 - (1-p)(1-q)).
+    pub fn or_(self, other: &FuzzyBool) -> FuzzyBool {
+        match (&self, other) {
+            (FuzzyBool::True, _) | (_, FuzzyBool::True) => FuzzyBool::True,
+            (FuzzyBool::False, x) => x.clone(),
+            (x, FuzzyBool::False) => x.clone(),
+            (FuzzyBool::Uncertain(p), FuzzyBool::Uncertain(q)) => {
+                FuzzyBool::Uncertain(OrderedFloat(1.0 - (1.0 - p.0) * (1.0 - q.0)))
+            }
+        }
+    }
 }
 
 impl fmt::Display for FuzzyBool {

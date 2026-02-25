@@ -44,6 +44,10 @@ pub enum RunError {
     UnknownProperty(String),
     /// Method not supported on this value (e.g. vector has no method with that name).
     UnknownMethod(String),
+    /// Reduction (mean, min, max, variance, stddev) on an empty vector is undefined.
+    EmptyVectorReduction(String),
+    /// Built-in function received an invalid argument (e.g. sqrt of negative).
+    InvalidArgument(String),
 }
 
 /// Parse error for expression strings.
@@ -138,6 +142,10 @@ impl std::fmt::Display for RunError {
             RunError::UnknownMethod(name) => {
                 write!(f, "unknown method: {name}")
             }
+            RunError::EmptyVectorReduction(method) => {
+                write!(f, "empty vector: {method} requires at least one element")
+            }
+            RunError::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
         }
     }
 }

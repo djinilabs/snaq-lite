@@ -23,7 +23,8 @@ This document lists the main error conditions and edge cases you may encounter w
 | **Invalid index** | A vector index (e.g. `V[i]` or `take(V, start, length)`) used a non-numeric, negative, or non-finite value for the index, start, or length. |
 | **Index out of bounds** | Single-element access `V[index]` or `V.0` was used with an index not less than the vector length. |
 | **Unknown property** | Property access (e.g. `V.length`) used a name that is not supported on the value. Vectors support only `length`. |
-| **Unknown method** | Method call (e.g. `V.map(...)`, `V.take(1, 2)`) used a name that is not supported on the value. Vectors support only `map` and `take`. Wrong number of arguments (e.g. `map` with no args or two) or non-callable argument (e.g. `map(1)`) also yields an error. |
+| **Unknown method** | Method call (e.g. `V.map(...)`, `V.sum()`) used a name that is not supported on the value. Vectors support `map`, `take`, `sum`, `mean`, `min`, `max`, `dot`, `norm`, `product`, `variance`, `stddev`, `all`, `any`. Wrong number of arguments or wrong argument type (e.g. `map(1)` instead of a function, or `dot` with non-vector) also yields an error. |
+| **Empty vector reduction** | The methods **mean**, **min**, **max**, **variance**, and **stddev** require at least one element. Called on an empty vector, they return **empty vector: &lt;method&gt; requires at least one element**. |
 | **Property/method on non-vector** | Dot access for a property or method (e.g. `(1).length`, `x.map(fn (a)=>a)`) was applied to a non-vector (scalar or symbolic). The runtime returns an error that a vector was expected. |
 | **Vector length mismatch** | A vector operation (element-wise or similar) required two vectors of the same length; the lengths differed. |
 | **Boolean result** | You requested a numeric quantity but the result is a comparison (true/false/uncertain). |
@@ -33,6 +34,7 @@ This document lists the main error conditions and edge cases you may encounter w
 | **Precision must be strictly positive** | The right-hand side of `~` was ≤ 0 or non-finite. |
 | **Result is undefined** | You requested a numeric quantity (or scalar) but the result is undefined (e.g. empty program or empty block). |
 | **Binding value not supported** | You tried to bind a symbolic value to a variable (vectors are supported; only symbolic is not). Converting a function to a quantity (e.g. in unit conversion) also yields this (or a similar) error. |
+| **Invalid argument** | A built-in function received an invalid argument (e.g. `sqrt(-1)` → argument must be non-negative). |
 
 ## Division by zero
 
@@ -51,7 +53,7 @@ There is **no NaN** in the language; only +∞ and −∞ for infinite values.
 
 - **Allowed:** Binding a **numeric** value, a **FuzzyBool** (true/false/uncertain), a **user-defined function**, a **vector**, or **undefined** to a variable.
 - **Not allowed (current):** Binding a **symbolic** value. The runtime returns an error: **binding value not supported** (or similar message).
-- **Built-in names:** You cannot bind to `sin`, `cos`, `tan`, `max`, `min`, or `take`; the runtime returns **cannot shadow built-in function**.
+- **Built-in names:** You cannot bind to `sin`, `cos`, `tan`, `max`, `min`, `sqrt`, or `take`; the runtime returns **cannot shadow built-in function**.
 
 See [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md) and [FUNCTIONS.md](FUNCTIONS.md) for scope and user-defined functions.
 

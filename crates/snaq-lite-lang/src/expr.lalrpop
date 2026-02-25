@@ -270,8 +270,9 @@ CallArg: CallArg = {
     <e:Expr> => CallArg::Positional(Box::new(e)),
 };
 
-// Left-recursive list to avoid reduce/shift conflict on ",".
+// Left-recursive list to avoid reduce/shift conflict on ",". Empty allowed (e.g. V.sum()).
 ArgList: Vec<CallArg> = {
+    => vec![],
     <single:CallArg> => vec![single],
     <rest:ArgList> "," <last:CallArg> => {
         let mut rest = rest;

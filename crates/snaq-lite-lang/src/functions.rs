@@ -291,7 +291,7 @@ pub fn exact_tan_match(m: KnownAngleMatch) -> Option<SymbolicExpr> {
 /// Parameter names for each built-in (order matters for positional binding).
 pub fn param_names(name: &str) -> Option<&'static [&'static str]> {
     match name {
-        "sin" | "cos" | "tan" => Some(&["x"]),
+        "sin" | "cos" | "tan" | "sqrt" => Some(&["x"]),
         "max" | "min" => Some(&["a", "b"]),
         "take" => Some(&["vector", "start", "length"]),
         _ => None,
@@ -334,6 +334,28 @@ pub fn call_builtin(
         "min" => {
             let (a, b) = exactly_two(param_values, "min")?;
             same_dimension_max_min(a, b, registry, |x, y| x.min(y))
+        }
+        "sqrt" => {
+            let x = exactly_one(param_values, "sqrt")?;
+            let v = x.value();
+            if v < 0.0 {
+                return Err(RunError::InvalidArgument(
+                    "sqrt: argument must be non-negative".to_string(),
+                ));
+            }
+            let result_value = v.sqrt();
+            let var_x = x.variance();
+            // Var(sqrt(x)) ≈ (1/(2*sqrt(x)))^2 * Var(x) = Var(x)/(4*x); for x <= 0 use 0
+            let result_variance = if v > 0.0 && result_value > 0.0 {
+                var_x / (4.0 * v)
+            } else {
+                0.0
+            };
+            let half = crate::dimension::Exponent::new(1, 2);
+            Ok(Value::Numeric(Quantity::with_number(
+                SnaqNumber::new(result_value, result_variance),
+                x.unit().clone().power(half),
+            )))
         }
         _ => Err(RunError::UnknownFunction(name.to_string())),
     }

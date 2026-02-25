@@ -80,8 +80,21 @@ Vectors support **properties** (no arguments) and **methods** (with arguments) u
 - **Methods**
   - **`V.map(fn (x) => body)`** or **`V.map(fn x => (body))`** — returns a vector where each element is the result of applying the function to the corresponding element. The function must take one parameter. Example: `[1, 2, 3].map(fn (x) => (x+1))` or `[1, 2, 3].map(fn n => (n+1))` → `[2, 3, 4]`. Evaluation is **eager**: all elements are computed when `.map` is called. The function body can use variables from the surrounding scope (closure).
   - **`V.take(start, length)`** — same as the built-in `take(V, start, length)`: returns a streaming slice from index `start` (0-based) with up to `length` elements. Example: `[1, 2, 3, 4].take(1, 2)` → `[2, 3]`.
+  - **`V.sum()`** — sum of all elements (scalar). Empty vector → `0`. Same dimension required.
+  - **`V.mean()`** — arithmetic mean (sum / length). Empty vector → error.
+  - **`V.min()`**, **`V.max()`** — minimum or maximum element (scalar). Empty vector → error. Elements must be numeric, same dimension.
+  - **`V.dot(other)`** — dot product with another vector (element-wise pairing; same length required). Returns a scalar.
+  - **`V.norm()`** — L2 norm (Euclidean length): √(sum of squares of elements). Empty vector → `0`. Same dimension required.
+  - **`V.product()`** — product of all elements (scalar). Empty vector → `1`. Same dimension required.
+  - **`V.variance()`** — population variance (mean of squares minus square of mean). Empty vector → error. Result has squared dimension (e.g. m² for lengths in m).
+  - **`V.stddev()`** — standard deviation (√ of variance). Empty vector → error.
+  - **`V.all()`** — true if every element is true; **`V.any()`** — true if any element is true. Elements must be boolean (e.g. from comparisons). Empty vector: `all()` → true, `any()` → false.
 
 Numeric index access (e.g. `V.0`, `V.1`) is unchanged: use a **number** after the dot for single-element access; use an **identifier** (e.g. `length`, `map`) for property or method access. Unknown property or method names return **unknown property** or **unknown method**.
+
+### Math and statistics (for students)
+
+The methods **sum**, **mean**, **min**, **max**, **dot**, **norm**, **product**, **variance**, and **stddev** support typical science and math workflows: net force (sum of force vectors), average value (mean), bounds (min/max), dot product and vector length (norm), compound growth (product), and spread (variance, stddev). All reduction methods require elements to have the same dimension (or be boolean for **all**/**any**). Empty-vector behaviour: **sum** → 0, **product** → 1, **norm** → 0; **mean**, **min**, **max**, **variance**, **stddev** return an error.
 
 ## Display
 
@@ -90,7 +103,7 @@ Vectors are displayed in a list-like form, e.g. `[1, 2, 3]` or `[1 m, 2 m]`. Nes
 ## Limits (current)
 
 - **Converting a vector to a single quantity:** Not supported. If the result of an expression is a vector and you request a numeric quantity (e.g. `run_numeric`), the runtime returns an error: **operation not supported for vector**.
-- **Binding a vector to a variable:** Not supported in the current version. Binding a vector value to a name returns an error: **binding value not supported** (see [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md) and [ERRORS_AND_EDGE_CASES.md](ERRORS_AND_EDGE_CASES.md)).
+- **Binding a vector to a variable:** Supported. You can bind a vector to a name and use it in later expressions (see [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md)).
 
 ## See also
 

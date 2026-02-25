@@ -87,11 +87,21 @@ Positional and named arguments can be mixed. The language binds positional argum
 - **Dimension mismatch** — if the two arguments have different dimensions (e.g. `max(1 m, 2 s)`).
 - **Wrong arity** — e.g. `max(1)`.
 
+### sqrt
+
+- **Arity:** One argument.
+- **Argument:** Non-negative value (dimensionless or any dimension; e.g. area for length result).
+- **Result:** Square root; result unit is the argument unit raised to 1/2 (e.g. sqrt(4 m²) → 2 m). Variance is propagated. When applied to a **vector**, **element-wise** (same as sin/cos/tan).
+
+**Errors:**
+
+- **Invalid argument** — if the argument is negative (e.g. `sqrt(-1)`). The message indicates that the argument must be non-negative.
+
 ## Use cases and edge cases
 
 - **Trig with units:** Prefer angle units so the argument is clearly an angle: `sin(pi rad)`, `sin(180 degree)`. Avoid `sin(pi)` without a unit when you mean radians; the runtime may report expected angle (dimensionless).
 - **Named arguments:** Useful for clarity, e.g. `max(a: 3, b: 2)` or mixing: `max(3, b: 2)`.
-- **Vector arguments:** Unary functions (sin, cos, tan) accept a **vector** of angles and apply **element-wise**; the result is a vector. For max/min with one vector and one scalar, or two vectors, behaviour is as defined by the language (element-wise or reduction as for other binary operations; see [VECTORS.md](VECTORS.md) if applicable).
+- **Vector arguments:** Unary functions (sin, cos, tan, sqrt) accept a **vector** and apply **element-wise**; the result is a vector. For max/min with one vector and one scalar, or two vectors, behaviour is as defined by the language (element-wise or reduction as for other binary operations; see [VECTORS.md](VECTORS.md) if applicable).
 
 ## See also
 

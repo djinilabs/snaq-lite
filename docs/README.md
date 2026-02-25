@@ -9,7 +9,7 @@ snaq-lite is an expression-oriented language for arithmetic with **physical quan
 - **Vectors** — Literals `[ ... ]`, transpose `'`, and operations with scalars or other vectors (element-wise, outer product, dot product).
 - **Comparisons** — `==`, `!=`, `<`, `<=`, `>`, `>=`; same dimension required; result is a boolean-like value (true, false, or uncertain when operands have variance).
 - **Conditionals** — `if condition then expression else expression`; condition can be uncertain (superposition of both branches).
-- **Functions** — Built-ins: `sin`, `cos`, `tan` (angle argument), `max`, `min` (two same-dimension arguments).
+- **Functions** — Built-ins: `sin`, `cos`, `tan` (angle argument), `sqrt` (non-negative), `max`, `min` (two same-dimension arguments). Vectors support methods such as `.sum()`, `.mean()`, `.min()`, `.max()`, `.dot(other)`, `.norm()`, `.product()`, `.variance()`, `.stddev()`, `.all()`, `.any()` (see [VECTORS.md](VECTORS.md)).
 - **Precision** — Implicit from decimal places in literals, or explicit with `value ~ error`.
 - **Variables** — Immutable bindings (`name = expression`) with lexical scope; result can be the last binding’s value.
 

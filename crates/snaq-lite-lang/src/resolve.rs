@@ -312,7 +312,7 @@ fn resolve_unit_expr(
                     value: SpannedExprDefKind::Lit(Quantity::new(1.0, unit)),
                 })
             } else {
-                Err(RunError::new(RunErrorKind::UnknownUnit(name.clone())))
+                Err(RunError::at(span, RunErrorKind::UnknownUnit(name.clone())))
             }
         }
         SpannedExprDefKind::Mul(l, r) => {
@@ -339,11 +339,11 @@ fn resolve_unit_expr(
         | SpannedExprDefKind::Member(..)
         | SpannedExprDefKind::MethodCall(..)
         | SpannedExprDefKind::If(..)
-        | SpannedExprDefKind::Block(..) => Err(RunError::new(RunErrorKind::UnknownUnit(
+        | SpannedExprDefKind::Block(..) => Err(RunError::at(span, RunErrorKind::UnknownUnit(
             "as: right side must be a unit or composed units (e.g. m, meters per second)"
                 .to_string(),
         ))),
-        _ => Err(RunError::new(RunErrorKind::UnknownUnit(
+        _ => Err(RunError::at(span, RunErrorKind::UnknownUnit(
             "as: right side must be a unit or composed units (e.g. m, meters per second)"
                 .to_string(),
         ))),

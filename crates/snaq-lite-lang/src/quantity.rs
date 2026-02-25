@@ -163,11 +163,21 @@ impl std::fmt::Display for QuantityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             QuantityError::DimensionMismatch { left, right } => {
-                write!(f, "dimension mismatch: {left} vs {right}")
+                write!(
+                    f,
+                    "dimension mismatch: {} vs {}",
+                    left.dimension_label_for_error(),
+                    right.dimension_label_for_error()
+                )
             }
             QuantityError::DivisionByZero => write!(f, "division by zero"),
             QuantityError::IncompatibleUnits(a, b) => {
-                write!(f, "incompatible units: {a} vs {b}")
+                write!(
+                    f,
+                    "incompatible units: {} vs {}",
+                    a.dimension_label_for_error(),
+                    b.dimension_label_for_error()
+                )
             }
         }
     }
@@ -499,6 +509,21 @@ mod tests {
         let q = Quantity::from_scalar(3.0);
         assert!(q.unit().is_scalar());
         assert_eq!(q.value(), 3.0);
+    }
+
+    #[test]
+    fn quantity_error_dimension_mismatch_scalar_shows_none() {
+        let err = QuantityError::DimensionMismatch {
+            left: Unit::scalar(),
+            right: Unit::from_base_unit("pascal"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("none") && msg.contains("pascal"), "got: {}", msg);
+        assert!(
+            !msg.starts_with("dimension mismatch:  vs"),
+            "must not show blank left side, got: {}",
+            msg
+        );
     }
 
     #[test]

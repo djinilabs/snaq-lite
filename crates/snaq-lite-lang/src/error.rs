@@ -199,7 +199,12 @@ impl std::fmt::Display for RunError {
             RunErrorKind::Parse(e) => write!(f, "{e}"),
             RunErrorKind::UnknownUnit(name) => write!(f, "unknown unit: {name}"),
             RunErrorKind::DimensionMismatch { left, right } => {
-                write!(f, "dimension mismatch: {left} vs {right}")
+                write!(
+                    f,
+                    "dimension mismatch: {} vs {}",
+                    left.dimension_label_for_error(),
+                    right.dimension_label_for_error()
+                )
             }
             RunErrorKind::DivisionByZero => write!(f, "division by zero"),
             RunErrorKind::SymbolHasNoValue(name) => {

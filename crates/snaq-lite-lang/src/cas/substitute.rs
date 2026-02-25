@@ -206,7 +206,7 @@ fn substitute_symbols_spanned_inner(
             } else if let Some(unit) = unit_registry.get_unit_with_prefix(&name) {
                 SpannedExprDefKind::Lit(Quantity::new(1.0, unit))
             } else {
-                return Err(RunError::new(RunErrorKind::SymbolHasNoValue(name)));
+                return Err(RunError::at(span, RunErrorKind::SymbolHasNoValue(name)));
             }
         }
         SpannedExprDefKind::Add(l, r) => SpannedExprDefKind::Add(

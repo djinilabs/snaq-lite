@@ -73,6 +73,15 @@ impl Unit {
         self.factors.is_empty()
     }
 
+    /// Label for this unit in error messages (e.g. dimension mismatch). Scalar (dimensionless) is shown as "none".
+    pub fn dimension_label_for_error(&self) -> String {
+        if self.is_scalar() {
+            "none".to_string()
+        } else {
+            format!("{self}")
+        }
+    }
+
     /// Single factor (no prefix, exponent 1).
     pub fn from_base_unit(unit_name: impl Into<String>) -> Self {
         Self {
@@ -244,6 +253,12 @@ mod tests {
     #[test]
     fn unit_scalar() {
         assert!(Unit::scalar().is_scalar());
+    }
+
+    #[test]
+    fn unit_dimension_label_for_error() {
+        assert_eq!(Unit::scalar().dimension_label_for_error(), "none");
+        assert_eq!(Unit::from_base_unit("pascal").dimension_label_for_error(), "pascal");
     }
 
     #[test]

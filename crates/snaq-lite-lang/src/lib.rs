@@ -1180,6 +1180,51 @@ mod tests {
         assert!(formatted.contains("dimension mismatch"));
     }
 
+    /// Dimension mismatch (e.g. Add) includes source location when formatted with source.
+    #[test]
+    fn run_dimension_mismatch_includes_location_when_source_provided() {
+        let source = "1 m + 1 s";
+        let e = run(source).unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::DimensionMismatch { .. }));
+        let formatted = format_run_error_with_source(&e, Some(source));
+        assert!(
+            formatted.contains("at line"),
+            "dimension mismatch with source should include 'at line', got: {}",
+            formatted
+        );
+        assert!(formatted.contains("dimension mismatch"));
+    }
+
+    /// Unknown unit in "as" conversion includes source location when formatted with source.
+    #[test]
+    fn run_unknown_unit_as_includes_location_when_source_provided() {
+        let source = "1 as foo";
+        let e = run(source).unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::UnknownUnit(_)));
+        let formatted = format_run_error_with_source(&e, Some(source));
+        assert!(
+            formatted.contains("at line"),
+            "unknown unit with source should include 'at line', got: {}",
+            formatted
+        );
+        assert!(formatted.contains("unknown unit"));
+    }
+
+    /// If condition error (e.g. numeric instead of FuzzyBool) includes source location when formatted with source.
+    #[test]
+    fn run_if_expected_condition_includes_location_when_source_provided() {
+        let source = "if 1 then 2 else 3";
+        let e = run_with_registry(source, &default_si_registry()).unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::ExpectedCondition));
+        let formatted = format_run_error_with_source(&e, Some(source));
+        assert!(
+            formatted.contains("at line"),
+            "if condition error with source should include 'at line', got: {}",
+            formatted
+        );
+        assert!(formatted.contains("condition"));
+    }
+
     /// Multi-line source: error with span is reported with location and message.
     #[test]
     fn run_runtime_error_multiline_includes_location_and_message() {
@@ -1219,6 +1264,24 @@ mod tests {
     fn run_dimension_mismatch_returns_err() {
         let e = run("1 m + 1 s").unwrap_err();
         assert!(matches!(e.kind, RunErrorKind::DimensionMismatch { .. }));
+    }
+
+    /// Dimension mismatch with scalar (dimensionless) shows "none" not blank.
+    #[test]
+    fn run_dimension_mismatch_scalar_vs_unit_shows_none() {
+        let e = run("A = 31 pascal; A + 1").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::DimensionMismatch { .. }));
+        let msg = format!("{}", e);
+        assert!(
+            msg.contains("none") && msg.contains("pascal"),
+            "dimension mismatch scalar vs unit should show 'none' vs 'pascal', got: {}",
+            msg
+        );
+        assert!(
+            !msg.starts_with("dimension mismatch:  vs"),
+            "dimension mismatch must not show blank left side, got: {}",
+            msg
+        );
     }
 
     /// Adding or subtracting quantities with *different units* but the *same dimension* is supported.

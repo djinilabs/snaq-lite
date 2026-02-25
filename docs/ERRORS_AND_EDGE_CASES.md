@@ -12,7 +12,7 @@ This document lists the main error conditions and edge cases you may encounter w
 | Situation | What you see (summary) |
 |-----------|------------------------|
 | **Unknown unit** | An identifier was used as a unit but is not in the unit registry. |
-| **Dimension mismatch** | Two values that must have the same dimension do not (e.g. `1 m + 1 s`, or converting to an incompatible unit with `as`). |
+| **Dimension mismatch** | Two values that must have the same dimension do not (e.g. `1 m + 1 s`, or converting to an incompatible unit with `as`). If one side is dimensionless, it is shown as **none** (e.g. `dimension mismatch: none vs pascal`). |
 | **Result is undefined** (from 0/0) | The expression `0/0` yields **undefined**. If you request a numeric result (`run_numeric("0/0")`), you get **result is undefined**. See below for division semantics. |
 | **Symbol has no value** | You requested a numeric result (`run_numeric`) but a symbol (or unbound identifier) has no value in the symbol registry and is not bound in the program. |
 | **Unknown function** | The call uses a name that is not a built-in and not bound to a user-defined function in scope. For user-defined functions: missing required argument (no default), unknown parameter name in a named argument, duplicate parameter name in a call, or too many arguments also yield an error. Calling a non-function value (e.g. applying arguments to a number) yields "expression is not callable". |
@@ -54,6 +54,8 @@ at line 1, column 8: dimension mismatch: m vs s
 ```
 
 Parse errors use the same style. If the source is not available, only the message is shown (e.g. `division by zero`).
+
+Runtime errors from the main evaluation path (`run` / `run_with_registry`) carry a source span when available, so the CLI can show line/column and snippet for **all** error kinds (e.g. unknown unit, dimension mismatch, expected condition), not only division by zero.
 
 ## Division by zero
 

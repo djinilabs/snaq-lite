@@ -62,7 +62,7 @@ fn rewrite_rec(
                 let result = ql
                     .clone()
                     .sub(qr, registry)
-                    .map_err(quantity_to_run_error)?;
+                    .map_err(|e| quantity_to_run_error(e).with_span(span))?;
                 return Ok(out.intern(ExprNode::Lit(result), span));
             }
             Ok(out.intern(ExprNode::Sub(new_l, new_r), span))
@@ -82,7 +82,7 @@ fn rewrite_rec(
                     // 0/0: do not constant-fold (no Quantity for undefined); leave as Div.
                     return Ok(out.intern(ExprNode::Div(new_l, new_r), span));
                 }
-                let result = (ql.clone() / qr.clone()).map_err(quantity_to_run_error)?;
+                let result = (ql.clone() / qr.clone()).map_err(|e| quantity_to_run_error(e).with_span(span))?;
                 return Ok(out.intern(ExprNode::Lit(result), span));
             }
             // Push Neg out of numerator: Div(Neg(inner), r) -> Neg(Div(inner, r)) so value() can simplify Div to product form.
@@ -141,7 +141,7 @@ fn rewrite_rec(
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;
             if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
-                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Eq)?;
+                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Eq).map_err(|e| e.with_span(span))?;
                 return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy), span));
             }
             Ok(out.intern(ExprNode::Eq(new_l, new_r), span))
@@ -150,7 +150,7 @@ fn rewrite_rec(
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;
             if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
-                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Ne)?;
+                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Ne).map_err(|e| e.with_span(span))?;
                 return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy), span));
             }
             Ok(out.intern(ExprNode::Ne(new_l, new_r), span))
@@ -159,7 +159,7 @@ fn rewrite_rec(
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;
             if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
-                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Lt)?;
+                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Lt).map_err(|e| e.with_span(span))?;
                 return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy), span));
             }
             Ok(out.intern(ExprNode::Lt(new_l, new_r), span))
@@ -168,7 +168,7 @@ fn rewrite_rec(
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;
             if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
-                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Le)?;
+                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Le).map_err(|e| e.with_span(span))?;
                 return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy), span));
             }
             Ok(out.intern(ExprNode::Le(new_l, new_r), span))
@@ -177,7 +177,7 @@ fn rewrite_rec(
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;
             if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
-                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Gt)?;
+                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Gt).map_err(|e| e.with_span(span))?;
                 return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy), span));
             }
             Ok(out.intern(ExprNode::Gt(new_l, new_r), span))
@@ -186,7 +186,7 @@ fn rewrite_rec(
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;
             if let (ExprNode::Lit(ql), ExprNode::Lit(qr)) = (out.get(new_l), out.get(new_r)) {
-                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Ge)?;
+                let fuzzy = cmp_lit_fuzzy_with_kind(ql, qr, registry, ComparisonKind::Ge).map_err(|e| e.with_span(span))?;
                 return Ok(out.intern(ExprNode::LitFuzzyBool(fuzzy), span));
             }
             Ok(out.intern(ExprNode::Ge(new_l, new_r), span))
@@ -324,7 +324,7 @@ fn rewrite_add(
         if let ExprNode::Lit(q) = out.get(id) {
             constant = Some(match constant.take() {
                 None => q.clone(),
-                Some(c) => c.add(q, registry).map_err(quantity_to_run_error)?,
+                Some(c) => c.add(q, registry).map_err(|e| quantity_to_run_error(e).with_span(span))?,
             });
         } else {
             terms.push(id);

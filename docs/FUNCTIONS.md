@@ -104,10 +104,11 @@ Positional and named arguments can be mixed. The language binds positional argum
 - **Factorial:** `n!` is the same as `factorial(n)` (e.g. `5!` → 120). Non-negative integer only.
 - **Square root (prefix):** `√x` is the same as `sqrt(x)` (Unicode √, U+221A).
 - **Cube root (prefix):** `∛x` is the same as `cbrt(x)` (Unicode ∛, U+221B).
+- **Absolute value (bars):** `| expr |` is the same as `abs(expr)`. Nested bars are allowed (e.g. `|2 + |-3||` → 5).
 
 ### Elementary and rounding: abs, sign, floor, ceil, round, trunc, mod
 
-- **abs(x)** — Absolute value; same unit as input.
+- **abs(x)** — Absolute value; same unit as input. You can also write `|x|`.
 - **sign(x)** — Sign: -1, 0, or 1 (dimensionless). Argument must be dimensionless.
 - **floor(x)**, **ceil(x)**, **round(x)**, **trunc(x)** — Standard rounding; same dimension as input. **round** uses half away from zero (e.g. 2.5 → 3, −2.5 → −3).
 - **mod(a, b)** — Remainder; same dimension as `a`. Both arguments must have the same dimension; `b` must be nonzero.

@@ -93,6 +93,8 @@ pub enum SpannedExprDefKind {
     Le(Box<SpannedExprDef>, Box<SpannedExprDef>),
     Gt(Box<SpannedExprDef>, Box<SpannedExprDef>),
     Ge(Box<SpannedExprDef>, Box<SpannedExprDef>),
+    /// Logical AND of two boolean expressions (e.g. from chained comparison a < b < c).
+    And(Box<SpannedExprDef>, Box<SpannedExprDef>),
     Neg(Box<SpannedExprDef>),
     Call(String, Vec<SpannedCallArg>),
     Lambda(Vec<(String, Option<Box<SpannedExprDef>>)>, Box<SpannedExprDef>),
@@ -129,6 +131,7 @@ impl SpannedExprDef {
             SpannedExprDefKind::Le(l, r) => ExprDef::Le(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
             SpannedExprDefKind::Gt(l, r) => ExprDef::Gt(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
             SpannedExprDefKind::Ge(l, r) => ExprDef::Ge(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
+            SpannedExprDefKind::And(l, r) => ExprDef::And(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
             SpannedExprDefKind::Neg(inner) => ExprDef::Neg(Box::new(inner.to_expr_def())),
             SpannedExprDefKind::Call(name, args) => ExprDef::Call(
                 name.clone(),
@@ -213,6 +216,8 @@ pub enum ExprDef {
     Le(Box<ExprDef>, Box<ExprDef>),
     Gt(Box<ExprDef>, Box<ExprDef>),
     Ge(Box<ExprDef>, Box<ExprDef>),
+    /// Logical AND of two boolean expressions (e.g. from chained comparison a < b < c).
+    And(Box<ExprDef>, Box<ExprDef>),
     /// Unary minus (e.g. "-1", "-(2 * 3)").
     Neg(Box<ExprDef>),
     /// Function call (e.g. sin(x), max(1, 2)). Name and args; args are positional or named.
@@ -279,6 +284,8 @@ pub enum ExprData<'db> {
     Le(Expression<'db>, Expression<'db>),
     Gt(Expression<'db>, Expression<'db>),
     Ge(Expression<'db>, Expression<'db>),
+    /// Logical AND of two boolean expressions (e.g. from chained comparison).
+    And(Expression<'db>, Expression<'db>),
     Neg(Expression<'db>),
     /// Function call: name and args as (param name if named, expression).
     Call(String, Vec<(Option<String>, Expression<'db>)>),

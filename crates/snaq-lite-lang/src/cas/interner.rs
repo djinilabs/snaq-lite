@@ -43,6 +43,8 @@ pub enum ExprNode {
     Le(ExprId, ExprId),
     Gt(ExprId, ExprId),
     Ge(ExprId, ExprId),
+    /// Logical and of two conditions (e.g. from chained comparison a < b < c).
+    And(ExprId, ExprId),
     /// Conditional: if condition then then_branch else else_branch.
     If(ExprId, ExprId, ExprId),
     /// Explicit precision: left ~ right (variance = right.value()²).

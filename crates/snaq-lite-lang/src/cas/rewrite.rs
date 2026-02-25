@@ -191,6 +191,14 @@ fn rewrite_rec(
             }
             Ok(out.intern(ExprNode::Ge(new_l, new_r), span))
         }
+        ExprNode::And(l, r) => {
+            let new_l = rewrite_rec(pool, out, *l, registry)?;
+            let new_r = rewrite_rec(pool, out, *r, registry)?;
+            if let (ExprNode::LitFuzzyBool(f1), ExprNode::LitFuzzyBool(f2)) = (out.get(new_l), out.get(new_r)) {
+                return Ok(out.intern(ExprNode::LitFuzzyBool(f1.clone().and_(f2)), span));
+            }
+            Ok(out.intern(ExprNode::And(new_l, new_r), span))
+        }
         ExprNode::If(cond_id, then_id, else_id) => {
             let new_cond = rewrite_rec(pool, out, *cond_id, registry)?;
             let new_then = rewrite_rec(pool, out, *then_id, registry)?;

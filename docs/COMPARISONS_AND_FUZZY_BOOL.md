@@ -17,6 +17,10 @@ The language provides six comparison operators. **Same dimension** is required f
 
 Precedence: comparisons bind **weaker** than addition and subtraction (see [SYNTAX.md](SYNTAX.md)). So `a + b < c + d` is parsed as `(a + b) < (c + d)`.
 
+## Chained comparisons
+
+You can write **chained comparisons** with exactly three operands and the same direction: e.g. `1 < 2 < 3` or `3 > 2 > 1`. Semantics: `a < b < c` means `(a < b) and (b < c)`; the result is a single FuzzyBool. All operators in the chain must be ascending (`<`, `<=`) or all descending (`>`, `>=`). Mixed ascending chains like `1 < 2 <= 3` are allowed. See [SYNTAX.md](SYNTAX.md) for the exact grammar (three operands only; longer chains are not supported as a single expression).
+
 ## Result type: FuzzyBool
 
 The result of a comparison is a **FuzzyBool**: one of

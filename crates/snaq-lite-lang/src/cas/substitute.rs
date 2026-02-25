@@ -27,7 +27,7 @@ fn collect_bound_names(def: &ExprDef) -> HashSet<String> {
             }
             ExprDef::Add(l, r) | ExprDef::Sub(l, r) | ExprDef::Mul(l, r) | ExprDef::Div(l, r)
             | ExprDef::Eq(l, r) | ExprDef::Ne(l, r) | ExprDef::Lt(l, r) | ExprDef::Le(l, r)
-            | ExprDef::Gt(l, r) | ExprDef::Ge(l, r) | ExprDef::As(l, r) | ExprDef::WithPrecision(l, r) => {
+            | ExprDef::Gt(l, r) | ExprDef::Ge(l, r) | ExprDef::And(l, r) | ExprDef::As(l, r) | ExprDef::WithPrecision(l, r) => {
                 go(l, names);
                 go(r, names);
             }
@@ -116,7 +116,7 @@ fn collect_bound_names_spanned(def: &SpannedExprDef) -> HashSet<String> {
             SpannedExprDefKind::Add(l, r) | SpannedExprDefKind::Sub(l, r) | SpannedExprDefKind::Mul(l, r)
             | SpannedExprDefKind::Div(l, r) | SpannedExprDefKind::Eq(l, r) | SpannedExprDefKind::Ne(l, r)
             | SpannedExprDefKind::Lt(l, r) | SpannedExprDefKind::Le(l, r) | SpannedExprDefKind::Gt(l, r)
-            | SpannedExprDefKind::Ge(l, r) | SpannedExprDefKind::As(l, r)
+            | SpannedExprDefKind::Ge(l, r) | SpannedExprDefKind::And(l, r) | SpannedExprDefKind::As(l, r)
             | SpannedExprDefKind::WithPrecision(l, r) => {
                 go(l, names);
                 go(r, names);
@@ -317,6 +317,10 @@ fn substitute_symbols_spanned_inner(
             Box::new(substitute_symbols_spanned_inner(*l, symbol_registry, unit_registry, bound_names)?),
             Box::new(substitute_symbols_spanned_inner(*r, symbol_registry, unit_registry, bound_names)?),
         ),
+        SpannedExprDefKind::And(l, r) => SpannedExprDefKind::And(
+            Box::new(substitute_symbols_spanned_inner(*l, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_spanned_inner(*r, symbol_registry, unit_registry, bound_names)?),
+        ),
         SpannedExprDefKind::If(cond, then_b, else_b) => SpannedExprDefKind::If(
             Box::new(substitute_symbols_spanned_inner(*cond, symbol_registry, unit_registry, bound_names)?),
             Box::new(substitute_symbols_spanned_inner(*then_b, symbol_registry, unit_registry, bound_names)?),
@@ -511,6 +515,10 @@ fn substitute_symbols_inner(
             Box::new(substitute_symbols_inner(*r, symbol_registry, unit_registry, bound_names)?),
         )),
         ExprDef::Ge(l, r) => Ok(ExprDef::Ge(
+            Box::new(substitute_symbols_inner(*l, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_inner(*r, symbol_registry, unit_registry, bound_names)?),
+        )),
+        ExprDef::And(l, r) => Ok(ExprDef::And(
             Box::new(substitute_symbols_inner(*l, symbol_registry, unit_registry, bound_names)?),
             Box::new(substitute_symbols_inner(*r, symbol_registry, unit_registry, bound_names)?),
         )),

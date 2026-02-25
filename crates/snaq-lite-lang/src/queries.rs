@@ -833,6 +833,18 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef, spanned: Option<Span
             let right = build_expression(db, *r, rs);
             ExprData::Ge(left, right)
         }
+        ExprDef::And(l, r) => {
+            let (ls, rs) = children2(&spanned, |s| {
+                if let SpannedExprDefKind::And(ls, rs) = &s.value {
+                    Some((*ls.clone(), *rs.clone()))
+                } else {
+                    None
+                }
+            });
+            let left = build_expression(db, *l, ls);
+            let right = build_expression(db, *r, rs);
+            ExprData::And(left, right)
+        }
         ExprDef::Neg(inner) => {
             let inner_s = child1(&spanned, |s| {
                 if let SpannedExprDefKind::Neg(x) = &s.value {
@@ -1179,6 +1191,16 @@ pub fn value<'db>(
             let left = value(db, scope, *l)?;
             let right = value(db, scope, *r)?;
             cmp_values(CmpOp::Ge, &left, &right, registry, Some(db), expr.span(db))
+        }
+        ExprData::And(l, r) => {
+            let left = value(db, scope, *l)?;
+            let right = value(db, scope, *r)?;
+            match (&left, &right) {
+                (Value::FuzzyBool(f1), Value::FuzzyBool(f2)) => {
+                    Ok(Value::FuzzyBool(f1.clone().and_(f2)))
+                }
+                _ => Err(run_err_with_span(db, expr, RunErrorKind::ExpectedCondition)),
+            }
         }
         ExprData::Neg(inner) => {
             let v = value(db, scope, *inner)?;
@@ -1767,6 +1789,10 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
             Box::new(expression_to_def(db, *r)),
         ),
         ExprData::Ge(l, r) => ExprDef::Ge(
+            Box::new(expression_to_def(db, *l)),
+            Box::new(expression_to_def(db, *r)),
+        ),
+        ExprData::And(l, r) => ExprDef::And(
             Box::new(expression_to_def(db, *l)),
             Box::new(expression_to_def(db, *r)),
         ),

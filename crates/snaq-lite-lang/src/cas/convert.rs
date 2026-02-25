@@ -115,6 +115,11 @@ pub fn spanned_expr_def_to_interned(def: &SpannedExprDef, pool: &mut ExprInterne
             let rid = spanned_expr_def_to_interned(r, pool);
             pool.intern(ExprNode::Ge(lid, rid), span)
         }
+        SpannedExprDefKind::And(l, r) => {
+            let lid = spanned_expr_def_to_interned(l, pool);
+            let rid = spanned_expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::And(lid, rid), span)
+        }
         SpannedExprDefKind::If(cond, then_b, else_b) => {
             let cid = spanned_expr_def_to_interned(cond, pool);
             let tid = spanned_expr_def_to_interned(then_b, pool);
@@ -279,6 +284,11 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
             let rid = expr_def_to_interned(r, pool);
             pool.intern(ExprNode::Ge(lid, rid), span)
         }
+        ExprDef::And(l, r) => {
+            let lid = expr_def_to_interned(l, pool);
+            let rid = expr_def_to_interned(r, pool);
+            pool.intern(ExprNode::And(lid, rid), span)
+        }
         ExprDef::If(cond, then_b, else_b) => {
             let cid = expr_def_to_interned(cond, pool);
             let tid = expr_def_to_interned(then_b, pool);
@@ -422,6 +432,10 @@ pub fn interned_to_spanned_expr_def(pool: &ExprInterner, id: ExprId) -> SpannedE
             Box::new(interned_to_spanned_expr_def(pool, *r)),
         ),
         ExprNode::Ge(l, r) => SpannedExprDefKind::Ge(
+            Box::new(interned_to_spanned_expr_def(pool, *l)),
+            Box::new(interned_to_spanned_expr_def(pool, *r)),
+        ),
+        ExprNode::And(l, r) => SpannedExprDefKind::And(
             Box::new(interned_to_spanned_expr_def(pool, *l)),
             Box::new(interned_to_spanned_expr_def(pool, *r)),
         ),

@@ -63,6 +63,8 @@ pub enum Tok {
     SqrtPrefix,
     /// Cube root (prefix): `∛` (U+221B) => cbrt(expr).
     CbrtPrefix,
+    /// Absolute value: `|` (e.g. |x| => abs(x)).
+    Bar,
     /// Block start: `{`
     LBrace,
     /// Block end: `}`
@@ -348,6 +350,7 @@ impl<'input> Iterator for Lexer<'input> {
             '!' => Tok::Bang,
             '√' => Tok::SqrtPrefix,
             '∛' => Tok::CbrtPrefix,
+            '|' => Tok::Bar,
             '=' => Tok::Assign,
             '<' => Tok::Lt,
             '>' => Tok::Gt,

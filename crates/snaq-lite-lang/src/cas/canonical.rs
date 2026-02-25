@@ -26,6 +26,7 @@ pub enum Rank {
     Le(Box<Rank>, Box<Rank>),
     Gt(Box<Rank>, Box<Rank>),
     Ge(Box<Rank>, Box<Rank>),
+    And(Box<Rank>, Box<Rank>),
     If(Box<Rank>, Box<Rank>, Box<Rank>),
     WithPrecision(Box<Rank>, Box<Rank>),
     Block(Vec<Rank>),
@@ -55,11 +56,12 @@ fn tag_order(r: &Rank) -> u8 {
         Rank::Le(..) => 17,
         Rank::Gt(..) => 18,
         Rank::Ge(..) => 19,
-        Rank::If(..) => 20,
-        Rank::WithPrecision(..) => 21,
-        Rank::Block(_) => 22,
-        Rank::Lambda(..) => 23,
-        Rank::CallExpr(..) => 24,
+        Rank::And(..) => 20,
+        Rank::If(..) => 21,
+        Rank::WithPrecision(..) => 22,
+        Rank::Block(_) => 23,
+        Rank::Lambda(..) => 24,
+        Rank::CallExpr(..) => 25,
     }
 }
 
@@ -98,6 +100,7 @@ impl Ord for Rank {
             (Rank::Le(a1, a2), Rank::Le(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::Gt(a1, a2), Rank::Gt(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::Ge(a1, a2), Rank::Ge(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
+            (Rank::And(a1, a2), Rank::And(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::If(a1, a2, a3), Rank::If(b1, b2, b3)) => a1.cmp(b1).then(a2.cmp(b2)).then(a3.cmp(b3)),
             (Rank::WithPrecision(a1, a2), Rank::WithPrecision(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::Block(a), Rank::Block(b)) => a.cmp(b),
@@ -174,6 +177,7 @@ pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
         ExprNode::Le(l, r) => Rank::Le(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
         ExprNode::Gt(l, r) => Rank::Gt(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
         ExprNode::Ge(l, r) => Rank::Ge(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
+        ExprNode::And(l, r) => Rank::And(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
         ExprNode::If(c, t, e) => Rank::If(
             Box::new(rank(pool, *c)),
             Box::new(rank(pool, *t)),
@@ -358,6 +362,11 @@ fn canonicalize_rec(
             let new_l = canonicalize_rec(pool, out, *l);
             let new_r = canonicalize_rec(pool, out, *r);
             out.intern(ExprNode::Ge(new_l, new_r), span)
+        }
+        ExprNode::And(l, r) => {
+            let new_l = canonicalize_rec(pool, out, *l);
+            let new_r = canonicalize_rec(pool, out, *r);
+            out.intern(ExprNode::And(new_l, new_r), span)
         }
         ExprNode::If(c, t, e) => {
             let new_c = canonicalize_rec(pool, out, *c);

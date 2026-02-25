@@ -140,6 +140,14 @@ pub fn resolve(def: SpannedExprDef, registry: &UnitRegistry) -> Result<SpannedEx
                 value: SpannedExprDefKind::Ge(Box::new(l), Box::new(r)),
             })
         }
+        SpannedExprDefKind::And(l, r) => {
+            let l = resolve(*l, registry)?;
+            let r = resolve(*r, registry)?;
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::And(Box::new(l), Box::new(r)),
+            })
+        }
         SpannedExprDefKind::Neg(inner) => {
             let inner = resolve(*inner, registry)?;
             Ok(SpannedExprDef {

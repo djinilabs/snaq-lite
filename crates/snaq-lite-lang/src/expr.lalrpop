@@ -48,6 +48,7 @@ extern {
         "!" => Tok::Bang,
         "√" => Tok::SqrtPrefix,
         "∛" => Tok::CbrtPrefix,
+        "|" => Tok::Bar,
         "{" => Tok::LBrace,
         "}" => Tok::RBrace,
         ";" => Tok::Semicolon,
@@ -59,13 +60,17 @@ extern {
     }
 }
 
-// Top-level program: expression list (newline- or semicolon-separated), wrapped in a Block.
-// @L and @R capture the start and end location of the matched region.
+// Top-level program: at least one BlockItem (newline- or semicolon-separated), wrapped in a Block.
+// Empty input is handled in the parser driver (parse() returns Block([]) for empty/whitespace).
 pub Program: SpannedExprDef = {
-    <lo:@L> <list:ExprList> <hi:@R> => SpannedExprDef {
-        span: Span { start: lo, end: hi },
-        value: SpannedExprDefKind::Block(list)
-    }
+    <lo:@L> <first:BlockItem> <rest:ExprListRest> <hi:@R> => {
+        let mut list = vec![first];
+        list.extend(rest);
+        SpannedExprDef {
+            span: Span { start: lo, end: hi },
+            value: SpannedExprDefKind::Block(list)
+        }
+    },
 };
 
 // Name for a named function: Ident or FuncIdent (lexer emits FuncIdent when ident is followed by "(").
@@ -76,11 +81,11 @@ FnName: String = {
 
 // Block item: named function, binding, or expression.
 BlockItem: SpannedExprDef = {
-    <lo:@L> "fn" <name:FnName> "(" <params:ParamList> ")" "=>" "{" <list:ExprList> "}" <hi:@R> => {
+    <lo:@L> "fn" <name:FnName> "(" <params:ParamList> ")" "=>" <content:BlockBracedContent> <hi:@R> => {
         let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
         SpannedExprDef {
             span: Span { start: lo, end: hi },
-            value: SpannedExprDefKind::Binding(name, Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(params, Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(list) })) }))
+            value: SpannedExprDefKind::Binding(name, Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(params, Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(content) })) }))
         }
     },
     <lo:@L> "fn" <name:FnName> "(" <params:ParamList> ")" "=>" "(" <body:Expr> ")" <hi:@R> => {
@@ -90,10 +95,10 @@ BlockItem: SpannedExprDef = {
             value: SpannedExprDefKind::Binding(name, Box::new(SpannedExprDef { span: body.span, value: SpannedExprDefKind::Lambda(params, Box::new(body)) }))
         }
     },
-    <lo:@L> "fn" <name:FnName> <param:Ident> "=>" "{" <list:ExprList> "}" <hi:@R> => {
+    <lo:@L> "fn" <name:FnName> <param:Ident> "=>" <content:BlockBracedContent> <hi:@R> => {
         SpannedExprDef {
             span: Span { start: lo, end: hi },
-            value: SpannedExprDefKind::Binding(name, Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(vec![(param, None)], Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(list) })) }))
+            value: SpannedExprDefKind::Binding(name, Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(vec![(param, None)], Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(content) })) }))
         }
     },
     <lo:@L> "fn" <name:FnName> <param:Ident> "=>" "(" <body:Expr> ")" <hi:@R> => {
@@ -125,13 +130,13 @@ ParamList: Vec<(String, Option<SpannedExprDef>)> = {
     },
 };
 
-// Expression list for program root and block bodies: zero or more BlockItem, separated by ";" or Newline.
-ExprList: Vec<SpannedExprDef> = {
-    => vec![],
-    <first:BlockItem> <rest:ExprListRest> => {
-        let mut v = vec![first];
-        v.extend(rest);
-        v
+// Block content inside braces: empty or (BlockItem ExprListRest). Two productions avoid reduce/shift conflict on Num.
+BlockBracedContent: Vec<SpannedExprDef> = {
+    "{" "}" => vec![],
+    "{" <first:BlockItem> <rest:ExprListRest> "}" => {
+        let mut list = vec![first];
+        list.extend(rest);
+        list
     },
 };
 
@@ -151,15 +156,80 @@ ExprListRest: Vec<SpannedExprDef> = {
     Newline <rest:ExprListRest> => rest,
 };
 
-// Expression (used inside blocks and as list elements): conditional, comparison, then additive.
+// Expression: conditional, chained comparison (inlined so precedence applies), single comparison, then additive.
+// Precedence: level 0 = chained/if; level 1 = single comparison; level 2 = bare AddExpr.
 Expr: SpannedExprDef = {
+    #[precedence(level="0")]
     <if_expr:IfExpr> => if_expr,
+    #[precedence(level="0")]
+    <lo:@L> <a:AddExpr> "<" <b:AddExpr> "<" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Lt(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Lt(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    #[precedence(level="0")]
+    <lo:@L> <a:AddExpr> "<" <b:AddExpr> "<=" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Lt(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Le(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    #[precedence(level="0")]
+    <lo:@L> <a:AddExpr> "<=" <b:AddExpr> "<" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Le(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Lt(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    #[precedence(level="0")]
+    <lo:@L> <a:AddExpr> "<=" <b:AddExpr> "<=" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Le(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Le(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    #[precedence(level="0")]
+    <lo:@L> <a:AddExpr> ">" <b:AddExpr> ">" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Gt(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Gt(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    #[precedence(level="0")]
+    <lo:@L> <a:AddExpr> ">" <b:AddExpr> ">=" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Gt(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Ge(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    #[precedence(level="0")]
+    <lo:@L> <a:AddExpr> ">=" <b:AddExpr> ">" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Ge(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Gt(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    #[precedence(level="0")]
+    <lo:@L> <a:AddExpr> ">=" <b:AddExpr> ">=" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Ge(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Ge(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    #[precedence(level="1")]
     <lo:@L> <l:AddExpr> "==" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Eq(Box::new(l), Box::new(r)) },
+    #[precedence(level="1")]
     <lo:@L> <l:AddExpr> "!=" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Ne(Box::new(l), Box::new(r)) },
+    #[precedence(level="1")]
     <lo:@L> <l:AddExpr> "<" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lt(Box::new(l), Box::new(r)) },
+    #[precedence(level="1")]
     <lo:@L> <l:AddExpr> "<=" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Le(Box::new(l), Box::new(r)) },
+    #[precedence(level="1")]
     <lo:@L> <l:AddExpr> ">" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Gt(Box::new(l), Box::new(r)) },
+    #[precedence(level="1")]
     <lo:@L> <l:AddExpr> ">=" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Ge(Box::new(l), Box::new(r)) },
+    #[precedence(level="2")]
     AddExpr,
 };
 
@@ -328,6 +398,13 @@ PostfixFactor: SpannedExprDef = {
 
 Factor: SpannedExprDef = {
     <lo:@L> "-" <e:Factor> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Neg(Box::new(e)) },
+    <lo:@L> "|" <e:Expr> "|" <hi:@R> => SpannedExprDef {
+        span: Span { start: lo, end: hi },
+        value: SpannedExprDefKind::Call(
+            "abs".to_string(),
+            vec![SpannedCallArg::Positional(Box::new(e))],
+        ),
+    },
     <lo:@L> "√" <r:Factor> <hi:@R> => SpannedExprDef {
         span: Span { start: lo, end: hi },
         value: SpannedExprDefKind::Call(
@@ -342,16 +419,16 @@ Factor: SpannedExprDef = {
             vec![SpannedCallArg::Positional(Box::new(r))],
         ),
     },
-    <lo:@L> "fn" "(" <params:ParamList> ")" "=>" "{" <list:ExprList> "}" <hi:@R> => {
+    <lo:@L> "fn" "(" <params:ParamList> ")" "=>" <content:BlockBracedContent> <hi:@R> => {
         let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
-        SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(params, Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(list) })) }
+        SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(params, Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(content) })) }
     },
     <lo:@L> "fn" "(" <params:ParamList> ")" "=>" "(" <body:Expr> ")" <hi:@R> => {
         let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
         SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(params, Box::new(body)) }
     },
-    <lo:@L> "fn" <param:Ident> "=>" "{" <list:ExprList> "}" <hi:@R> => {
-        SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(vec![(param, None)], Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(list) })) }
+    <lo:@L> "fn" <param:Ident> "=>" <content:BlockBracedContent> <hi:@R> => {
+        SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(vec![(param, None)], Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(content) })) }
     },
     <lo:@L> "fn" <param:Ident> "=>" "(" <body:Expr> ")" <hi:@R> => {
         SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(vec![(param, None)], Box::new(body)) }
@@ -363,7 +440,7 @@ Factor: SpannedExprDef = {
     <ii:IdentIdents> => ii,
     <lo:@L> "(" <e:Expr> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: e.value },
     <lo:@L> "[" <elems:VecExprList> "]" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::VecLiteral(elems) },
-    <lo:@L> "{" <list:ExprList> "}" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(list) },
+    <lo:@L> <content:BlockBracedContent> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(content) },
 };
 
 // Comma-separated list of expressions for vector literal: [ expr, expr, ... ] or [].

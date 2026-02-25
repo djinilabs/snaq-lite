@@ -44,6 +44,7 @@ So `aspect` is a single identifier (the `as` in the middle is not treated as the
 | `==` `!=` `<` `<=` `>` `>=` | Comparison |
 | `~` | Explicit precision (value ~ error) |
 | `'` | Postfix transpose (vectors) |
+| `\|` | Absolute value: `\|expr\|` is equivalent to `abs(expr)` |
 | `(` `)` | Grouping and function calls |
 | `[` `]` | Vector literals |
 | `{` `}` | Blocks |
@@ -90,9 +91,24 @@ Implicit multiplication is **not** allowed when the right-hand side would be a b
 
 Chained assignment is **right-associative**: `A = B = 42` means `A = (B = 42)`; both `A` and `B` are bound to 42, and the value of the expression is 42.
 
+## Absolute value
+
+- **Notation:** `| expr |` — vertical bars around an expression denote absolute value.
+- **Semantics:** Equivalent to calling the built-in `abs(expr)`. Nested bars are allowed: e.g. `|2 + |-3||` evaluates to 5.
+
+## Chained comparisons
+
+- **Form:** `a < b < c` or `a <= b <= c` (and similarly with `>` and `>=`). The grammar supports **exactly three** operands in one chain (e.g. `1 < 2 < 3`).
+- **Semantics:** Same as the conjunction of two pairwise comparisons. For example, `1 < 2 < 3` means `(1 < 2) and (2 < 3)`; the result is a single boolean (FuzzyBool). All operators in the chain must be in the same “direction”: all ascending (`<`, `<=`) or all descending (`>`, `>=`). Mixed chains like `1 < 2 <= 3` are allowed (both ascending).
+- **Longer chains:** Four or more operands (e.g. `a < b < c < d`) are parsed as a chained comparison of the first three, then compared with the fourth: `(a < b < c) < d` (the left side is a boolean, which is not numeric; see [COMPARISONS_AND_FUZZY_BOOL.md](COMPARISONS_AND_FUZZY_BOOL.md)). For multiple comparisons in one expression, use separate comparisons combined with `if`/`then`/`else` or write them as separate expressions.
+
 ## Unit conversion (grammar)
 
 The right-hand side of `as` must be a **unit-only expression**: identifiers combined with `*`, `/`, or `per` (e.g. `m`, `meters per second`, `newton per squareinch`). Numbers and symbols are not allowed there. See [UNITS_AND_QUANTITIES.md](UNITS_AND_QUANTITIES.md) for semantics.
+
+## Known parser limitation
+
+In the current parser, **some positions** that expect a full expression (e.g. the condition or branches of `if ... then ... else ...`, the right-hand side of a comparison like `a == b`, or elements of a vector literal `[a, b]`) may **not** accept the full expression grammar. In those cases you can get a parse error such as “expected one of …, before end of input” (or “before: Then”, “before: Comma”) even for valid-looking expressions like `1 == 2` or `if 1 then 2 else 3`. This is a known limitation of the parser (LALRPOP #596). Chained comparisons (e.g. `1 < 2 < 3`) and absolute value `|x|` work in contexts where they parse; fixing the remaining contexts may require a parser change.
 
 ## See also
 

@@ -28,7 +28,7 @@ This document lists the main error conditions and edge cases you may encounter w
 | **Property/method on non-vector** | Dot access for a property or method (e.g. `(1).length`, `x.map(fn (a)=>a)`) was applied to a non-vector (scalar or symbolic). The runtime returns an error that a vector was expected. |
 | **Vector length mismatch** | A vector operation (element-wise or similar) required two vectors of the same length; the lengths differed. |
 | **Boolean result** | You requested a numeric quantity but the result is a comparison (true/false/uncertain). |
-| **Expected condition** | The condition of `if ... then ... else ...` must evaluate to a boolean (true, false, or uncertain), not a number or symbolic expression. |
+| **Expected condition** | The condition of `if ... then ... else ...` must evaluate to a boolean (true, false, or uncertain), not a number or symbolic expression. The same error is used when a logical-and (e.g. from a chained comparison like `a < b < c`) receives a non-boolean operand. |
 | **If branches type mismatch** | Both branches of `if ... then ... else ...` must be blendable (both numeric or both symbolic). You cannot mix e.g. number with vector or boolean. |
 | **Both sides of ~ must be numeric** | The explicit-precision operator `~` was used with a symbolic, boolean, or vector operand. |
 | **Precision must be strictly positive** | The right-hand side of `~` was ≤ 0 or non-finite. |

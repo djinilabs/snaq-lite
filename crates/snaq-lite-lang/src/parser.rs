@@ -2,7 +2,7 @@
 //! Uses LALRPOP-generated grammar with custom lexer (Ident vs FuncIdent for calls).
 
 use crate::error::{ParseError, Span};
-use crate::ir::SpannedExprDef;
+use crate::ir::{SpannedExprDef, SpannedExprDefKind};
 use crate::lexer;
 use lalrpop_util::lalrpop_mod;
 
@@ -69,7 +69,14 @@ fn lalrpop_error_to_parse_error(
 
 /// Parse a program (expression list, possibly with blocks). Returns a [SpannedExprDef] that is a Block at top level.
 /// Uses custom lexer so "sin(1)" is a call and "sin" is a symbol.
+/// Empty or whitespace-only input returns Block([]) without invoking the grammar (avoids conflict with non-empty Program).
 pub fn parse(input: &str) -> Result<SpannedExprDef, ParseError> {
+    if input.trim().is_empty() {
+        return Ok(SpannedExprDef {
+            span: crate::error::Span::default(),
+            value: SpannedExprDefKind::Block(vec![]),
+        });
+    }
     let lexer = lexer::Lexer::new(input);
     let len = input.len();
     expr::ProgramParser::new()

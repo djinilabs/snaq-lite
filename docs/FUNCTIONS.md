@@ -8,16 +8,18 @@ You can define functions with optional default parameters and call them by name.
 
 ### Defining functions
 
-- **Anonymous:** `fn ( param1, param2, ... ) => ( expression )` or `fn ( param1, ... ) => { block }`
+- **Anonymous:** `fn ( param1, param2, ... ) => ( expression )` or `fn ( param1, ... ) => { block }`. For a single parameter you can omit the parentheses: `fn param => ( expression )` or `fn param => { block }`.
   - Example: `fn (a, b) => (a + b)` — a function that adds two arguments.
-- **Named:** `fn name ( param1, param2, ... ) => ( expression )` or `fn name ( param1, ... ) => { block }`
+  - Example: `fn n => (n * 10)` — single-argument shorthand; same as `fn (n) => (n * 10)`.
+- **Named:** `fn name ( param1, param2, ... ) => ( expression )` or `fn name ( param1, ... ) => { block }`. For a single parameter you can omit the parentheses: `fn name param => ( expression )` or `fn name param => { block }`.
   - Example: `fn mysum(a, b) => (a + b)` — defines `mysum` in the current block; later expressions can call `mysum(1, 2)`.
+  - Example: `fn double n => (n * 2)` — single-argument shorthand; same as `fn double (n) => (n * 2)`.
 
 Parameters can have **default values:** `param = expression`. Defaults are evaluated in the function’s closure scope when the argument is omitted at call time.
 
 - Example: `fn add(a, b = 10) => (a + b)` — `add(5)` gives 15, `add(5, 3)` gives 8.
 
-The body can be a single expression in parentheses or a **block** `{ ... }` (semicolon- or newline-separated expressions; the result is the last expression).
+The body can be a single expression in parentheses or a **block** `{ ... }` (semicolon- or newline-separated expressions; the result is the last expression). The parentheses or braces are required so the parser knows where the body ends (e.g. use `fn n => (n * 10)`, not `fn n => n * 10`).
 
 - Example: `fn f(a, b) => { x = a + b; x + 42 }` — block body with a local binding.
 
@@ -46,7 +48,7 @@ When the result of a program (or block) is a function value—for example, when 
 
 ### Vector `.map`
 
-The vector method `V.map(fn (x) => body)` requires its argument to be a **function of exactly one parameter**. Passing a function with zero or two-or-more parameters (e.g. `[1, 2].map(fn (a, b) => (a+b))`) yields an error. See [VECTORS.md](VECTORS.md) for vector properties and methods.
+The vector method `V.map(fn (x) => body)` (or the shorthand `V.map(fn x => (body))`) requires its argument to be a **function of exactly one parameter**. Passing a function with zero or two-or-more parameters (e.g. `[1, 2].map(fn (a, b) => (a+b))`) yields an error. See [VECTORS.md](VECTORS.md) for vector properties and methods.
 
 ## Call syntax
 

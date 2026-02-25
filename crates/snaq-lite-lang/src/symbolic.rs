@@ -598,8 +598,8 @@ pub enum Value {
     Vector(crate::vector::VectorValue),
     /// Undefined (e.g. empty block or empty program).
     Undefined,
-    /// User-defined function (id into user_function registry).
-    Function(crate::user_function::UserFunctionId),
+    /// User-defined function (inline hashable value; closure env in scope's registry).
+    Function(Box<crate::user_function::UserFunction>),
 }
 
 impl Value {

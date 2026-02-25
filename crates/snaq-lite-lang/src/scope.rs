@@ -3,25 +3,32 @@
 //! Environments are immutable and implemented with a persistent map so that
 //! extending the scope returns a new map that shares structure with the old one.
 //! Scope is Salsa-interned so that (scope, expr) is the memoization key for evaluation.
+//!
+//! Closure envs (captured by user functions) are stored in a thread-local registry
+//! so UserFunction can hold only an id and remain hashable (breaking the type cycle).
 
 use crate::fuzzy::FuzzyBool;
 use crate::quantity::Quantity;
 use crate::symbolic::Value;
+use crate::user_function::UserFunction;
 use crate::vector_registry;
 use im::OrdMap;
+use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Value that can be stored in the scope map. Must be Eq + Hash (Scope is Salsa-interned by Env).
 /// Bindings are unified here: each variable name maps to exactly one StoredValue.
 /// For vectors we store an id; the actual payload lives in [vector_registry](crate::vector_registry) (VectorValue is not Hash).
+/// User functions are stored inline (hashable); only their captured env lives in [closure_env_register]/[closure_env_get].
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum StoredValue {
     Numeric(Quantity),
     FuzzyBool(FuzzyBool),
     Undefined,
-    /// User-defined function (id into user_function registry).
-    Function(crate::user_function::UserFunctionId),
+    /// User-defined function (inline; closure env in closure-env registry).
+    Function(Box<UserFunction>),
     /// Vector (id into vector_registry; payload stored there because VectorValue is not Eq+Hash).
     Vector(vector_registry::VectorId),
 }
@@ -40,7 +47,7 @@ impl StoredValue {
                 let id = vector_registry::register(v.clone());
                 Ok(StoredValue::Vector(id))
             }
-            Value::Function(id) => Ok(StoredValue::Function(*id)),
+            Value::Function(uf) => Ok(StoredValue::Function(uf.clone())),
         }
     }
 
@@ -50,7 +57,7 @@ impl StoredValue {
             StoredValue::Numeric(q) => Value::Numeric(q.clone()),
             StoredValue::FuzzyBool(fb) => Value::FuzzyBool(fb.clone()),
             StoredValue::Undefined => Value::Undefined,
-            StoredValue::Function(id) => Value::Function(*id),
+            StoredValue::Function(uf) => Value::Function(uf.clone()),
             StoredValue::Vector(id) => vector_registry::get(*id)
                 .map(Value::Vector)
                 .unwrap_or(Value::Undefined),
@@ -114,4 +121,31 @@ pub struct Scope {
 /// Canonical empty scope (all callers get the same interned id).
 pub fn empty_scope(db: &dyn salsa::Database) -> Scope<'_> {
     Scope::new(db, Env::empty())
+}
+
+// --- Closure-env registry (breaks type cycle: UserFunction holds id, not Env) ---
+
+pub type ClosureEnvId = u64;
+
+static NEXT_CLOSURE_ENV_ID: AtomicU64 = AtomicU64::new(0);
+
+fn next_closure_env_id() -> ClosureEnvId {
+    NEXT_CLOSURE_ENV_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+thread_local! {
+    static CLOSURE_ENV_REGISTRY: RefCell<std::collections::HashMap<ClosureEnvId, Env>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// Store a closure environment and return its id. Used when creating a user function.
+pub fn closure_env_register(env: Env) -> ClosureEnvId {
+    let id = next_closure_env_id();
+    CLOSURE_ENV_REGISTRY.with(|r| r.borrow_mut().insert(id, env));
+    id
+}
+
+/// Look up a closure environment by id. Returns None if not found (e.g. id from another thread).
+pub fn closure_env_get(id: ClosureEnvId) -> Option<Env> {
+    CLOSURE_ENV_REGISTRY.with(|r| r.borrow().get(&id).cloned())
 }

@@ -1539,6 +1539,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_single_arg_lambda_shorthand() {
+        let parsed = parse("fn n => (n * 10)").unwrap();
+        assert!(matches!(parsed, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Lambda(_, _))));
+        if let ExprDef::Block(ref v) = parsed {
+            if let ExprDef::Lambda(params, _) = &v[0] {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].0, "n");
+                assert!(params[0].1.is_none());
+            }
+        }
+        let named = parse("fn double n => (n * 2)").unwrap();
+        assert!(matches!(named, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Binding(_, _))));
+        if let ExprDef::Block(ref v) = named {
+            if let ExprDef::Binding(name, rhs) = &v[0] {
+                assert_eq!(name, "double");
+                if let ExprDef::Lambda(params, _) = rhs.as_ref() {
+                    assert_eq!(params.len(), 1);
+                    assert_eq!(params[0].0, "n");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn run_named_function_call() {
         let v = run_with_registry(
             "fn mysum(a, b) => (a + b)\nmysum(1, 2)",
@@ -1547,6 +1571,17 @@ mod tests {
         .unwrap();
         let Value::Numeric(q) = v else { panic!("expected numeric, got {:?}", v) };
         assert!((q.value() - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_single_arg_lambda_shorthand() {
+        let v = run_with_registry(
+            "fn double n => (n * 2)\ndouble(5)",
+            &default_si_registry(),
+        )
+        .unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric, got {:?}", v) };
+        assert!((q.value() - 10.0).abs() < 1e-10);
     }
 
     #[test]
@@ -2027,6 +2062,7 @@ mod tests {
     fn run_vector_map_method() {
         assert_eq!(run_format("[1, 2, 3].map(fn (x) => (x+1))").unwrap(), "[2, 3, 4]");
         assert_eq!(run_format("[1, 2, 3].map(fn (x) => (x*2))").unwrap(), "[2, 4, 6]");
+        assert_eq!(run_format("[1, 2, 3].map(fn n => (n * 10))").unwrap(), "[10, 20, 30]");
     }
 
     #[test]

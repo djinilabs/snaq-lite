@@ -64,7 +64,7 @@ FnName: String = {
     FuncIdent => <>,
 };
 
-// Block item: named function (fn name(params)=>body), binding (Ident = BlockItem), or expression.
+// Block item: named function (fn name(params)=>body or fn name param=>body), binding (Ident = BlockItem), or expression.
 BlockItem: ExprDef = {
     "fn" <name:FnName> "(" <params:ParamList> ")" "=>" "{" <list:ExprList> "}" => {
         let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
@@ -73,6 +73,12 @@ BlockItem: ExprDef = {
     "fn" <name:FnName> "(" <params:ParamList> ")" "=>" "(" <body:Expr> ")" => {
         let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
         ExprDef::Binding(name, Box::new(ExprDef::Lambda(params, Box::new(body))))
+    },
+    "fn" <name:FnName> <param:Ident> "=>" "{" <list:ExprList> "}" => {
+        ExprDef::Binding(name, Box::new(ExprDef::Lambda(vec![(param, None)], Box::new(ExprDef::Block(list)))))
+    },
+    "fn" <name:FnName> <param:Ident> "=>" "(" <body:Expr> ")" => {
+        ExprDef::Binding(name, Box::new(ExprDef::Lambda(vec![(param, None)], Box::new(body))))
     },
     <name:Ident> "=" <rhs:BlockItem> => ExprDef::Binding(name, Box::new(rhs)),
     <e:Expr> => e,
@@ -221,7 +227,7 @@ PostfixFactor: ExprDef = {
 
 Factor: ExprDef = {
     "-" <e:Factor> => ExprDef::Neg(Box::new(e)),
-    // Anonymous lambda: fn ( params ) => body. "fn" required so ( a ) is unambiguous vs ( Expr ).
+    // Anonymous lambda: fn ( params ) => body or fn param => body (single-arg shorthand).
     "fn" "(" <params:ParamList> ")" "=>" "{" <list:ExprList> "}" => {
         let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
         ExprDef::Lambda(params, Box::new(ExprDef::Block(list)))
@@ -229,6 +235,12 @@ Factor: ExprDef = {
     "fn" "(" <params:ParamList> ")" "=>" "(" <body:Expr> ")" => {
         let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
         ExprDef::Lambda(params, Box::new(body))
+    },
+    "fn" <param:Ident> "=>" "{" <list:ExprList> "}" => {
+        ExprDef::Lambda(vec![(param, None)], Box::new(ExprDef::Block(list)))
+    },
+    "fn" <param:Ident> "=>" "(" <body:Expr> ")" => {
+        ExprDef::Lambda(vec![(param, None)], Box::new(body))
     },
     <ni:NumIdents> => ni,
     <n:Num> => ExprDef::LitScalar(n),

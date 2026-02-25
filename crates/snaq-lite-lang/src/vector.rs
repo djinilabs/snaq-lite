@@ -102,7 +102,7 @@ pub enum VectorMapOp {
     Gt(Box<Value>),
     Ge(Box<Value>),
     /// User-defined function applied to each element (e.g. from V.map(fn x => x+1)).
-    UserMap(user_function::UserFunctionId),
+    UserMap(Box<user_function::UserFunction>),
 }
 
 /// Binary operation for vector–vector (zip element-wise or outer product).

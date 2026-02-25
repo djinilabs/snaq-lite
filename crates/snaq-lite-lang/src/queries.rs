@@ -7,7 +7,7 @@
 use crate::error::RunError;
 use crate::functions;
 use crate::ir::{CallArg, ExprData, ExprDef, Expression, ProgramDef};
-use crate::scope::{Scope, StoredValue};
+use crate::scope::{closure_env_get, closure_env_register, Scope, StoredValue};
 use crate::user_function;
 use crate::quantity::Quantity;
 use crate::stat_compare::{
@@ -514,23 +514,23 @@ impl std::marker::Unpin for VectorStream<'_> {}
 /// Invoke a user function with a single argument (used by [VectorMapOp::UserMap] per element).
 fn apply_user_map_element(
     db: &dyn salsa::Database,
-    id: user_function::UserFunctionId,
+    uf: &user_function::UserFunction,
     elem: Value,
     _registry: &UnitRegistry,
 ) -> Result<Value, RunError> {
-    let uf = user_function::get(id).ok_or_else(|| {
-        RunError::UnknownFunction("user function not found (wrong thread or stale id)".to_string())
-    })?;
     if uf.params.len() != 1 {
         return Err(RunError::UnknownFunction(format!(
             "map requires a function of one parameter (got {} parameters)",
             uf.params.len()
         )));
     }
+    let closure_env = closure_env_get(uf.closure_env_id).ok_or_else(|| {
+        RunError::UnknownFunction("closure env not found (wrong thread or stale id)".to_string())
+    })?;
     let param_name = uf.params[0].0.clone();
     let stored = StoredValue::from_value(&elem)
         .map_err(|_| RunError::BindingValueNotSupported("map: function parameter value cannot be stored".to_string()))?;
-    let env = uf.closure_env.extend(param_name, stored);
+    let env = closure_env.extend(param_name, stored);
     let scope = Scope::new(db, env);
     let body_expr = build_expression(db, *uf.body.clone());
     value(db, scope, body_expr)
@@ -560,11 +560,11 @@ fn apply_map_op(
         VectorMapOp::Le(scalar) => cmp_values(CmpOp::Le, &v, scalar, registry, None)?,
         VectorMapOp::Gt(scalar) => cmp_values(CmpOp::Gt, &v, scalar, registry, None)?,
         VectorMapOp::Ge(scalar) => cmp_values(CmpOp::Ge, &v, scalar, registry, None)?,
-        VectorMapOp::UserMap(id) => {
+        VectorMapOp::UserMap(uf) => {
             let db = db.ok_or_else(|| {
                 RunError::UnknownFunction("internal: db required for UserMap".to_string())
             })?;
-            apply_user_map_element(db, *id, v, registry)?
+            apply_user_map_element(db, uf, v, registry)?
         }
     };
     Ok(Some(result))
@@ -1096,8 +1096,8 @@ pub fn value<'db>(
                     }
                     let (_, fn_expr) = &args[0];
                     let fn_val = value(db, scope, *fn_expr)?;
-                    let id = match &fn_val {
-                        Value::Function(id) => *id,
+                    let uf = match &fn_val {
+                        Value::Function(uf) => uf.clone(),
                         _ => {
                             return Err(RunError::UnknownMethod(
                                 "map requires a function (e.g. fn (x) => (x+1))".to_string(),
@@ -1113,7 +1113,7 @@ pub fn value<'db>(
                         .map(|r| {
                             r.and_then(|opt| {
                                 opt.map(|elem| {
-                                    apply_user_map_element(db, id, elem, &registry)
+                                    apply_user_map_element(db, &uf, elem, &registry)
                                         .map(Some)
                                 })
                                 .unwrap_or(Ok(None))
@@ -1240,14 +1240,14 @@ pub fn value<'db>(
                 .collect();
             let body_def = Box::new(expression_to_def(db, *body));
             let closure_env = scope.env(db).clone();
-            let uf = user_function::UserFunction::new(params_def, body_def, closure_env);
-            let id = user_function::register(uf);
-            Ok(Value::Function(id))
+            let closure_env_id = closure_env_register(closure_env);
+            let uf = user_function::UserFunction::new(params_def, body_def, closure_env_id);
+            Ok(Value::Function(Box::new(uf)))
         }
         ExprData::CallExpr(callee, args) => {
             let callee_val = value(db, scope, *callee)?;
             match &callee_val {
-                Value::Function(id) => eval_user_call(db, scope, *id, args, registry),
+                Value::Function(uf) => eval_user_call(db, scope, uf, args, registry),
                 _ => Err(RunError::UnknownFunction(
                     "expression is not callable (expected a function)".to_string(),
                 )),
@@ -1493,12 +1493,12 @@ fn eval_if(
 fn eval_user_call(
     db: &dyn salsa::Database,
     scope: Scope,
-    id: user_function::UserFunctionId,
+    uf: &user_function::UserFunction,
     args: &[(Option<String>, Expression<'_>)],
     _registry: &UnitRegistry,
 ) -> Result<Value, RunError> {
-    let uf = user_function::get(id).ok_or_else(|| {
-        RunError::UnknownFunction("user function not found (wrong thread or stale id)".to_string())
+    let closure_env = closure_env_get(uf.closure_env_id).ok_or_else(|| {
+        RunError::UnknownFunction("closure env not found (wrong thread or stale id)".to_string())
     })?;
     let param_names: Vec<String> = uf.params.iter().map(|(n, _)| n.clone()).collect();
     let mut bound: HashMap<String, Value> = HashMap::new();
@@ -1522,7 +1522,7 @@ fn eval_user_call(
         };
         bound.insert(param, v);
     }
-    let closure_scope = Scope::new(db, uf.closure_env.clone());
+    let closure_scope = Scope::new(db, closure_env.clone());
     for (name, default) in uf.params.iter() {
         if bound.contains_key(name) {
             continue;
@@ -1534,7 +1534,7 @@ fn eval_user_call(
         let v = value(db, closure_scope, default_expr)?;
         bound.insert(name.clone(), v);
     }
-    let mut env = uf.closure_env.clone();
+    let mut env = closure_env;
     // Param values must be storable; from_value rejects only Symbolic (Vector is stored via registry).
     for (name, v) in &bound {
         let stored = StoredValue::from_value(v)?;
@@ -1555,8 +1555,8 @@ fn eval_call(
 ) -> Result<Value, RunError> {
     // Scope first: user-defined function shadows built-in.
     let env = scope.env(db);
-    if let Some(StoredValue::Function(id)) = env.get(name) {
-        return eval_user_call(db, scope, *id, args, registry);
+    if let Some(StoredValue::Function(uf)) = env.get(name) {
+        return eval_user_call(db, scope, uf, args, registry);
     }
     let param_names = functions::param_names(name)
         .ok_or_else(|| RunError::UnknownFunction(name.to_string()))?;

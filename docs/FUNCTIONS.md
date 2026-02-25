@@ -97,6 +97,64 @@ Positional and named arguments can be mixed. The language binds positional argum
 
 - **Invalid argument** — if the argument is negative (e.g. `sqrt(-1)`). The message indicates that the argument must be non-negative.
 
+### Syntactic sugar (traditional mathematical notation)
+
+- **Exponentiation:** `x ^ n` is the same as `pow(x, n)` (e.g. `2^10` → 1024). Precedence is above `*` and `/`, so `2 * 3^2` = 18.
+- **Modulo:** `a % b` is the same as `mod(a, b)` (e.g. `7 % 3` → 1).
+- **Factorial:** `n!` is the same as `factorial(n)` (e.g. `5!` → 120). Non-negative integer only.
+- **Square root (prefix):** `√x` is the same as `sqrt(x)` (Unicode √, U+221A).
+- **Cube root (prefix):** `∛x` is the same as `cbrt(x)` (Unicode ∛, U+221B).
+
+### Elementary and rounding: abs, sign, floor, ceil, round, trunc, mod
+
+- **abs(x)** — Absolute value; same unit as input.
+- **sign(x)** — Sign: -1, 0, or 1 (dimensionless). Argument must be dimensionless.
+- **floor(x)**, **ceil(x)**, **round(x)**, **trunc(x)** — Standard rounding; same dimension as input. **round** uses half away from zero (e.g. 2.5 → 3, −2.5 → −3).
+- **mod(a, b)** — Remainder; same dimension as `a`. Both arguments must have the same dimension; `b` must be nonzero.
+
+### Exponential and logarithm: exp, ln, log, log10, log2
+
+- **exp(x)** — e^x; argument dimensionless; result dimensionless; variance propagated.
+- **ln(x)** or **log(x)** — Natural logarithm; x > 0; dimensionless.
+- **log10(x)**, **log2(x)** — Base-10 and base-2 log; x > 0; dimensionless.
+
+### Inverse trigonometry: asin, acos, atan, atan2
+
+- **asin(x)**, **acos(x)** — Argument in [-1, 1]; result angle (rad).
+- **atan(x)** — Result angle (rad).
+- **atan2(y, x)** — Two-argument atan (quadrant-correct); both arguments same dimension; result angle (rad).
+
+### Hyperbolic: sinh, cosh, tanh, asinh, acosh, atanh
+
+- All take one dimensionless argument and return a dimensionless result. **acosh** requires x ≥ 1; **atanh** requires |x| < 1.
+
+### Powers: pow, cbrt
+
+- **pow(x, n)** — x^n; exponent typically dimensionless; result unit = base unit^n (integer or 0.5, 1/3 supported for unit propagation).
+- **cbrt(x)** — Cube root; result unit = argument unit^(1/3).
+
+### Probability: norm_cdf, norm_inv, factorial, binom, perm
+
+- **norm_cdf(x)** — Standard normal CDF Φ(x); x dimensionless.
+- **norm_inv(p)** — Inverse CDF (quantile); p in (0, 1).
+- **factorial(n)** — n! for non-negative integer n.
+- **binom(n, k)** — Binomial coefficient C(n,k); 0 ≤ k ≤ n, integers.
+- **perm(n, k)** — Permutations P(n,k) = n!/(n-k)!; 0 ≤ k ≤ n, integers.
+
+### Number theory: gcd, lcm
+
+- **gcd(a, b)**, **lcm(a, b)** — Non-negative integer arguments; result dimensionless.
+
+### Statistics: corr, median, quantile
+
+- **corr(a, b)** — Pearson correlation of two vectors; same length; elements must be numeric (same dimension); at least 2 pairs required; result dimensionless in [-1, 1].
+- **V.median()** — Median of vector elements. Elements must be numeric and have the same dimension; empty vector is an error.
+- **V.quantile(p)** — Sample quantile; p must be in [0, 1]; e.g. p=0.5 gives median. Elements must be numeric and same dimension; empty vector is an error.
+
+### Constants
+
+- **pi**, **π**, **e**, **sqrt_2**, **sqrt_3**, **phi** (golden ratio) — Available as symbols; use in expressions (e.g. `ln(e)`, `phi`).
+
 ## Use cases and edge cases
 
 - **Trig with units:** Prefer angle units so the argument is clearly an angle: `sin(pi rad)`, `sin(180 degree)`. Avoid `sin(pi)` without a unit when you mean radians; the runtime may report expected angle (dimensionless).

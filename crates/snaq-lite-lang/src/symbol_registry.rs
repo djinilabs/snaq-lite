@@ -21,7 +21,7 @@ impl SymbolRegistry {
         Self::default()
     }
 
-    /// Create the default registry with built-in constants: pi, π, e, sqrt_2, sqrt_3.
+    /// Create the default registry with built-in constants: pi, π, e, sqrt_2, sqrt_3, phi.
     pub fn default_registry() -> Self {
         let mut r = Self::new();
         r.insert("pi", std::f64::consts::PI);
@@ -29,6 +29,7 @@ impl SymbolRegistry {
         r.insert("e", std::f64::consts::E);
         r.insert("sqrt_2", 2_f64.sqrt());
         r.insert("sqrt_3", 3_f64.sqrt());
+        r.insert("phi", (1.0 + 5_f64.sqrt()) / 2.0);
         r
     }
 

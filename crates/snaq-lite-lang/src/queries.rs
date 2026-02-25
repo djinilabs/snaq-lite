@@ -1405,6 +1405,36 @@ pub fn value<'db>(
                     let len_val = Value::Numeric(Quantity::from_exact_scalar(n as f64));
                     div_values(&sum_val, &len_val, registry, None, expr.span(db))
                 }
+                "median" => {
+                    if !args.is_empty() {
+                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
+                            "median takes no arguments".to_string(),
+                        )));
+                    }
+                    let collected = collect_vector_stream(db, inner);
+                    median_from_collected(&collected, registry)
+                        .map_err(|e| with_span_if_missing(e, expr.span(db)))
+                }
+                "quantile" => {
+                    if args.len() != 1 {
+                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(format!(
+                            "quantile requires 1 argument (p in [0,1]), got {}",
+                            args.len()
+                        ))));
+                    }
+                    let (_, p_expr) = &args[0];
+                    let p_val = value(db, scope, *p_expr)?;
+                    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+                    let p_q = p_val.to_quantity(&sym_reg).map_err(|_| {
+                        RunError::new(RunErrorKind::InvalidArgument(
+                            "quantile: p must be numeric".to_string(),
+                        ))
+                    })?;
+                    let p = p_q.value();
+                    let collected = collect_vector_stream(db, inner);
+                    quantile_from_collected(&collected, p, registry)
+                        .map_err(|e| with_span_if_missing(e, expr.span(db)))
+                }
                 "min" => {
                     if !args.is_empty() {
                         return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
@@ -2037,7 +2067,7 @@ fn eval_call(
         }
     }
     // Unary built-ins (sin, cos, tan, sqrt): map over vector when the single argument is a vector.
-    if param_names.len() == 1 && matches!(name, "sin" | "cos" | "tan" | "sqrt") {
+    if param_names.len() == 1 && matches!(name, "sin" | "cos" | "tan" | "sqrt" | "cbrt" | "abs" | "sign" | "floor" | "ceil" | "round" | "trunc" | "exp" | "ln" | "log" | "log10" | "log2" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh" | "norm_cdf" | "norm_inv" | "factorial") {
         let v = bound.get(param_names[0]).unwrap();
         if let Value::Vector(v) = v {
             return Ok(Value::Vector(VectorValue {
@@ -2048,6 +2078,23 @@ fn eval_call(
                 orientation: v.orientation,
             }));
         }
+    }
+    // corr(a, b): two vectors → Pearson correlation (dimensionless).
+    if name == "corr" {
+        let a_val = bound.get("a").unwrap();
+        let b_val = bound.get("b").unwrap();
+        let VectorValue { inner: a_inner, .. } = match a_val {
+            Value::Vector(v) => v.clone(),
+            _ => return Err(RunError::new(RunErrorKind::ExpectedVector)),
+        };
+        let VectorValue { inner: b_inner, .. } = match b_val {
+            Value::Vector(v) => v.clone(),
+            _ => return Err(RunError::new(RunErrorKind::ExpectedVector)),
+        };
+        let a_elems = collect_vector_stream(db, a_inner);
+        let b_elems = collect_vector_stream(db, b_inner);
+        let r = pearson_correlation(&a_elems, &b_elems, registry)?;
+        return Ok(Value::Numeric(Quantity::new(r, Unit::scalar())));
     }
     // take(vector, start, length): first arg is vector, second and third are non-negative integers.
     if name == "take" {
@@ -2230,6 +2277,149 @@ fn compute_variance_value(
     let mean_sq_val = div_values(&sum_sq, &len_val, registry, None, None)?;
     let mean_sq_mean = mul_values(&mean_val, &mean_val, registry, None, None)?;
     sub_values(&mean_sq_val, &mean_sq_mean, registry, None, None)
+}
+
+/// Pearson correlation of two collected vectors. Both must have same length and numeric elements (same dimension).
+/// Returns dimensionless scalar in [-1, 1]. Errors if length < 2 or length mismatch.
+fn pearson_correlation(
+    a_elems: &[Result<Option<Value>, RunError>],
+    b_elems: &[Result<Option<Value>, RunError>],
+    registry: &UnitRegistry,
+) -> Result<f64, RunError> {
+    if a_elems.len() != b_elems.len() {
+        return Err(RunError::new(RunErrorKind::VectorLengthMismatch {
+            left_len: a_elems.len(),
+            right_len: b_elems.len(),
+        }));
+    }
+    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+    let mut xs: Vec<f64> = Vec::new();
+    let mut ys: Vec<f64> = Vec::new();
+    for (ra, rb) in a_elems.iter().zip(b_elems.iter()) {
+        let va = ra.as_ref().map_err(|e| e.clone())?.clone();
+        let vb = rb.as_ref().map_err(|e| e.clone())?.clone();
+        let Some(va) = va else { continue };
+        let Some(vb) = vb else { continue };
+        let qa = va.to_quantity(&sym_reg).map_err(|_| {
+            RunError::new(RunErrorKind::InvalidArgument(
+                "corr: elements must be numeric (same dimension)".to_string(),
+            ))
+        })?;
+        let qb = vb.to_quantity(&sym_reg).map_err(|_| {
+            RunError::new(RunErrorKind::InvalidArgument(
+                "corr: elements must be numeric (same dimension)".to_string(),
+            ))
+        })?;
+        if !registry.same_dimension(qa.unit(), qb.unit()).unwrap_or(false) {
+            return Err(RunError::new(RunErrorKind::DimensionMismatch {
+                left: qa.unit().clone(),
+                right: qb.unit().clone(),
+            }));
+        }
+        let common = Quantity::smaller_unit(registry, qa.unit(), qb.unit()).cloned().unwrap_or_else(|| qa.unit().clone());
+        let x = qa.convert_to(registry, &common).map_err(|_| RunError::new(RunErrorKind::DimensionMismatch {
+            left: qa.unit().clone(),
+            right: common.clone(),
+        }))?.value();
+        let y = qb.convert_to(registry, &common).map_err(|_| RunError::new(RunErrorKind::DimensionMismatch {
+            left: qb.unit().clone(),
+            right: common.clone(),
+        }))?.value();
+        xs.push(x);
+        ys.push(y);
+    }
+    let n = xs.len() as f64;
+    if n < 2.0 {
+        return Err(RunError::new(RunErrorKind::InvalidArgument(
+            "corr: need at least 2 pairs".to_string(),
+        )));
+    }
+    let sum_x: f64 = xs.iter().sum();
+    let sum_y: f64 = ys.iter().sum();
+    let sum_xy: f64 = xs.iter().zip(ys.iter()).map(|(a, b)| a * b).sum();
+    let sum_x2: f64 = xs.iter().map(|x| x * x).sum();
+    let sum_y2: f64 = ys.iter().map(|y| y * y).sum();
+    let num = n * sum_xy - sum_x * sum_y;
+    let den = ((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y)).sqrt();
+    let r = if den > 0.0 { num / den } else { 0.0 };
+    Ok(r.clamp(-1.0, 1.0))
+}
+
+/// Sorted numeric values from collected vector (same dimension). Errors on non-numeric or dimension mismatch.
+fn collected_to_sorted_quantities(
+    collected: &[Result<Option<Value>, RunError>],
+    registry: &UnitRegistry,
+    method: &str,
+) -> Result<Vec<Quantity>, RunError> {
+    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+    let mut qs: Vec<Quantity> = Vec::new();
+    for r in collected {
+        let opt = r.as_ref().map_err(|e| e.clone())?;
+        let Some(v) = opt else { continue };
+        let q = v.to_quantity(&sym_reg).map_err(|_| {
+            RunError::new(RunErrorKind::EmptyVectorReduction(format!(
+                "{method}: elements must be numeric"
+            )))
+        })?;
+        qs.push(q);
+    }
+    if qs.is_empty() {
+        return Err(RunError::new(RunErrorKind::EmptyVectorReduction(method.to_string())));
+    }
+    let ref_unit = qs[0].unit().clone();
+    for q in &mut qs {
+        *q = q.clone().convert_to(registry, &ref_unit).map_err(|_| {
+            RunError::new(RunErrorKind::DimensionMismatch {
+                left: q.unit().clone(),
+                right: ref_unit.clone(),
+            })
+        })?;
+    }
+    qs.sort_by(|a, b| a.value().partial_cmp(&b.value()).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(qs)
+}
+
+/// Median of collected vector (middle value or average of two middles). Same dimension as elements.
+fn median_from_collected(
+    collected: &[Result<Option<Value>, RunError>],
+    registry: &UnitRegistry,
+) -> Result<Value, RunError> {
+    let qs = collected_to_sorted_quantities(collected, registry, "median")?;
+    let n = qs.len();
+    let result_q = if n % 2 == 1 {
+        qs[n / 2].clone()
+    } else {
+        let a = qs[n / 2 - 1].value();
+        let b = qs[n / 2].value();
+        Quantity::new((a + b) / 2.0, qs[0].unit().clone())
+    };
+    Ok(Value::Numeric(result_q))
+}
+
+/// Quantile at p (0 <= p <= 1). Linear interpolation between order statistics.
+fn quantile_from_collected(
+    collected: &[Result<Option<Value>, RunError>],
+    p: f64,
+    registry: &UnitRegistry,
+) -> Result<Value, RunError> {
+    if !(0.0..=1.0).contains(&p) {
+        return Err(RunError::new(RunErrorKind::InvalidArgument(
+            "quantile: p must be in [0, 1]".to_string(),
+        )));
+    }
+    let qs = collected_to_sorted_quantities(collected, registry, "quantile")?;
+    let n = qs.len();
+    if n == 1 {
+        return Ok(Value::Numeric(qs[0].clone()));
+    }
+    let idx = p * (n - 1) as f64;
+    let lo = idx.floor() as usize;
+    let hi = idx.ceil() as usize;
+    let lo = lo.min(n - 1);
+    let hi = hi.min(n - 1);
+    let frac = idx - lo as f64;
+    let val = (1.0 - frac) * qs[lo].value() + frac * qs[hi].value();
+    Ok(Value::Numeric(Quantity::new(val, qs[0].unit().clone())))
 }
 
 /// Min or max over collected vector elements (numeric only). Empty → EmptyVectorReduction.

@@ -2335,6 +2335,83 @@ mod tests {
     }
 
     #[test]
+    fn run_stem_builtins_elementary_and_pow() {
+        assert_eq!(run_format("abs(-3)").unwrap(), "3");
+        assert!((run_numeric("floor(2.7)").unwrap().value() - 2.0).abs() < 1e-10);
+        assert!((run_numeric("ceil(2.2)").unwrap().value() - 3.0).abs() < 1e-10);
+        assert!((run_numeric("round(2.5)").unwrap().value() - 3.0).abs() < 1e-10);
+        assert!((run_numeric("mod(7, 3)").unwrap().value() - 1.0).abs() < 1e-10);
+        assert!((run_numeric("pow(2, 10)").unwrap().value() - 1024.0).abs() < 1e-10);
+        assert!((run_numeric("cbrt(27)").unwrap().value() - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_stem_builtins_exp_log() {
+        assert!((run_numeric("exp(0)").unwrap().value() - 1.0).abs() < 1e-10);
+        assert!((run_numeric("ln(e)").unwrap().value() - 1.0).abs() < 1e-10);
+        assert!((run_numeric("log10(100)").unwrap().value() - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_stem_builtins_probability_and_discrete() {
+        assert!((run_numeric("factorial(5)").unwrap().value() - 120.0).abs() < 1e-10);
+        assert!((run_numeric("binom(5, 2)").unwrap().value() - 10.0).abs() < 1e-10);
+        assert!((run_numeric("gcd(12, 18)").unwrap().value() - 6.0).abs() < 1e-10);
+        assert!((run_numeric("lcm(4, 6)").unwrap().value() - 12.0).abs() < 1e-10);
+        let p = run_numeric("norm_cdf(0)").unwrap().value();
+        assert!((p - 0.5).abs() < 1e-6, "norm_cdf(0) ≈ 0.5");
+    }
+
+    #[test]
+    fn run_stem_vector_median_quantile_corr() {
+        assert!((run_numeric("[1, 2, 3, 4, 5].median()").unwrap().value() - 3.0).abs() < 1e-10);
+        assert!((run_numeric("[1, 2, 3, 4, 5].quantile(0.5)").unwrap().value() - 3.0).abs() < 1e-10);
+        let r = run_numeric("corr([1, 2, 3], [2, 4, 6])").unwrap().value();
+        assert!((r - 1.0).abs() < 1e-10, "perfect positive correlation");
+    }
+
+    #[test]
+    fn run_stem_median_quantile_corr_edge_cases() {
+        // Empty vector → EmptyVectorReduction
+        let e = run("[].median()").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::EmptyVectorReduction(_)));
+        let e = run("[].quantile(0.5)").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::EmptyVectorReduction(_)));
+        // quantile p out of [0, 1]
+        let e = run("[1, 2, 3].quantile(1.5)").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::InvalidArgument(msg) if msg.contains("quantile") && msg.contains("[0, 1]")));
+        let e = run("[1, 2, 3].quantile(-0.1)").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::InvalidArgument(msg) if msg.contains("quantile")));
+        // corr length mismatch
+        let e = run("corr([1, 2], [1, 2, 3])").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::VectorLengthMismatch { .. }));
+        // corr need at least 2 pairs
+        let e = run("corr([1], [2])").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::InvalidArgument(msg) if msg.contains("corr") && msg.contains("2 pairs")));
+    }
+
+    #[test]
+    fn run_phi_constant() {
+        let v = run_numeric("phi").unwrap();
+        let golden = (1.0 + 5_f64.sqrt()) / 2.0;
+        assert!((v.value() - golden).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_syntactic_sugar_pow_and_mod() {
+        assert!((run_numeric("2^10").unwrap().value() - 1024.0).abs() < 1e-10);
+        assert!((run_numeric("7 % 3").unwrap().value() - 1.0).abs() < 1e-10);
+        assert!((run_numeric("2 * 3^2").unwrap().value() - 18.0).abs() < 1e-10, "2*3^2 = 18");
+    }
+
+    #[test]
+    fn run_syntactic_sugar_factorial_and_roots() {
+        assert!((run_numeric("5!").unwrap().value() - 120.0).abs() < 1e-10);
+        assert!((run_numeric("√4").unwrap().value() - 2.0).abs() < 1e-10);
+        assert!((run_numeric("∛27").unwrap().value() - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
     fn run_vector_dot_norm() {
         assert_eq!(run_format("[1, 2, 3].dot([4, 5, 6])").unwrap(), "32");
         assert_eq!(run_format("[1, 0, 0].dot([1, 0, 0])").unwrap(), "1");

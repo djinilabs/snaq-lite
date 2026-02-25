@@ -53,6 +53,16 @@ pub enum Tok {
     Ge,
     /// Explicit precision/error bound: `~` (e.g. 10 ~ 2 => value 10 with ±2 error).
     Tilde,
+    /// Exponentiation: `^` (e.g. 2^10 => pow(2, 10)).
+    Caret,
+    /// Modulo: `%` (e.g. 7 % 3 => mod(7, 3)).
+    Percent,
+    /// Factorial (postfix): `!` (e.g. 5! => factorial(5)).
+    Bang,
+    /// Square root (prefix): `√` (U+221A) => sqrt(expr).
+    SqrtPrefix,
+    /// Cube root (prefix): `∛` (U+221B) => cbrt(expr).
+    CbrtPrefix,
     /// Block start: `{`
     LBrace,
     /// Block end: `}`
@@ -333,6 +343,11 @@ impl<'input> Iterator for Lexer<'input> {
             ':' => Tok::Colon,
             '\'' => Tok::Apostrophe,
             '~' => Tok::Tilde,
+            '^' => Tok::Caret,
+            '%' => Tok::Percent,
+            '!' => Tok::Bang,
+            '√' => Tok::SqrtPrefix,
+            '∛' => Tok::CbrtPrefix,
             '=' => Tok::Assign,
             '<' => Tok::Lt,
             '>' => Tok::Gt,

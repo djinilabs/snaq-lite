@@ -88,13 +88,15 @@ Vectors support **properties** (no arguments) and **methods** (with arguments) u
   - **`V.product()`** — product of all elements (scalar). Empty vector → `1`. Same dimension required.
   - **`V.variance()`** — population variance (mean of squares minus square of mean). Empty vector → error. Result has squared dimension (e.g. m² for lengths in m).
   - **`V.stddev()`** — standard deviation (√ of variance). Empty vector → error.
+  - **`V.median()`** — median of elements (middle value or average of two middles). Empty vector → error. Same dimension required.
+  - **`V.quantile(p)`** — sample quantile; `p` in [0, 1] (e.g. 0.5 for median). Empty vector → error. Same dimension required.
   - **`V.all()`** — true if every element is true; **`V.any()`** — true if any element is true. Elements must be boolean (e.g. from comparisons). Empty vector: `all()` → true, `any()` → false.
 
 Numeric index access (e.g. `V.0`, `V.1`) is unchanged: use a **number** after the dot for single-element access; use an **identifier** (e.g. `length`, `map`) for property or method access. Unknown property or method names return **unknown property** or **unknown method**.
 
 ### Math and statistics (for students)
 
-The methods **sum**, **mean**, **min**, **max**, **dot**, **norm**, **product**, **variance**, and **stddev** support typical science and math workflows: net force (sum of force vectors), average value (mean), bounds (min/max), dot product and vector length (norm), compound growth (product), and spread (variance, stddev). All reduction methods require elements to have the same dimension (or be boolean for **all**/**any**). Empty-vector behaviour: **sum** → 0, **product** → 1, **norm** → 0; **mean**, **min**, **max**, **variance**, **stddev** return an error.
+The methods **sum**, **mean**, **min**, **max**, **dot**, **norm**, **product**, **variance**, **stddev**, **median**, and **quantile** support typical science and math workflows: net force (sum of force vectors), average value (mean), bounds (min/max), dot product and vector length (norm), compound growth (product), and spread (variance, stddev). All reduction methods require elements to have the same dimension (or be boolean for **all**/**any**). Empty-vector behaviour: **sum** → 0, **product** → 1, **norm** → 0; **mean**, **min**, **max**, **variance**, **stddev** return an error.
 
 ## Display
 

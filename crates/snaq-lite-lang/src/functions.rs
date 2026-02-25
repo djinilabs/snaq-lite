@@ -1,4 +1,6 @@
-//! Built-in functions: sin, cos, tan (trig, one arg in angle dimension: rad or degree), max, min (two args, same dimension).
+//! Built-in functions: trig (sin, cos, tan), inverse trig (asin, acos, atan, atan2), hyperbolic (sinh, cosh, tanh, asinh, acosh, atanh),
+//! elementary (sqrt, cbrt, abs, sign, floor, ceil, round, trunc), exp/log (exp, ln, log10, log2), pow, mod,
+//! probability (norm_cdf, norm_inv, factorial, binom, perm), number theory (gcd, lcm), max, min, take.
 //! For well-known angles, exact symbolic results (0, 1, √2/2, etc.) are returned when possible.
 
 use crate::error::{RunError, RunErrorKind};
@@ -6,8 +8,42 @@ use crate::quantity::{Quantity, SnaqNumber};
 use crate::symbolic::{SymbolicExpr, SymbolicQuantity, Value};
 use crate::unit::Unit;
 use crate::unit_registry::UnitRegistry;
+use statrs::distribution::{ContinuousCDF, Normal};
 
 use std::f64::consts::FRAC_PI_2;
+
+fn factorial_f64(n: u64) -> f64 {
+    if n > 170 {
+        f64::INFINITY
+    } else {
+        (1..=n).map(|i| i as f64).product()
+    }
+}
+
+fn binom_f64(n: u64, k: u64) -> f64 {
+    if k > n {
+        0.0
+    } else {
+        factorial_f64(n) / (factorial_f64(k) * factorial_f64(n - k))
+    }
+}
+
+fn perm_f64(n: u64, k: u64) -> f64 {
+    if k > n {
+        0.0
+    } else {
+        (n - k + 1..=n).map(|i| i as f64).product()
+    }
+}
+
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
 
 /// Well-known angle as a fraction of π (0, 1/6, 1/4, 1/3, 1/2, 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,8 +327,14 @@ pub fn exact_tan_match(m: KnownAngleMatch) -> Option<SymbolicExpr> {
 /// Parameter names for each built-in (order matters for positional binding).
 pub fn param_names(name: &str) -> Option<&'static [&'static str]> {
     match name {
-        "sin" | "cos" | "tan" | "sqrt" => Some(&["x"]),
-        "max" | "min" => Some(&["a", "b"]),
+        "sin" | "cos" | "tan" | "sqrt" | "cbrt" | "abs" | "sign" | "floor" | "ceil" | "round" | "trunc"
+        | "exp" | "ln" | "log" | "log10" | "log2" | "asin" | "acos" | "atan"
+        | "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh"
+        | "norm_cdf" | "norm_inv" | "factorial" => Some(&["x"]),
+        "max" | "min" | "mod" | "gcd" | "lcm" | "corr" => Some(&["a", "b"]),
+        "pow" => Some(&["x", "n"]),
+        "binom" | "perm" => Some(&["n", "k"]),
+        "atan2" => Some(&["y", "x"]),
         "take" => Some(&["vector", "start", "length"]),
         _ => None,
     }
@@ -357,6 +399,320 @@ pub fn call_builtin(
                 x.unit().clone().power(half),
             )))
         }
+        "abs" => {
+            let x = exactly_one(param_values, "abs")?;
+            let v = x.value();
+            let result_value = v.abs();
+            let result_variance = x.variance(); // variance unchanged for abs
+            Ok(Value::Numeric(Quantity::with_number(
+                SnaqNumber::new(result_value, result_variance),
+                x.unit().clone(),
+            )))
+        }
+        "sign" => {
+            let x = exactly_one(param_values, "sign")?;
+            let (v, _) = require_dimensionless(&x, registry, "sign")?;
+            let result_value = if v > 0.0 { 1.0 } else if v < 0.0 { -1.0 } else { 0.0 };
+            Ok(Value::Numeric(Quantity::new(result_value, Unit::scalar())))
+        }
+        "floor" | "ceil" | "round" | "trunc" => {
+            let x = exactly_one(param_values, name)?;
+            let v = x.value();
+            let result_value = match name {
+                "floor" => v.floor(),
+                "ceil" => v.ceil(),
+                "round" => v.round(),
+                "trunc" => v.trunc(),
+                _ => unreachable!(),
+            };
+            Ok(Value::Numeric(Quantity::with_number(
+                SnaqNumber::new(result_value, 0.0),
+                x.unit().clone(),
+            )))
+        }
+        "mod" => {
+            let (a, b) = exactly_two(param_values, "mod")?;
+            if !registry.same_dimension(a.unit(), b.unit()).unwrap_or(false) {
+                return Err(RunError::new(RunErrorKind::DimensionMismatch {
+                    left: a.unit().clone(),
+                    right: b.unit().clone(),
+                }));
+            }
+            let b_val = b.value();
+            if b_val == 0.0 {
+                return Err(RunError::new(RunErrorKind::DivisionByZero));
+            }
+            let a_val = a.value();
+            let result_value = a_val.rem_euclid(b_val);
+            let result_unit = a.unit().clone();
+            Ok(Value::Numeric(Quantity::new(result_value, result_unit)))
+        }
+        "exp" => {
+            let x = exactly_one(param_values, "exp")?;
+            let (v, var_x) = require_dimensionless(&x, registry, "exp")?;
+            let result_value = v.exp();
+            let result_variance = result_value * result_value * var_x;
+            Ok(Value::Numeric(Quantity::with_number(
+                SnaqNumber::new(result_value, result_variance),
+                Unit::scalar(),
+            )))
+        }
+        "ln" | "log" => {
+            let x = exactly_one(param_values, name)?;
+            let (v, var_x) = require_dimensionless(&x, registry, name)?;
+            if v <= 0.0 {
+                return Err(RunError::new(RunErrorKind::InvalidArgument(
+                    format!("{name}: argument must be positive"),
+                )));
+            }
+            let result_value = v.ln();
+            let result_variance = var_x / (v * v);
+            Ok(Value::Numeric(Quantity::with_number(
+                SnaqNumber::new(result_value, result_variance),
+                Unit::scalar(),
+            )))
+        }
+        "log10" => {
+            let x = exactly_one(param_values, "log10")?;
+            let (v, var_x) = require_dimensionless(&x, registry, "log10")?;
+            if v <= 0.0 {
+                return Err(RunError::new(RunErrorKind::InvalidArgument(
+                    "log10: argument must be positive".to_string(),
+                )));
+            }
+            let result_value = v.log10();
+            let ln10 = 10.0_f64.ln();
+            let result_variance = var_x / (v * v * ln10 * ln10);
+            Ok(Value::Numeric(Quantity::with_number(
+                SnaqNumber::new(result_value, result_variance),
+                Unit::scalar(),
+            )))
+        }
+        "log2" => {
+            let x = exactly_one(param_values, "log2")?;
+            let (v, var_x) = require_dimensionless(&x, registry, "log2")?;
+            if v <= 0.0 {
+                return Err(RunError::new(RunErrorKind::InvalidArgument(
+                    "log2: argument must be positive".to_string(),
+                )));
+            }
+            let result_value = v.log2();
+            let ln2 = 2.0_f64.ln();
+            let result_variance = var_x / (v * v * ln2 * ln2);
+            Ok(Value::Numeric(Quantity::with_number(
+                SnaqNumber::new(result_value, result_variance),
+                Unit::scalar(),
+            )))
+        }
+        "asin" | "acos" => {
+            let x = exactly_one(param_values, name)?;
+            let (v, _) = require_dimensionless(&x, registry, name)?;
+            if !(-1.0..=1.0).contains(&v) {
+                return Err(RunError::new(RunErrorKind::InvalidArgument(
+                    format!("{name}: argument must be in [-1, 1]"),
+                )));
+            }
+            let result_value = match name {
+                "asin" => v.asin(),
+                "acos" => v.acos(),
+                _ => unreachable!(),
+            };
+            let rad = Unit::from_base_unit("rad");
+            Ok(Value::Numeric(Quantity::new(result_value, rad)))
+        }
+        "atan" => {
+            let x = exactly_one(param_values, "atan")?;
+            let (v, _) = require_dimensionless(&x, registry, "atan")?;
+            let result_value = v.atan();
+            let rad = Unit::from_base_unit("rad");
+            Ok(Value::Numeric(Quantity::new(result_value, rad)))
+        }
+        "atan2" => {
+            let (y, x) = exactly_two(param_values, "atan2")?;
+            if !registry.same_dimension(y.unit(), x.unit()).unwrap_or(false) {
+                return Err(RunError::new(RunErrorKind::DimensionMismatch {
+                    left: y.unit().clone(),
+                    right: x.unit().clone(),
+                }));
+            }
+            let y_val = y.value();
+            let x_val = x.value();
+            let result_value = y_val.atan2(x_val);
+            let rad = Unit::from_base_unit("rad");
+            Ok(Value::Numeric(Quantity::new(result_value, rad)))
+        }
+        "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh" => {
+            let x = exactly_one(param_values, name)?;
+            let (v, var_x) = require_dimensionless(&x, registry, name)?;
+            let (result_value, result_variance) = match name {
+                "sinh" => {
+                    let r = v.sinh();
+                    (r, v.cosh().powi(2) * var_x)
+                }
+                "cosh" => {
+                    let r = v.cosh();
+                    (r, v.sinh().powi(2) * var_x)
+                }
+                "tanh" => {
+                    let r = v.tanh();
+                    let sech2 = (1.0 - r * r).max(0.0);
+                    (r, sech2 * sech2 * var_x)
+                }
+                "asinh" => (v.asinh(), var_x / (1.0 + v * v)),
+                "acosh" => {
+                    if v < 1.0 {
+                        return Err(RunError::new(RunErrorKind::InvalidArgument(
+                            "acosh: argument must be >= 1".to_string(),
+                        )));
+                    }
+                    (v.acosh(), var_x / ((v * v - 1.0).max(0.0)))
+                }
+                "atanh" => {
+                    if !(-1.0..1.0).contains(&v) {
+                        return Err(RunError::new(RunErrorKind::InvalidArgument(
+                            "atanh: argument must be in (-1, 1)".to_string(),
+                        )));
+                    }
+                    (v.atanh(), var_x / (1.0 - v * v).powi(2))
+                }
+                _ => unreachable!(),
+            };
+            Ok(Value::Numeric(Quantity::with_number(
+                SnaqNumber::new(result_value, result_variance),
+                Unit::scalar(),
+            )))
+        }
+        "pow" => {
+            let (base, exp) = exactly_two(param_values, "pow")?;
+            let (exp_val, _) = require_dimensionless(&exp, registry, "pow")?;
+            let result_value = base.value().powf(exp_val);
+            if !result_value.is_finite() {
+                return Err(RunError::new(RunErrorKind::InvalidArgument(
+                    "pow: result is not finite".to_string(),
+                )));
+            }
+            let third = crate::dimension::Exponent::new(1, 3);
+            let half = crate::dimension::Exponent::new(1, 2);
+            let result_unit = if (exp_val - 0.5).abs() < 1e-10 {
+                base.unit().clone().power(half)
+            } else if (exp_val - 1.0 / 3.0).abs() < 1e-10 {
+                base.unit().clone().power(third)
+            } else if (exp_val - exp_val.round()).abs() < 1e-10 {
+                base.unit().clone().power(crate::dimension::Exponent::from_integer(exp_val.round() as i64))
+            } else if registry.same_dimension(base.unit(), &Unit::scalar()).unwrap_or(false) {
+                Unit::scalar()
+            } else {
+                return Err(RunError::new(RunErrorKind::InvalidArgument(
+                    "pow: non-integer exponent requires dimensionless base".to_string(),
+                )));
+            };
+            Ok(Value::Numeric(Quantity::new(result_value, result_unit)))
+        }
+        "cbrt" => {
+            let x = exactly_one(param_values, "cbrt")?;
+            let result_value = x.value().cbrt();
+            let var_x = x.variance();
+            let v = x.value();
+            let result_variance = if v != 0.0 {
+                let cbrt_v = v.cbrt();
+                var_x / (9.0 * cbrt_v.powi(4))
+            } else {
+                0.0
+            };
+            let third = crate::dimension::Exponent::new(1, 3);
+            Ok(Value::Numeric(Quantity::with_number(
+                SnaqNumber::new(result_value, result_variance),
+                x.unit().clone().power(third),
+            )))
+        }
+        "norm_cdf" => {
+            let x = exactly_one(param_values, "norm_cdf")?;
+            let (v, _) = require_dimensionless(&x, registry, "norm_cdf")?;
+            let dist = Normal::new(0.0, 1.0).map_err(|_| RunError::new(RunErrorKind::InvalidArgument("norm_cdf".to_string())))?;
+            let result_value = dist.cdf(v);
+            Ok(Value::Numeric(Quantity::new(result_value, Unit::scalar())))
+        }
+        "norm_inv" => {
+            let p = exactly_one(param_values, "norm_inv")?;
+            let (v, _) = require_dimensionless(&p, registry, "norm_inv")?;
+            if !(0.0..1.0).contains(&v) {
+                return Err(RunError::new(RunErrorKind::InvalidArgument(
+                    "norm_inv: argument must be in (0, 1)".to_string(),
+                )));
+            }
+            let dist = Normal::new(0.0, 1.0).map_err(|_| RunError::new(RunErrorKind::InvalidArgument("norm_inv".to_string())))?;
+            let result_value = dist.inverse_cdf(v);
+            Ok(Value::Numeric(Quantity::new(result_value, Unit::scalar())))
+        }
+        "factorial" => {
+            let x = exactly_one(param_values, "factorial")?;
+            let (v, _) = require_dimensionless(&x, registry, "factorial")?;
+            let n = v.round() as i64;
+            if n < 0 || (v - n as f64).abs() > 1e-10 {
+                return Err(RunError::new(RunErrorKind::InvalidArgument(
+                    "factorial: argument must be non-negative integer".to_string(),
+                )));
+            }
+            let result_value = factorial_f64(n as u64);
+            Ok(Value::Numeric(Quantity::new(result_value, Unit::scalar())))
+        }
+        "binom" => {
+            let (n, k) = exactly_two(param_values, "binom")?;
+            let (n_val, _) = require_dimensionless(&n, registry, "binom")?;
+            let (k_val, _) = require_dimensionless(&k, registry, "binom")?;
+            let nn = n_val.round() as i64;
+            let kk = k_val.round() as i64;
+            if nn < 0 || kk < 0 || kk > nn {
+                return Err(RunError::new(RunErrorKind::InvalidArgument(
+                    "binom: require 0 <= k <= n (integers)".to_string(),
+                )));
+            }
+            let result_value = binom_f64(nn as u64, kk as u64);
+            Ok(Value::Numeric(Quantity::new(result_value, Unit::scalar())))
+        }
+        "perm" => {
+            let (n, k) = exactly_two(param_values, "perm")?;
+            let (n_val, _) = require_dimensionless(&n, registry, "perm")?;
+            let (k_val, _) = require_dimensionless(&k, registry, "perm")?;
+            let nn = n_val.round() as i64;
+            let kk = k_val.round() as i64;
+            if nn < 0 || kk < 0 || kk > nn {
+                return Err(RunError::new(RunErrorKind::InvalidArgument(
+                    "perm: require 0 <= k <= n (integers)".to_string(),
+                )));
+            }
+            let result_value = perm_f64(nn as u64, kk as u64);
+            Ok(Value::Numeric(Quantity::new(result_value, Unit::scalar())))
+        }
+        "gcd" => {
+            let (a, b) = exactly_two(param_values, "gcd")?;
+            let (a_val, _) = require_dimensionless(&a, registry, "gcd")?;
+            let (b_val, _) = require_dimensionless(&b, registry, "gcd")?;
+            let aa = a_val.round() as i64;
+            let bb = b_val.round() as i64;
+            if aa < 0 || bb < 0 {
+                return Err(RunError::new(RunErrorKind::InvalidArgument(
+                    "gcd: arguments must be non-negative integers".to_string(),
+                )));
+            }
+            let result_value = gcd_u64(aa as u64, bb as u64) as f64;
+            Ok(Value::Numeric(Quantity::new(result_value, Unit::scalar())))
+        }
+        "lcm" => {
+            let (a, b) = exactly_two(param_values, "lcm")?;
+            let (a_val, _) = require_dimensionless(&a, registry, "lcm")?;
+            let (b_val, _) = require_dimensionless(&b, registry, "lcm")?;
+            let aa = a_val.round() as i64;
+            let bb = b_val.round() as i64;
+            if aa < 0 || bb < 0 {
+                return Err(RunError::new(RunErrorKind::InvalidArgument(
+                    "lcm: arguments must be non-negative integers".to_string(),
+                )));
+            }
+            let g = gcd_u64(aa as u64, bb as u64);
+            let result_value = if g == 0 { 0.0 } else { (aa as u64 * bb as u64 / g) as f64 };
+            Ok(Value::Numeric(Quantity::new(result_value, Unit::scalar())))
+        }
         _ => Err(RunError::new(RunErrorKind::UnknownFunction(name.to_string()))),
     }
 }
@@ -417,6 +773,17 @@ fn require_angle(
     q.convert_to(registry, &rad).map_err(|_| RunError::new(RunErrorKind::ExpectedAngle {
         actual: q.unit().clone(),
     }))
+}
+
+/// Require the quantity to be dimensionless (scalar); return value and variance.
+fn require_dimensionless(q: &Quantity, registry: &UnitRegistry, name: &str) -> Result<(f64, f64), RunError> {
+    let scalar = Unit::scalar();
+    if !registry.same_dimension(q.unit(), &scalar).unwrap_or(false) {
+        return Err(RunError::new(RunErrorKind::InvalidArgument(format!(
+            "{name}: argument must be dimensionless (got unit with dimension)"
+        ))));
+    }
+    Ok((q.value(), q.variance()))
 }
 
 fn same_dimension_max_min<F>(

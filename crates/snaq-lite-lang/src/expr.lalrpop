@@ -43,6 +43,11 @@ extern {
         "=>" => Tok::Arrow,
         "fn" => Tok::Fn,
         "~" => Tok::Tilde,
+        "^" => Tok::Caret,
+        "%" => Tok::Percent,
+        "!" => Tok::Bang,
+        "√" => Tok::SqrtPrefix,
+        "∛" => Tok::CbrtPrefix,
         "{" => Tok::LBrace,
         "}" => Tok::RBrace,
         ";" => Tok::Semicolon,
@@ -274,16 +279,42 @@ TildeBound: SpannedExprDef = {
     PostfixFactor,
 };
 
-Term: SpannedExprDef = {
-    <lo:@L> <l:Term> "*" <r:TildeBound> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Mul(Box::new(l), Box::new(r)) },
-    <lo:@L> <l:Term> "/" <r:TildeBound> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Div(Box::new(l), Box::new(r)) },
-    <lo:@L> <l:Term> "per" <r:TildeBound> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Div(Box::new(l), Box::new(r)) },
-    <lo:@L> <l:Term> <r:ImplicitMulRight> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Mul(Box::new(l), Box::new(r)) },
+// Exponentiation: right-associative, e.g. 2^3^2 = 2^(3^2). Desugars to pow(base, exp).
+PowBound: SpannedExprDef = {
+    <lo:@L> <l:TildeBound> "^" <r:PowBound> <hi:@R> => SpannedExprDef {
+        span: Span { start: lo, end: hi },
+        value: SpannedExprDefKind::Call(
+            "pow".to_string(),
+            vec![SpannedCallArg::Positional(Box::new(l)), SpannedCallArg::Positional(Box::new(r))],
+        ),
+    },
     TildeBound,
 };
 
-// Factor with optional postfix transpose(s), index V[expr], property V.length, method V.map(...), or V.0.
+Term: SpannedExprDef = {
+    <lo:@L> <l:Term> "*" <r:PowBound> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Mul(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:Term> "/" <r:PowBound> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Div(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:Term> "per" <r:PowBound> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Div(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:Term> "%" <r:PowBound> <hi:@R> => SpannedExprDef {
+        span: Span { start: lo, end: hi },
+        value: SpannedExprDefKind::Call(
+            "mod".to_string(),
+            vec![SpannedCallArg::Positional(Box::new(l)), SpannedCallArg::Positional(Box::new(r))],
+        ),
+    },
+    <lo:@L> <l:Term> <r:ImplicitMulRight> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Mul(Box::new(l), Box::new(r)) },
+    PowBound,
+};
+
+// Factor with optional postfix transpose(s), index V[expr], property V.length, method V.map(...), V.0, or factorial !.
 PostfixFactor: SpannedExprDef = {
+    <lo:@L> <f:PostfixFactor> "!" <hi:@R> => SpannedExprDef {
+        span: Span { start: lo, end: hi },
+        value: SpannedExprDefKind::Call(
+            "factorial".to_string(),
+            vec![SpannedCallArg::Positional(Box::new(f))],
+        ),
+    },
     <lo:@L> <f:PostfixFactor> "[" <index:Expr> "]" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Index(Box::new(f), Box::new(index)) },
     <lo:@L> <f:PostfixFactor> "." <id:MethodIdent> "(" <args:ArgList> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::MethodCall(Box::new(f), id, args) },
     <lo:@L> <f:PostfixFactor> "." <id:Ident> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Member(Box::new(f), id) },
@@ -297,6 +328,20 @@ PostfixFactor: SpannedExprDef = {
 
 Factor: SpannedExprDef = {
     <lo:@L> "-" <e:Factor> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Neg(Box::new(e)) },
+    <lo:@L> "√" <r:Factor> <hi:@R> => SpannedExprDef {
+        span: Span { start: lo, end: hi },
+        value: SpannedExprDefKind::Call(
+            "sqrt".to_string(),
+            vec![SpannedCallArg::Positional(Box::new(r))],
+        ),
+    },
+    <lo:@L> "∛" <r:Factor> <hi:@R> => SpannedExprDef {
+        span: Span { start: lo, end: hi },
+        value: SpannedExprDefKind::Call(
+            "cbrt".to_string(),
+            vec![SpannedCallArg::Positional(Box::new(r))],
+        ),
+    },
     <lo:@L> "fn" "(" <params:ParamList> ")" "=>" "{" <list:ExprList> "}" <hi:@R> => {
         let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
         SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lambda(params, Box::new(SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(list) })) }

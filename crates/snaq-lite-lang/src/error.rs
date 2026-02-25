@@ -36,6 +36,10 @@ pub enum RunError {
     BindingValueNotSupported(String),
     /// Cannot bind a name that shadows a built-in function (sin, cos, tan, max, min).
     CannotObfuscateBuiltin(String),
+    /// Index or slice start/length must be a non-negative integer (e.g. take(V, start, length) or V[i]).
+    InvalidIndex(String),
+    /// Vector index out of bounds (single-element access V[i]).
+    IndexOutOfBounds { index: usize, length: usize },
 }
 
 /// Parse error for expression strings.
@@ -119,6 +123,10 @@ impl std::fmt::Display for RunError {
             }
             RunError::CannotObfuscateBuiltin(name) => {
                 write!(f, "cannot shadow built-in function: {name}")
+            }
+            RunError::InvalidIndex(msg) => write!(f, "invalid index: {msg}"),
+            RunError::IndexOutOfBounds { index, length } => {
+                write!(f, "index {index} out of bounds (vector length {length})")
             }
         }
     }

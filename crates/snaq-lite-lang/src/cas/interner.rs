@@ -28,6 +28,8 @@ pub enum ExprNode {
     VecLiteral(Vec<ExprId>),
     /// Postfix transpose: inner must evaluate to a vector. Pass-through in CAS.
     Transpose(ExprId),
+    /// Index/single-element access: base id, index id. Pass-through in CAS.
+    Index(ExprId, ExprId),
     /// Comparison: ==, !=, <, <=, >, >=. Result is FuzzyBool (LitFuzzyBool when constant-folded).
     Eq(ExprId, ExprId),
     Ne(ExprId, ExprId),

@@ -20,6 +20,8 @@ This document lists the main error conditions and edge cases you may encounter w
 | **Expected angle** | A trig function (sin, cos, tan) received an argument that is not an angle (e.g. length or dimensionless number without unit). The message may suggest adding `rad` (e.g. `sin(pi * rad)`). |
 | **Operation not supported for vector** | An operation that expects a scalar was given a vector (e.g. converting the result to a single quantity when the result is a vector). |
 | **Transpose requires a vector** | The postfix `'` was applied to a non-vector (e.g. a scalar or symbolic expression). |
+| **Invalid index** | A vector index (e.g. `V[i]` or `take(V, start, length)`) used a non-numeric, negative, or non-finite value for the index, start, or length. |
+| **Index out of bounds** | Single-element access `V[index]` or `V.0` was used with an index not less than the vector length. |
 | **Vector length mismatch** | A vector operation (element-wise or similar) required two vectors of the same length; the lengths differed. |
 | **Boolean result** | You requested a numeric quantity but the result is a comparison (true/false/uncertain). |
 | **Expected condition** | The condition of `if ... then ... else ...` must evaluate to a boolean (true, false, or uncertain), not a number or symbolic expression. |
@@ -46,7 +48,7 @@ There is **no NaN** in the language; only +∞ and −∞ for infinite values.
 
 - **Allowed:** Binding a **numeric** value, a **FuzzyBool** (true/false/uncertain), a **user-defined function**, or **undefined** to a variable.
 - **Not allowed (current):** Binding a **symbolic** or **vector** value. The runtime returns an error: **binding value not supported** (or similar message).
-- **Built-in names:** You cannot bind to `sin`, `cos`, `tan`, `max`, or `min`; the runtime returns **cannot shadow built-in function**.
+- **Built-in names:** You cannot bind to `sin`, `cos`, `tan`, `max`, `min`, or `take`; the runtime returns **cannot shadow built-in function**.
 
 See [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md) and [FUNCTIONS.md](FUNCTIONS.md) for scope and user-defined functions.
 

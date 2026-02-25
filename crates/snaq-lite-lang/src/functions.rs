@@ -293,6 +293,7 @@ pub fn param_names(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "sin" | "cos" | "tan" => Some(&["x"]),
         "max" | "min" => Some(&["a", "b"]),
+        "take" => Some(&["vector", "start", "length"]),
         _ => None,
     }
 }

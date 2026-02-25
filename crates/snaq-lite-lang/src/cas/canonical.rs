@@ -17,6 +17,7 @@ pub enum Rank {
     As(Box<Rank>, Box<Rank>),
     VecLiteral(Vec<Rank>),
     Transpose(Box<Rank>),
+    Index(Box<Rank>, Box<Rank>),
     Eq(Box<Rank>, Box<Rank>),
     Ne(Box<Rank>, Box<Rank>),
     Lt(Box<Rank>, Box<Rank>),
@@ -43,17 +44,18 @@ fn tag_order(r: &Rank) -> u8 {
         Rank::As(..) => 8,
         Rank::VecLiteral(_) => 9,
         Rank::Transpose(_) => 10,
-        Rank::Eq(..) => 11,
-        Rank::Ne(..) => 12,
-        Rank::Lt(..) => 13,
-        Rank::Le(..) => 14,
-        Rank::Gt(..) => 15,
-        Rank::Ge(..) => 16,
-        Rank::If(..) => 17,
-        Rank::WithPrecision(..) => 18,
-        Rank::Block(_) => 19,
-        Rank::Lambda(..) => 20,
-        Rank::CallExpr(..) => 21,
+        Rank::Index(..) => 11,
+        Rank::Eq(..) => 12,
+        Rank::Ne(..) => 13,
+        Rank::Lt(..) => 14,
+        Rank::Le(..) => 15,
+        Rank::Gt(..) => 16,
+        Rank::Ge(..) => 17,
+        Rank::If(..) => 18,
+        Rank::WithPrecision(..) => 19,
+        Rank::Block(_) => 20,
+        Rank::Lambda(..) => 21,
+        Rank::CallExpr(..) => 22,
     }
 }
 
@@ -81,6 +83,7 @@ impl Ord for Rank {
             (Rank::As(a1, a2), Rank::As(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::VecLiteral(a), Rank::VecLiteral(b)) => a.cmp(b),
             (Rank::Transpose(a), Rank::Transpose(b)) => a.cmp(b),
+            (Rank::Index(a1, a2), Rank::Index(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::Eq(a1, a2), Rank::Eq(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::Ne(a1, a2), Rank::Ne(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::Lt(a1, a2), Rank::Lt(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
@@ -145,6 +148,10 @@ pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
         ExprNode::As(l, r) => Rank::As(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
         ExprNode::VecLiteral(ids) => Rank::VecLiteral(ids.iter().map(|&i| rank(pool, i)).collect()),
         ExprNode::Transpose(inner) => Rank::Transpose(Box::new(rank(pool, *inner))),
+        ExprNode::Index(base, index) => Rank::Index(
+            Box::new(rank(pool, *base)),
+            Box::new(rank(pool, *index)),
+        ),
         ExprNode::Eq(l, r) => Rank::Eq(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
         ExprNode::Ne(l, r) => Rank::Ne(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
         ExprNode::Lt(l, r) => Rank::Lt(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
@@ -287,6 +294,11 @@ fn canonicalize_rec(
         ExprNode::Transpose(inner) => {
             let new_inner = canonicalize_rec(pool, out, *inner);
             out.intern(ExprNode::Transpose(new_inner))
+        }
+        ExprNode::Index(base, index) => {
+            let new_base = canonicalize_rec(pool, out, *base);
+            let new_index = canonicalize_rec(pool, out, *index);
+            out.intern(ExprNode::Index(new_base, new_index))
         }
         ExprNode::Eq(l, r) => {
             let new_l = canonicalize_rec(pool, out, *l);

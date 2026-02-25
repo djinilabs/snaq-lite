@@ -100,6 +100,8 @@ pub enum ExprDef {
     VecLiteral(Vec<ExprDef>),
     /// Postfix transpose: `expr'` (e.g. [1,2,3]'). Inner must evaluate to a vector.
     Transpose(Box<ExprDef>),
+    /// Index/single-element access: `V[index]` or `V.0`. Base must be vector; index 0-based; yields scalar.
+    Index(Box<ExprDef>, Box<ExprDef>),
     /// Conditional: if condition then expression else expression. Condition must evaluate to FuzzyBool.
     If(Box<ExprDef>, Box<ExprDef>, Box<ExprDef>),
     /// Explicit precision: left ~ right => value from left with variance = (right.value())². Right must be > 0; right's variance is discarded.
@@ -153,6 +155,8 @@ pub enum ExprData<'db> {
     VecLiteral(Vec<Expression<'db>>),
     /// Postfix transpose: inner must evaluate to a vector.
     Transpose(Expression<'db>),
+    /// Index/single-element access: base must be vector, index 0-based; yields scalar.
+    Index(Expression<'db>, Expression<'db>),
     /// Conditional: condition, then_branch, else_branch.
     If(Expression<'db>, Expression<'db>, Expression<'db>),
     /// Explicit precision: left ~ right (use right's value as absolute error; variance = error²).

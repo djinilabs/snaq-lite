@@ -33,6 +33,8 @@ pub enum Tok {
     LBracket,
     /// Vector literal end: `]`
     RBracket,
+    /// Property/index access: `V.0`, `V.1` (dot before integer).
+    Dot,
     /// Postfix transpose: `'` (e.g. [1,2,3]')
     Apostrophe,
     /// Variable binding: `=` (e.g. x = 10). Distinct from comparison `==`.
@@ -77,11 +79,20 @@ impl std::error::Error for LexicalError {}
 pub struct Lexer<'input> {
     input: &'input str,
     pos: usize,
+    /// True after emitting Num; used so ".3" after "1.2" is one number (1.2.3) and ".0" after "]" is Dot then Num.
+    last_was_number: bool,
+    /// True after we have returned at least one token; so ".5" at start of input is Num (no token yet) and "[1,2].0" gets Dot after ].
+    any_token_emitted: bool,
 }
 
 impl<'input> Lexer<'input> {
     pub fn new(input: &'input str) -> Self {
-        Lexer { input, pos: 0 }
+        Lexer {
+            input,
+            pos: 0,
+            last_was_number: false,
+            any_token_emitted: false,
+        }
     }
 
     /// Skip only space and tab (not newlines; newlines are tokens for expression separation).
@@ -185,65 +196,95 @@ impl<'input> Iterator for Lexer<'input> {
 
         // Newline: \n or \r\n (expression separator)
         if rest.starts_with('\n') {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
             self.pos += 1;
             return Some(Ok((start, Tok::Newline, self.pos)));
         }
         if rest.starts_with("\r\n") {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
             self.pos += 2;
             return Some(Ok((start, Tok::Newline, self.pos)));
         }
         if rest.starts_with('\r') {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
             self.pos += 1;
             return Some(Ok((start, Tok::Newline, self.pos)));
         }
 
         // Single chars / fixed strings (longer first); "as" before "per" so "aspect" stays Ident
         if rest.starts_with("as") && !rest[2..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
             self.pos += 2;
             return Some(Ok((start, Tok::As, self.pos)));
         }
         if rest.starts_with("per") && !rest[3..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
             self.pos += 3;
             return Some(Ok((start, Tok::Per, self.pos)));
         }
         if rest.starts_with("if") && !rest[2..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
             self.pos += 2;
             return Some(Ok((start, Tok::If, self.pos)));
         }
         if rest.starts_with("then") && !rest[4..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
             self.pos += 4;
             return Some(Ok((start, Tok::Then, self.pos)));
         }
         if rest.starts_with("else") && !rest[4..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
             self.pos += 4;
             return Some(Ok((start, Tok::Else, self.pos)));
         }
         if rest.starts_with("fn") && !rest[2..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
             self.pos += 2;
             return Some(Ok((start, Tok::Fn, self.pos)));
         }
         if rest.starts_with("π") {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
             self.pos += "π".len();
             return Some(Ok((start, Tok::Pi, self.pos)));
         }
         // Two-char comparison tokens before single '<' or '>'
         if rest.starts_with("==") {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
             self.pos += 2;
             return Some(Ok((start, Tok::Eq, self.pos)));
         }
         if rest.starts_with("!=") {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
             self.pos += 2;
             return Some(Ok((start, Tok::Ne, self.pos)));
         }
         if rest.starts_with("<=") {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
             self.pos += 2;
             return Some(Ok((start, Tok::Le, self.pos)));
         }
         if rest.starts_with(">=") {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
             self.pos += 2;
             return Some(Ok((start, Tok::Ge, self.pos)));
         }
         if rest.starts_with("=>") {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
             self.pos += 2;
             return Some(Ok((start, Tok::Arrow, self.pos)));
         }
@@ -275,16 +316,38 @@ impl<'input> Iterator for Lexer<'input> {
                 self.pos -= c.len_utf8(); // put back
                 if let Some(s) = self.take_ident() {
                     let next_non_space = self.peek_next_non_space();
-                    if next_non_space == Some('(') {
+                    let tok = if next_non_space == Some('(') {
                         Tok::FuncIdent(s)
                     } else {
                         Tok::Ident(s)
-                    }
+                    };
+                    self.last_was_number = false;
+                    tok
                 } else {
                     return None;
                 }
             }
-            '0'..='9' | '.' => {
+            '.' => {
+                if self.last_was_number {
+                    self.pos -= c.len_utf8();
+                    match self.take_num()? {
+                        Ok(lit) => Tok::Num(lit),
+                        Err(e) => return Some(Err(e)),
+                    }
+                } else if !self.any_token_emitted {
+                    // ".5" at start of input: no token emitted yet, so treat as number
+                    self.pos -= c.len_utf8();
+                    match self.take_num()? {
+                        Ok(lit) => Tok::Num(lit),
+                        Err(e) => return Some(Err(e)),
+                    }
+                } else {
+                    self.last_was_number = false;
+                    Tok::Dot
+                }
+            }
+            '0'..='9' => {
+                self.last_was_number = true;
                 self.pos -= c.len_utf8();
                 match self.take_num()? {
                     Ok(lit) => Tok::Num(lit),
@@ -297,6 +360,8 @@ impl<'input> Iterator for Lexer<'input> {
                 )));
             }
         };
+        self.last_was_number = matches!(&tok, Tok::Num(_));
+        self.any_token_emitted = true;
         let end = self.pos;
         Some(Ok((start, tok, end)))
     }

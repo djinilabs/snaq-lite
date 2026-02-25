@@ -32,6 +32,10 @@ fn collect_bound_names(def: &ExprDef) -> HashSet<String> {
                 go(r, names);
             }
             ExprDef::Neg(inner) | ExprDef::Transpose(inner) => go(inner, names),
+            ExprDef::Index(base, index) => {
+                go(base, names);
+                go(index, names);
+            }
             ExprDef::If(cond, then_b, else_b) => {
                 go(cond, names);
                 go(then_b, names);
@@ -151,6 +155,10 @@ fn substitute_symbols_inner(
             Ok(ExprDef::VecLiteral(elems))
         }
         ExprDef::Transpose(inner) => Ok(ExprDef::Transpose(Box::new(substitute_symbols_inner(*inner, symbol_registry, unit_registry, bound_names)?))),
+        ExprDef::Index(base, index) => Ok(ExprDef::Index(
+            Box::new(substitute_symbols_inner(*base, symbol_registry, unit_registry, bound_names)?),
+            Box::new(substitute_symbols_inner(*index, symbol_registry, unit_registry, bound_names)?),
+        )),
         ExprDef::Eq(l, r) => Ok(ExprDef::Eq(
             Box::new(substitute_symbols_inner(*l, symbol_registry, unit_registry, bound_names)?),
             Box::new(substitute_symbols_inner(*r, symbol_registry, unit_registry, bound_names)?),

@@ -18,6 +18,7 @@ extern {
         ")" => Tok::RParen,
         "[" => Tok::LBracket,
         "]" => Tok::RBracket,
+        "." => Tok::Dot,
         "+" => Tok::Plus,
         "-" => Tok::Minus,
         "*" => Tok::Star,
@@ -206,8 +207,10 @@ Term: ExprDef = {
     TildeBound,
 };
 
-// Factor with optional postfix transpose(s): [1,2,3]', [1,2,3]'', (expr)', etc.
+// Factor with optional postfix transpose(s), index V[expr], or property V.0.
 PostfixFactor: ExprDef = {
+    <f:PostfixFactor> "[" <index:Expr> "]" => ExprDef::Index(Box::new(f), Box::new(index)),
+    <f:PostfixFactor> "." <n:Num> => ExprDef::Index(Box::new(f), Box::new(ExprDef::LitScalar(n))),
     <f:PostfixFactor> "'" => ExprDef::Transpose(Box::new(f)),
     Factor,
 };

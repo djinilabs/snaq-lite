@@ -116,6 +116,11 @@ fn rewrite_rec(
             let new_inner = rewrite_rec(pool, out, *inner, registry)?;
             Ok(out.intern(ExprNode::Transpose(new_inner)))
         }
+        ExprNode::Index(base, index) => {
+            let new_base = rewrite_rec(pool, out, *base, registry)?;
+            let new_index = rewrite_rec(pool, out, *index, registry)?;
+            Ok(out.intern(ExprNode::Index(new_base, new_index)))
+        }
         ExprNode::Eq(l, r) => {
             let new_l = rewrite_rec(pool, out, *l, registry)?;
             let new_r = rewrite_rec(pool, out, *r, registry)?;

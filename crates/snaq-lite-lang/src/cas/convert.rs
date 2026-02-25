@@ -60,6 +60,11 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
             let id = expr_def_to_interned(inner, pool);
             pool.intern(ExprNode::Transpose(id))
         }
+        ExprDef::Index(base, index) => {
+            let base_id = expr_def_to_interned(base, pool);
+            let index_id = expr_def_to_interned(index, pool);
+            pool.intern(ExprNode::Index(base_id, index_id))
+        }
         ExprDef::Eq(l, r) => {
             let lid = expr_def_to_interned(l, pool);
             let rid = expr_def_to_interned(r, pool);
@@ -182,6 +187,10 @@ pub fn interned_to_expr_def(pool: &ExprInterner, id: ExprId) -> ExprDef {
                 .collect(),
         ),
         ExprNode::Transpose(inner) => ExprDef::Transpose(Box::new(interned_to_expr_def(pool, *inner))),
+        ExprNode::Index(base, index) => ExprDef::Index(
+            Box::new(interned_to_expr_def(pool, *base)),
+            Box::new(interned_to_expr_def(pool, *index)),
+        ),
         ExprNode::Eq(l, r) => ExprDef::Eq(
             Box::new(interned_to_expr_def(pool, *l)),
             Box::new(interned_to_expr_def(pool, *r)),

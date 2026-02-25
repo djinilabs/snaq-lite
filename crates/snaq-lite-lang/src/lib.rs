@@ -1927,6 +1927,64 @@ mod tests {
     }
 
     #[test]
+    fn parse_vector_index_bracket() {
+        use crate::ir::ExprDef;
+        let r = parse("V[2]").unwrap();
+        assert!(matches!(r, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Index(_, _))));
+    }
+
+    #[test]
+    fn parse_vector_index_dot() {
+        use crate::ir::ExprDef;
+        let r = parse("V.0").unwrap();
+        assert!(matches!(r, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Index(_, _))));
+        let r = parse("V.1").unwrap();
+        assert!(matches!(r, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Index(_, _))));
+    }
+
+    #[test]
+    fn parse_take_call() {
+        use crate::ir::ExprDef;
+        let r = parse("take(V, 0, 2)").unwrap();
+        assert!(matches!(r, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Call(n, _) if n == "take")));
+    }
+
+    #[test]
+    fn run_take_slice() {
+        assert_eq!(run_format("take([1, 2, 3, 4], 1, 2)").unwrap(), "[2, 3]");
+        assert_eq!(run_format("take([1, 2, 3, 4], 0, 4)").unwrap(), "[1, 2, 3, 4]");
+        assert_eq!(run_format("take([1, 2, 3, 4], 2, 1)").unwrap(), "[3]");
+    }
+
+    #[test]
+    fn run_vector_index_bracket() {
+        assert_eq!(run_format("[1, 2, 3, 4][2]").unwrap(), "3");
+        assert_eq!(run_format("[1, 2, 3, 4][0]").unwrap(), "1");
+    }
+
+    #[test]
+    fn run_vector_index_dot() {
+        assert_eq!(run_format("[1, 2, 3, 4].0").unwrap(), "1");
+        assert_eq!(run_format("[1, 2, 3, 4].1").unwrap(), "2");
+    }
+
+    #[test]
+    fn run_vector_index_out_of_bounds() {
+        let e = run("[1, 2, 3][3]").unwrap_err();
+        assert!(matches!(e, RunError::IndexOutOfBounds { .. }));
+        let e = run("[1, 2, 3][10]").unwrap_err();
+        assert!(matches!(e, RunError::IndexOutOfBounds { .. }));
+    }
+
+    #[test]
+    fn run_vector_index_invalid() {
+        let e = run("[1, 2, 3][-1]").unwrap_err();
+        assert!(matches!(e, RunError::InvalidIndex(_)));
+        let e = run("[1, 2, 3][pi]").unwrap_err();
+        assert!(matches!(e, RunError::InvalidIndex(_)));
+    }
+
+    #[test]
     fn run_vector_stream_yields_elements() {
         use crate::queries::{program, set_eval_registry, value, vector_into_stream};
         use crate::resolve;

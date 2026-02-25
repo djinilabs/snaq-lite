@@ -55,6 +55,21 @@ When **both** operands are vectors, the operation depends on **orientation**:
 
 Same **dimension** (or type) is required where applicable (e.g. element-wise arithmetic and comparisons).
 
+## Slicing and indexing
+
+### take(vector, start, length)
+
+- **Syntax:** `take(vector, start, length)` — a built-in with three arguments.
+- **Arguments:** `vector` must evaluate to a vector; `start` and `length` must be numeric (non-negative; truncated to integers).
+- **Effect:** Returns a **streaming vector** (slice) containing elements from index `start` (0-based) for up to `length` elements. Out-of-range (e.g. start beyond the end, or length larger than remaining elements) yields fewer elements or an empty vector; no error.
+- **Example:** `take([1, 2, 3, 4], 1, 2)` → `[2, 3]`.
+
+### Single-element access: V[index] and V.0, V.1, …
+
+- **Syntax:** `expression[index]` or `expression . number` (e.g. `V.0`, `V.1`). The bracket form accepts any expression for the index; the dot form is a literal non-negative integer index.
+- **Effect:** The base expression must evaluate to a **vector**. The index is 0-based. The result is the **single element** at that index (a scalar value, not a one-element vector). If the index is out of bounds, the runtime returns **index out of bounds**. The index must be a non-negative integer (numeric); otherwise the runtime returns **invalid index**.
+- **Examples:** `[1, 2, 3, 4][2]` → `3`; `[1, 2, 3, 4].0` → `1`; `[1, 2, 3, 4].1` → `2`.
+
 ## Display
 
 Vectors are displayed in a list-like form, e.g. `[1, 2, 3]` or `[1 m, 2 m]`. Nested vectors may be shown with nested brackets. If the language supports sparse or undefined elements, they may be shown as `?`.

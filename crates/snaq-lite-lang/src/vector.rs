@@ -152,6 +152,12 @@ pub enum LazyVector {
         right: Box<LazyVector>,
         op: VectorBinaryOp,
     },
+    /// Slice: elements from index `start`, up to `length` elements. 0-based; out-of-range yields fewer/zero elements. Streaming: skip first `start`, then yield up to `length`.
+    Take {
+        source: Box<LazyVector>,
+        start: usize,
+        length: usize,
+    },
 }
 
 /// Context for evaluating an expression when streaming a vector.
@@ -181,7 +187,8 @@ impl LazyVector {
             | LazyVector::Transform { .. }
             | LazyVector::Transpose { .. }
             | LazyVector::ZipMap { .. }
-            | LazyVector::Outer { .. } => None,
+            | LazyVector::Outer { .. }
+            | LazyVector::Take { .. } => None,
         }
     }
 
@@ -195,7 +202,8 @@ impl LazyVector {
             | LazyVector::Transform { .. }
             | LazyVector::Transpose { .. }
             | LazyVector::ZipMap { .. }
-            | LazyVector::Outer { .. } => None,
+            | LazyVector::Outer { .. }
+            | LazyVector::Take { .. } => None,
         }
     }
 
@@ -220,6 +228,10 @@ impl LazyVector {
             LazyVector::Transpose { source } => (*source).into_stream(ctx),
             LazyVector::ZipMap { .. } | LazyVector::Outer { .. } => {
                 // Streaming for ZipMap/Outer is done via vector_into_stream in queries (needs db).
+                Box::new(stream::iter(std::iter::empty::<Result<Option<Value>, RunError>>()))
+            }
+            LazyVector::Take { .. } => {
+                // Take is streamed via vector_into_stream in queries (needs db).
                 Box::new(stream::iter(std::iter::empty::<Result<Option<Value>, RunError>>()))
             }
         }

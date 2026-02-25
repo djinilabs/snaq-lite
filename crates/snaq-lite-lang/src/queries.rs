@@ -394,6 +394,60 @@ impl<'a> futures::stream::Stream for OuterProductVectorStream<'a> {
 
 impl std::marker::Unpin for OuterProductVectorStream<'_> {}
 
+/// Stream that yields a slice of the inner stream: skip first `skip` items, then yield up to `take` items.
+pub struct TakeVectorStream<'a> {
+    inner: Box<VectorStream<'a>>,
+    skip: usize,
+    take: usize,
+    skipped: usize,
+    yielded: usize,
+}
+
+impl<'a> TakeVectorStream<'a> {
+    fn new(inner: VectorStream<'a>, skip: usize, take: usize) -> Self {
+        Self {
+            inner: Box::new(inner),
+            skip,
+            take,
+            skipped: 0,
+            yielded: 0,
+        }
+    }
+}
+
+impl<'a> futures::stream::Stream for TakeVectorStream<'a> {
+    type Item = Result<Option<Value>, RunError>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        while this.skipped < this.skip {
+            match Pin::new(this.inner.as_mut()).poll_next(cx) {
+                Poll::Ready(Some(_item)) => {
+                    this.skipped += 1;
+                }
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        if this.yielded >= this.take {
+            return Poll::Ready(None);
+        }
+        match Pin::new(this.inner.as_mut()).poll_next(cx) {
+            Poll::Ready(Some(item)) => {
+                this.yielded += 1;
+                Poll::Ready(Some(item))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl std::marker::Unpin for TakeVectorStream<'_> {}
+
 /// Apply a binary op to two optional element values (for zip and outer). None propagates as Ok(None).
 fn apply_binary_op(
     op: &VectorBinaryOp,
@@ -419,7 +473,7 @@ fn apply_binary_op(
     Ok(Some(result))
 }
 
-/// Unified stream type for vector elements (literal, mapped, empty, transposed, zipped, or outer).
+/// Unified stream type for vector elements (literal, mapped, empty, transposed, zipped, outer, or take).
 pub enum VectorStream<'a> {
     Literal(LiteralVectorStream),
     Mapped(MappedVectorStream<'a>),
@@ -427,6 +481,7 @@ pub enum VectorStream<'a> {
     Transposed(TransposedVectorStream<'a>),
     Zipped(ZippedVectorStream<'a>),
     OuterProduct(OuterProductVectorStream<'a>),
+    Take(TakeVectorStream<'a>),
 }
 
 impl<'a> futures::stream::Stream for VectorStream<'a> {
@@ -443,6 +498,7 @@ impl<'a> futures::stream::Stream for VectorStream<'a> {
             VectorStream::Transposed(s) => Pin::new(s).poll_next(cx),
             VectorStream::Zipped(s) => Pin::new(s).poll_next(cx),
             VectorStream::OuterProduct(s) => Pin::new(s).poll_next(cx),
+            VectorStream::Take(s) => Pin::new(s).poll_next(cx),
         }
     }
 }
@@ -575,6 +631,10 @@ pub fn vector_into_stream<'db>(
                 op,
             ))
         }
+        LazyVector::Take { source, start, length } => {
+            let inner = vector_into_stream(db, *source);
+            VectorStream::Take(TakeVectorStream::new(inner, start, length))
+        }
     }
 }
 
@@ -692,6 +752,11 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef) -> Expression<'_> {
         ExprDef::Transpose(inner) => {
             let inner_expr = build_expression(db, *inner);
             ExprData::Transpose(inner_expr)
+        }
+        ExprDef::Index(base, index) => {
+            let base_expr = build_expression(db, *base);
+            let index_expr = build_expression(db, *index);
+            ExprData::Index(base_expr, index_expr)
         }
         ExprDef::If(cond, then_b, else_b) => {
             let cond_expr = build_expression(db, *cond);
@@ -907,6 +972,47 @@ pub fn value<'db>(
                 _ => Err(RunError::ExpectedVector),
             }
         }
+        ExprData::Index(base, index_expr) => {
+            let base_val = value(db, scope, *base)?;
+            let VectorValue { inner, .. } = match &base_val {
+                Value::Vector(v) => v.clone(),
+                _ => return Err(RunError::ExpectedVector),
+            };
+            let index_val = value(db, scope, *index_expr)?;
+            let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+            let index_q = index_val.to_quantity(&sym_reg).map_err(|_| {
+                RunError::InvalidIndex("index must be numeric".to_string())
+            })?;
+            let index_f = index_q.value();
+            if !index_f.is_finite() || index_f < 0.0 {
+                return Err(RunError::InvalidIndex(
+                    "index must be a non-negative integer".to_string(),
+                ));
+            }
+            if index_f.fract() != 0.0 {
+                return Err(RunError::InvalidIndex(
+                    "index must be an integer".to_string(),
+                ));
+            }
+            let index_u = index_f as usize;
+            let slice = LazyVector::Take {
+                source: Box::new(inner),
+                start: index_u,
+                length: 1,
+            };
+            let collected = collect_vector_stream(db, slice);
+            if collected.is_empty() {
+                return Err(RunError::IndexOutOfBounds {
+                    index: index_u,
+                    length: index_u,
+                });
+            }
+            match &collected[0] {
+                Ok(Some(elem)) => Ok(elem.clone()),
+                Ok(None) => Ok(Value::Undefined),
+                Err(e) => Err(e.clone()),
+            }
+        }
         ExprData::WithPrecision(left, right) => {
             let left_val = value(db, scope, *left)?;
             let right_val = value(db, scope, *right)?;
@@ -1061,6 +1167,10 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
                 .collect(),
         ),
         ExprData::Transpose(inner) => ExprDef::Transpose(Box::new(expression_to_def(db, *inner))),
+        ExprData::Index(base, index) => ExprDef::Index(
+            Box::new(expression_to_def(db, *base)),
+            Box::new(expression_to_def(db, *index)),
+        ),
         ExprData::WithPrecision(l, r) => ExprDef::WithPrecision(
             Box::new(expression_to_def(db, *l)),
             Box::new(expression_to_def(db, *r)),
@@ -1324,6 +1434,45 @@ fn eval_call(
                 orientation: v.orientation,
             }));
         }
+    }
+    // take(vector, start, length): first arg is vector, second and third are non-negative integers.
+    if name == "take" {
+        let vec_val = bound.get("vector").unwrap();
+        let start_val = bound.get("start").unwrap();
+        let length_val = bound.get("length").unwrap();
+        let VectorValue { inner, orientation } = match vec_val {
+            Value::Vector(v) => v.clone(),
+            _ => return Err(RunError::ExpectedVector),
+        };
+        let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+        let start_q = start_val.to_quantity(&sym_reg).map_err(|_| {
+            RunError::InvalidIndex("start must be numeric".to_string())
+        })?;
+        let length_q = length_val.to_quantity(&sym_reg).map_err(|_| {
+            RunError::InvalidIndex("length must be numeric".to_string())
+        })?;
+        let start_f = start_q.value();
+        let length_f = length_q.value();
+        if !start_f.is_finite() || start_f < 0.0 {
+            return Err(RunError::InvalidIndex(
+                "start must be a non-negative integer".to_string(),
+            ));
+        }
+        if !length_f.is_finite() || length_f < 0.0 {
+            return Err(RunError::InvalidIndex(
+                "length must be a non-negative integer".to_string(),
+            ));
+        }
+        let start_u = start_f as usize;
+        let length_u = length_f as usize;
+        return Ok(Value::Vector(VectorValue {
+            inner: LazyVector::Take {
+                source: Box::new(inner),
+                start: start_u,
+                length: length_u,
+            },
+            orientation,
+        }));
     }
     if bound.values().any(|v| matches!(v, Value::Vector(_))) {
         return Err(RunError::UnsupportedVectorOperation);

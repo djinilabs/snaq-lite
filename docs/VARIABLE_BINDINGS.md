@@ -30,3 +30,11 @@ Variables are **immutable** and **lexically scoped**. You bind a name to a value
 
 - Variables can hold **numeric** values, **fuzzy booleans**, or **undefined**. Binding a **symbolic** or **vector** value to a variable is not supported yet; the runtime returns an error in those cases.
 - **run_numeric** substitutes identifiers from the symbol and unit registries, but **names that are bound in the same program** are left as identifiers so that evaluation resolves them from scope. So variable bindings that shadow unit names (e.g. `DEF=3; DEF+2`) work in both **run()** and **run_numeric()** — the variable takes precedence over the unit.
+
+## See also
+
+- [README.md](README.md) — language overview and index
+- [SYNTAX.md](SYNTAX.md) — binding syntax and chained assignment
+- [BLOCKS_AND_EXPRESSIONS.md](BLOCKS_AND_EXPRESSIONS.md) — where bindings appear in programs and blocks
+- [SYMBOLS.md](SYMBOLS.md) — resolution order (scope, unit, symbol)
+- [ERRORS_AND_EDGE_CASES.md](ERRORS_AND_EDGE_CASES.md) — binding value not supported

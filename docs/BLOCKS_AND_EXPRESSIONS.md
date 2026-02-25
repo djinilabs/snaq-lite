@@ -43,12 +43,20 @@ A **block** is written with curly braces `{` and `}`. Inside a block the same ru
 
 When the result is **undefined** (e.g. empty program or empty block):
 
-- `run()` returns `Ok(Value::Undefined)`.
-- Display (e.g. CLI or `run_format`) shows `"undefined"`.
-- Converting to a quantity (e.g. `run_numeric("")`, `run_numeric("{}")`, or `value.to_quantity()`) returns an error: result is undefined.
+- The result is undefined (see [LITERALS_AND_VALUES.md](LITERALS_AND_VALUES.md) for value types).
+- Display (e.g. CLI) shows `"undefined"`.
+- Converting to a quantity (e.g. `run_numeric("")`, `run_numeric("{}")`) returns an error: result is undefined.
 
 ## Summary
 
 - **Separators:** newline or `;` between expressions; blank lines allowed.
 - **Program / block result:** last expression value, or the last binding’s value (RHS) if the last item is an assignment, or **undefined** if the block is empty.
 - **Blocks:** `{ ... }`; same rules inside; block is an expression.
+
+## See also
+
+- [README.md](README.md) — language overview and index
+- [SYNTAX.md](SYNTAX.md) — expression separators and block syntax
+- [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md) — bindings in blocks and at top level
+- [LITERALS_AND_VALUES.md](LITERALS_AND_VALUES.md) — value types and undefined
+- [ERRORS_AND_EDGE_CASES.md](ERRORS_AND_EDGE_CASES.md) — undefined result when converting to quantity

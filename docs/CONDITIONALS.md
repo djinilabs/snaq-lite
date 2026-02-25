@@ -52,3 +52,10 @@ Example (equal means ⇒ probability 0.5):
 | `if 1 > 1 then pi else 2 * pi` | symbolic weighted sum in π |
 | `if 1 then 10 else 20` | error: condition must be boolean |
 | `if 1 > 1 then 10 else [1, 2]` | error: branches must both be numeric or symbolic |
+
+## See also
+
+- [README.md](README.md) — language overview and index
+- [SYNTAX.md](SYNTAX.md) — if/then/else syntax and precedence
+- [COMPARISONS_AND_FUZZY_BOOL.md](COMPARISONS_AND_FUZZY_BOOL.md) — condition type (true, false, uncertain)
+- [ERRORS_AND_EDGE_CASES.md](ERRORS_AND_EDGE_CASES.md) — expected condition, if branch type mismatch

@@ -2,36 +2,72 @@
 
 [![Tests](https://github.com/djinilabs/snaq-lite/actions/workflows/test.yml/badge.svg)](https://github.com/djinilabs/snaq-lite/actions/workflows/test.yml)
 
-A Rust-based reactive arithmetic language that runs natively or from WebAssembly. Expressions form a computation graph: when an argument changes, only dependent operations are recomputed (via [Salsa](https://github.com/salsa-rs/salsa)).
+**snaq-lite** is a reactive arithmetic language for quantities, units, and uncertainty. Expressions form a computation graph: when an argument changes, only dependent operations are recomputed (via [Salsa](https://github.com/salsa-rs/salsa)). It runs natively in Rust or from WebAssembly.
 
-**API:**
+The language combines **numeric quantities with units** (SI and common derivatives), **symbolic math** (e.g. keep π in expressions or substitute for numbers), **uncertainty** (implicit from decimal places or explicit with `~`), and **statistical comparisons** that yield crisp or uncertain booleans. You can write **variable bindings**, **blocks**, **vectors**, and **conditionals** (`if … then … else`), and call built-ins like `sin`, `cos`, `tan`, `max`, and `min`. By default evaluation is symbolic; use `run_numeric()` when you want a single numeric result.
 
-- **`run(expression)`** — Parse and evaluate; returns `Result<Value, RunError>`. By default the result is **symbolic** (e.g. `1 + pi` → `1 + π`). Input can be multiple expressions (newline- or `;`-separated) and **blocks** `{ ... }`; the result is the last expression’s value, or `Value::Undefined` if there are no expressions (e.g. empty input or empty block). `Value` is `Numeric(Quantity)`, `Symbolic(SymbolicQuantity)`, `FuzzyBool` (comparison results: `true`, `false`, or `uncertain(prob)` when variance is significant), `Vector(...)`, or `Undefined`; display with `.to_string()` or substitute with `value.to_quantity(&symbol_registry)` (errors for fuzzy boolean/vector/undefined).
-- **`run_numeric(expression)`** — Like `run`, but substitutes all symbols and returns `Result<Quantity, RunError>`. Use when you need a single numeric quantity. Errors with `SymbolHasNoValue` if a symbol has no value, `BooleanResult` if the expression is a comparison (e.g. `1 < 2`), or `UndefinedResult` if the result is undefined (e.g. empty input or empty block).
-- **`run_scalar(expression)`** — Same as `run_numeric`, but returns `Result<f64, RunError>`; errors if the result is not dimensionless, or `UndefinedResult` when the result is undefined.
+---
 
-**Language:** **Variable bindings** (`name = expression`; immutable, lexically scoped; see [docs/VARIABLE_BINDINGS.md](docs/VARIABLE_BINDINGS.md)). Float literals (implicit uncertainty from decimal places, e.g. `10.5` → variance 0.0025; explicit error with `value ~ error`, e.g. `10 ~ 2` → mean 10, variance 4), `+`, `-`, `*`, `/` or `per`, parentheses, **comparison operators** `==`, `!=`, `<`, `<=`, `>`, `>=` (same dimension required; result is **FuzzyBool**: `true`, `false`, or `uncertain(prob)` when operands have variance and the comparison is in the confidence band; with vectors: broadcast, element-wise, outer, or row×column reduce), **implicit multiplication** (e.g. `10 20` → 200, `2 (3+4)` → 14, `2 pi rad` or `pi rad` as one factor so constants and units chain without `*`), **quantity literals** (`100 m`, bare unit like `hour`), **unit conversion** with `as` (e.g. `10 km as m`, `10 km per hour as m / s`), **symbols** (`pi`, `π`, `e`, or any unknown identifier), and **function calls** with positional and optional named arguments. **Vector literals** `[ expr, ... ]` and postfix transpose `'` (e.g. `[1,2,3]'`). Unknown identifiers are treated as symbols (not units). **Built-in functions:** `sin`, `cos`, `tan` (one argument, angle in rad or degree); `max`, `min` (two arguments, same dimension). Example: `sin(pi * rad)` → 0, `sin(180 degree)` → 0, `max(3, 2)` → 3, `max(a: 1, b: 2)`. Built-in units: all 7 SI base units, SI derived with special names, time/length (km, g, hour, minute, meter, second, etc.), angle (rad, degree), **area** (m2, m², km2, cm2, mm2, are, hectare, ha, squaremeter, squareinch, in2, sqm, sqin, squarefoot, ft2, sqft; hectare = 100 ares, 1 are = 100 m²), length inch (in) and foot (ft), and Numbat-style (mile, parsec, au, light_year, eV, celsius). Plural unit names (e.g. meters, seconds, kilometers) are accepted and normalized to the canonical singular form. Multiplication and division bind tighter than addition and subtraction.
+## Language at a glance
 
-**Examples:** `x = 10` then `x + 1` → `11`; `{ a = 2; b = 3; a * b }` → `6`; `1 + 2` → `3`; `1 < 2` → `true`, `1 == 2` → `false` (exact literals yield crisp true/false; numbers with variance can yield `uncertain(prob)`); `100 m < 1 kilometer` → `true`; `[1, 2, 3]` → vector; `[1, 2, 3]'` → same vector (transpose); `1 + pi` → `1 + π` (symbolic) or use `run_numeric` for a number; `3 + 2 + pi + 1` → `6 + π`; `10 20` → `200`; `100 km / hour` → `100 km/hour`; `10 km as m` → `10000 m`; `10 km per hour as m / s` → speed in m/s; `1.5 km + 500 m` → `2000 m`; `2 pi rad`, `pi rad` (implicit mul: constant · unit); `1 mile`, `1 volt`; `sin(pi * rad)` → 0, `sin(pi rad)` → 0, `sin(180 degree)` → 0, `max(3, 2)` → 3. Division by zero: nonzero/0 yields ±∞; 0/0 errors. **CLI:** `snaq-lite "1 + pi"` prints symbolic; `snaq-lite --numeric "1 + pi"` prints the numeric result.
+- **Quantities and units** — Literals like `100 m`, `1 km/hour`, `2 pi rad`; unit conversion with `as` (e.g. `10 km as m`). SI base and derived units, time, angle, area, and Numbat-style units (mile, parsec, eV, etc.); plural names accepted (e.g. meters → meter).
+- **Numbers and precision** — Values carry mean and variance. Implicit variance from decimal places (e.g. `10.5`); explicit error with `value ~ error` (e.g. `10 ~ 2`).
+- **Symbols** — Unknown identifiers are symbols (`pi`, `π`, `e` or custom). Default evaluation keeps them symbolic; substitute via `run_numeric()` or a symbol registry.
+- **Comparisons** — `==`, `!=`, `<`, `<=`, `>`, `>=` (same dimension). Result is a **FuzzyBool**: `true`, `false`, or `uncertain(prob)` when variance matters. Vectors: element-wise, outer, or row×column reduction.
+- **Variables and blocks** — Immutable bindings `name = expression`; blocks `{ ... }` with multiple expressions (newline or `;`). Result = last expression (or last binding’s RHS). See [docs/VARIABLE_BINDINGS.md](docs/VARIABLE_BINDINGS.md) and [docs/BLOCKS_AND_EXPRESSIONS.md](docs/BLOCKS_AND_EXPRESSIONS.md).
+- **Conditionals** — `if condition then expr else expr`; condition must be FuzzyBool. Crisp true/false evaluate one branch; uncertain conditions blend both branches (numeric or symbolic).
+- **Vectors** — Literals `[ expr, ... ]`, postfix transpose `'`. Vector×scalar maps; vector×vector by orientation (element-wise, outer, dot). Display as `[e1, e2, ...]`.
+- **Functions** — `sin`, `cos`, `tan` (one argument, angle); `max`, `min` (two same-dimension args). Positional and named arguments (e.g. `max(a: 1, b: 2)`).
+
+---
+
+## API
+
+- **`run(expression)`** — Parse and evaluate; returns `Result<Value, RunError>`. Result is **symbolic** by default (e.g. `1 + pi` → `1 + π`). `Value` can be `Numeric(Quantity)`, `Symbolic(...)`, `FuzzyBool`, `Vector(...)`, or `Undefined`. Multiple expressions and blocks allowed; result is the last value (or `Undefined` if empty).
+- **`run_numeric(expression)`** — Substitute symbols and return `Result<Quantity, RunError>`. Errors on missing symbol, comparison result, or undefined result.
+- **`run_scalar(expression)`** — Like `run_numeric` but returns `Result<f64, RunError>`; errors if not dimensionless or undefined.
+
+Use `run_with_registry(input, &UnitRegistry)` (and optional symbol registry) for custom units/symbols.
+
+---
+
+## Examples
+
+| Input | Result (conceptually) |
+|-------|------------------------|
+| `1 + 2` | `3` |
+| `x = 10` then `x + 1` | `11` |
+| `{ a = 2; b = 3; a * b }` | `6` |
+| `1 + pi` | `1 + π` (symbolic) or numeric with `run_numeric` |
+| `100 km / hour` | `100 km/hour` |
+| `10 km as m` | `10000 m` |
+| `sin(pi rad)` | `0` |
+| `1 < 2` | `true`; with variance, may be `uncertain(prob)` |
+| `[1, 2, 3]` | vector `[1, 2, 3]` |
+
+**CLI:** `snaq-lite "1 + pi"` (symbolic); `snaq-lite --numeric "1 + pi"` (numeric).
+
+---
 
 ## Structure
 
-- **snaq-lite-lang** – Core library (parser, AST, eval). Platform-agnostic.
-- **snaq-lite-cli** – Native CLI binary.
-- **snaq-lite-wasm** – WASM build for the web.
+- **snaq-lite-lang** — Core library (parser, AST, eval). Platform-agnostic.
+- **snaq-lite-cli** — Native CLI binary.
+- **snaq-lite-wasm** — WASM build for the web.
+
+---
 
 ## Run tests
 
 - **All tests (native):** `cargo test --workspace`
 - **Core library only:** `cargo test -p snaq-lite-lang`
 - **With output:** `cargo test --workspace -- --nocapture`
-- **WASM build (generation only):** `cargo build -p snaq-lite-wasm --target wasm32-unknown-unknown`, or `./scripts/check-wasm-build.sh`
-- **WASM runtime (Node):** `wasm-pack test --node crates/snaq-lite-wasm` (requires [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) and Node). Optional: `--headless --firefox` or `--chrome` for browser.
+- **WASM (Node):** `wasm-pack test --node crates/snaq-lite-wasm` (requires [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) and Node)
+
+---
 
 ## Build and run
 
 - **Native CLI:** `cargo run -p snaq-lite-cli`
-- **WASM:** Install the target and wasm-pack, then:
-  - `rustup target add wasm32-unknown-unknown`
-  - Install [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/)
-  - `wasm-pack build crates/snaq-lite-wasm --target web` (output in `crates/snaq-lite-wasm/pkg/`)
+- **WASM:** `rustup target add wasm32-unknown-unknown`, install [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/), then  
+  `wasm-pack build crates/snaq-lite-wasm --target web` (output in `crates/snaq-lite-wasm/pkg/`)

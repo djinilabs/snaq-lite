@@ -6,7 +6,8 @@
 
 use crate::error::{RunError, RunErrorKind, Span};
 use crate::functions;
-use crate::ir::{CallArg, ExprData, ExprDef, Expression, ProgramDef, SpannedExprDef, SpannedExprDefKind};
+use crate::ir::{CallArg, ExprData, ExprDef, Expression, ProgramDef, SpannedExprDef, SpannedExprDefKind, StreamInputRegistry};
+use crate::stream_handle::{take_receiver, ChunkFlattenStream};
 use crate::map_registry;
 use crate::scope::{closure_env_get, closure_env_register, Env, Scope, StoredValue};
 use crate::user_function;
@@ -27,11 +28,18 @@ use std::task::{Context, Poll};
 thread_local! {
     /// Registry used during evaluation (set by run()).
     static EVAL_REGISTRY: RefCell<Option<UnitRegistry>> = const { RefCell::new(None) };
+    /// Stream input registry for $name lookups (set by run() before evaluation).
+    static STREAM_INPUT_REGISTRY: RefCell<Option<StreamInputRegistry>> = const { RefCell::new(None) };
 }
 
 /// Set the unit registry for the current thread (used by run() before evaluation).
 pub fn set_eval_registry(registry: UnitRegistry) {
     EVAL_REGISTRY.with(|r| *r.borrow_mut() = Some(registry));
+}
+
+/// Set the stream input registry for the current thread (used by run() before evaluation when using $name).
+pub fn set_stream_input_registry(registry: StreamInputRegistry) {
+    STREAM_INPUT_REGISTRY.with(|r| *r.borrow_mut() = Some(registry));
 }
 
 /// Stream that yields pre-evaluated vector elements. Elements are evaluated at stream creation
@@ -70,6 +78,25 @@ impl futures::stream::Stream for EmptyVectorStream {
 }
 
 impl std::marker::Unpin for EmptyVectorStream {}
+
+/// Stream that yields a single error then completes. Used when a stream input handle is not available at consume time.
+pub struct OneErrorStream {
+    error: Option<RunError>,
+}
+
+impl futures::stream::Stream for OneErrorStream {
+    type Item = Result<Option<Value>, RunError>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        Poll::Ready(this.error.take().map(Err))
+    }
+}
+
+impl std::marker::Unpin for OneErrorStream {}
 
 /// Stream that applies a [VectorMapOp] to each element of an inner stream.
 /// When op is [VectorMapOp::UserMap], [db] is used to evaluate the user function per element.
@@ -478,7 +505,7 @@ fn apply_binary_op(
     Ok(Some(result))
 }
 
-/// Unified stream type for vector elements (literal, mapped, empty, transposed, zipped, outer, or take).
+/// Unified stream type for vector elements (literal, mapped, empty, transposed, zipped, outer, take, or from external input).
 pub enum VectorStream<'a> {
     Literal(LiteralVectorStream),
     Mapped(MappedVectorStream<'a>),
@@ -487,6 +514,10 @@ pub enum VectorStream<'a> {
     Zipped(ZippedVectorStream<'a>),
     OuterProduct(OuterProductVectorStream<'a>),
     Take(TakeVectorStream<'a>),
+    /// Stream from external input (`$name`); flattens chunks to elements.
+    FromInput(ChunkFlattenStream),
+    /// Single error then done (e.g. stream input handle not available).
+    OneError(OneErrorStream),
 }
 
 impl<'a> futures::stream::Stream for VectorStream<'a> {
@@ -504,6 +535,8 @@ impl<'a> futures::stream::Stream for VectorStream<'a> {
             VectorStream::Zipped(s) => Pin::new(s).poll_next(cx),
             VectorStream::OuterProduct(s) => Pin::new(s).poll_next(cx),
             VectorStream::Take(s) => Pin::new(s).poll_next(cx),
+            VectorStream::FromInput(s) => Pin::new(s).poll_next(cx),
+            VectorStream::OneError(s) => Pin::new(s).poll_next(cx),
         }
     }
 }
@@ -673,6 +706,14 @@ pub fn vector_into_stream<'db>(
             let inner = vector_into_stream(db, *source);
             VectorStream::Take(TakeVectorStream::new(inner, start, length))
         }
+        LazyVector::FromInput(id) => {
+            match take_receiver(id) {
+                Some(receiver) => VectorStream::FromInput(ChunkFlattenStream::new(receiver)),
+                None => VectorStream::OneError(OneErrorStream {
+                    error: Some(RunError::new(RunErrorKind::StreamInputNotAvailable)),
+                }),
+            }
+        }
     }
 }
 
@@ -746,6 +787,7 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef, spanned: Option<Span
         ExprDef::LitFuzzyBool(f) => return Expression::new(db, ExprData::LitFuzzyBool(f.clone()), span),
         ExprDef::LitSymbol(name) => return Expression::new(db, ExprData::LitSymbol(name), span),
         ExprDef::LitDate(gd) => return Expression::new(db, ExprData::LitDate(gd.clone()), span),
+        ExprDef::ExternalStream(name) => return Expression::new(db, ExprData::ExternalStream(name), span),
         ExprDef::LitTemporal(_) => {
             panic!("unresolved LitTemporal: resolve() must convert to LitDate before building the graph")
         }
@@ -1194,6 +1236,14 @@ pub fn value<'db>(
                     Unit::scalar(),
                 )))
             }
+        }
+        ExprData::ExternalStream(name) => {
+            let stream_registry = STREAM_INPUT_REGISTRY.with(|r| *r.borrow());
+            let handle = stream_registry
+                .as_ref()
+                .and_then(|reg| reg.inputs(db).get(name).copied())
+                .ok_or_else(|| run_err_with_span(db, expr, RunErrorKind::UnboundStreamInput(name.clone())))?;
+            Ok(Value::Vector(VectorValue::column(LazyVector::FromInput(handle))))
         }
         ExprData::Add(l, r) => {
             let left = value(db, scope, *l)?;
@@ -1820,6 +1870,7 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
         ExprData::LitFuzzyBool(f) => ExprDef::LitFuzzyBool(f.clone()),
         ExprData::LitSymbol(name) => ExprDef::LitSymbol(name.clone()),
         ExprData::LitDate(gd) => ExprDef::LitDate(gd.clone()),
+        ExprData::ExternalStream(name) => ExprDef::ExternalStream(name.clone()),
         ExprData::Add(l, r) => ExprDef::Add(
             Box::new(expression_to_def(db, *l)),
             Box::new(expression_to_def(db, *r)),

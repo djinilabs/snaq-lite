@@ -14,6 +14,7 @@ snaq-lite is an expression-oriented language for arithmetic with **physical quan
 - **Functions** — Built-ins: `sin`, `cos`, `tan` (angle argument), `sqrt` (non-negative), `max`, `min` (two same-dimension arguments). Vectors support methods such as `.sum()`, `.mean()`, `.min()`, `.max()`, `.dot(other)`, `.norm()`, `.product()`, `.variance()`, `.stddev()`, `.all()`, `.any()` (see [VECTORS.md](VECTORS.md)).
 - **Precision** — Implicit from decimal places in literals, or explicit with `value ~ error`.
 - **Variables** — Immutable bindings (`name = expression`) with lexical scope; result can be the last binding’s value.
+- **External streams** — `$name` refers to a stream supplied by the Host; see [EXTERNAL_STREAMS.md](EXTERNAL_STREAMS.md).
 
 Programs are **expression lists**: multiple expressions separated by newlines or `;`, optionally inside blocks `{ ... }`. The **result** is the last expression’s value (or the last binding’s right-hand side, or undefined if the list is empty).
 
@@ -35,5 +36,6 @@ Programs are **expression lists**: multiple expressions separated by newlines or
 | **Blocks and expressions** — Multiple expressions, blocks, result = last value, undefined | [BLOCKS_AND_EXPRESSIONS.md](BLOCKS_AND_EXPRESSIONS.md) |
 | **Variable bindings** — Assignments, scope, shadowing, chained assignment | [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md) |
 | **Conditionals** — if/then/else, FuzzyBool, superposition | [CONDITIONALS.md](CONDITIONALS.md) |
+| **External streams** — `$name`, chunk format, Host workflow | [EXTERNAL_STREAMS.md](EXTERNAL_STREAMS.md) |
 
 Other: [NUMBAT_COMPARISON.md](NUMBAT_COMPARISON.md) — comparison with Numbat (implementation-oriented).

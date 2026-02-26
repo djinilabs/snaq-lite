@@ -59,6 +59,7 @@ extern {
         FuncIdent => Tok::FuncIdent(<String>),
         MethodIdent => Tok::MethodIdent(<String>),
         TemporalLiteral => Tok::TemporalLiteral(<String>),
+        DollarIdent => Tok::DollarIdent(<String>),
     }
 }
 
@@ -440,6 +441,7 @@ Factor: SpannedExprDef = {
     <lo:@L> <t:TemporalLiteral> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::LitTemporal(t) },
     <pi:PiIdents> => pi,
     <lo:@L> <id:FuncIdent> "(" <args:ArgList> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Call(id, args) },
+    <lo:@L> <name:DollarIdent> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::ExternalStream(name) },
     <ii:IdentIdents> => ii,
     <lo:@L> "(" <e:Expr> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: e.value },
     <lo:@L> "[" <elems:VecExprList> "]" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::VecLiteral(elems) },

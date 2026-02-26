@@ -77,6 +77,8 @@ pub enum Tok {
     Newline,
     /// Temporal literal: `@` followed by ISO 8601 date/time (e.g. @2026, @2026-02-26T14:30). Raw string without the @.
     TemporalLiteral(String),
+    /// External stream input: `$` followed by identifier (e.g. $sales_data). Name is used to look up the stream handle in the stream input registry.
+    DollarIdent(String),
 }
 
 /// Lexer error with optional byte span (start, end) for source snippet.
@@ -415,6 +417,25 @@ impl<'input> Iterator for Lexer<'input> {
             }
         }
 
+        if rest.starts_with('$') {
+            self.pos += 1;
+            if let Some(name) = self.take_ident() {
+                self.last_was_number = false;
+                self.any_token_emitted = true;
+                self.after_postfix_factor = true;
+                let end = self.pos;
+                return Some(Ok((start, Tok::DollarIdent(name), end)));
+            }
+            // $ not followed by identifier: treat as invalid (e.g. "$" or "$1")
+            let error_end = (self.pos + rest.chars().take(5).map(|c| c.len_utf8()).sum::<usize>().min(rest.len())).min(self.input.len());
+            let snippet = self.input[self.pos..error_end].to_string();
+            return Some(Err(LexicalError::InvalidFloat {
+                snippet,
+                start: self.pos,
+                end: error_end,
+            }));
+        }
+
         let mut it = rest.chars();
         let c = it.next()?;
         self.pos += c.len_utf8();
@@ -536,7 +557,7 @@ impl<'input> Iterator for Lexer<'input> {
             &tok,
             Tok::Num(_) | Tok::Ident(_) | Tok::FuncIdent(_) | Tok::MethodIdent(_)
                 | Tok::RParen | Tok::RBracket | Tok::RBrace
-                | Tok::TemporalLiteral(_)
+                | Tok::TemporalLiteral(_) | Tok::DollarIdent(_)
         );
         let end = self.pos;
         Some(Ok((start, tok, end)))

@@ -12,6 +12,7 @@
 
 use crate::error::RunError;
 use crate::ir::ExprDef;
+use crate::stream_handle::StreamHandleId;
 use crate::symbolic::Value;
 use crate::user_function;
 use futures::stream::{self, Stream};
@@ -161,6 +162,8 @@ pub enum LazyVector {
         start: usize,
         length: usize,
     },
+    /// External stream input: `$name` resolved to this handle. Stream is taken from the stream handle registry when [vector_into_stream](crate::queries::vector_into_stream) runs.
+    FromInput(StreamHandleId),
 }
 
 /// Context for evaluating an expression when streaming a vector.
@@ -191,7 +194,8 @@ impl LazyVector {
             | LazyVector::Transpose { .. }
             | LazyVector::ZipMap { .. }
             | LazyVector::Outer { .. }
-            | LazyVector::Take { .. } => None,
+            | LazyVector::Take { .. }
+            | LazyVector::FromInput(_) => None,
         }
     }
 
@@ -206,7 +210,8 @@ impl LazyVector {
             | LazyVector::Transpose { .. }
             | LazyVector::ZipMap { .. }
             | LazyVector::Outer { .. }
-            | LazyVector::Take { .. } => None,
+            | LazyVector::Take { .. }
+            | LazyVector::FromInput(_) => None,
         }
     }
 
@@ -235,6 +240,10 @@ impl LazyVector {
             }
             LazyVector::Take { .. } => {
                 // Take is streamed via vector_into_stream in queries (needs db).
+                Box::new(stream::iter(std::iter::empty::<Result<Option<Value>, RunError>>()))
+            }
+            LazyVector::FromInput(_) => {
+                // FromInput is streamed via vector_into_stream in queries (needs registry).
                 Box::new(stream::iter(std::iter::empty::<Result<Option<Value>, RunError>>()))
             }
         }

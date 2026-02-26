@@ -82,7 +82,7 @@ fn collect_bound_names(def: &ExprDef) -> HashSet<String> {
                 }
             }
             ExprDef::Lit(_) | ExprDef::LitFuzzyBool(_) | ExprDef::LitSymbol(_)
-            | ExprDef::LitTemporal(_) | ExprDef::LitDate(_)
+            | ExprDef::LitTemporal(_) | ExprDef::LitDate(_) | ExprDef::ExternalStream(_)
             | ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {}
         }
     }
@@ -176,6 +176,7 @@ fn collect_bound_names_spanned(def: &SpannedExprDef) -> HashSet<String> {
             }
             SpannedExprDefKind::Lit(_) | SpannedExprDefKind::LitFuzzyBool(_) | SpannedExprDefKind::LitSymbol(_)
             | SpannedExprDefKind::LitTemporal(_) | SpannedExprDefKind::LitDate(_)
+            | SpannedExprDefKind::ExternalStream(_)
             | SpannedExprDefKind::LitScalar(..) | SpannedExprDefKind::LitWithUnit(..)
             | SpannedExprDefKind::LitUnit(..) => {}
         }
@@ -205,6 +206,7 @@ fn substitute_symbols_spanned_inner(
         SpannedExprDefKind::Lit(q) => SpannedExprDefKind::Lit(q),
         SpannedExprDefKind::LitFuzzyBool(f) => SpannedExprDefKind::LitFuzzyBool(f),
         SpannedExprDefKind::LitDate(gd) => SpannedExprDefKind::LitDate(gd),
+        SpannedExprDefKind::ExternalStream(name) => SpannedExprDefKind::ExternalStream(name),
         SpannedExprDefKind::LitTemporal(_) => {
             return Err(RunError::at(span, RunErrorKind::InvalidTemporalLiteral(
                 "unresolved temporal literal (resolve must run before substitute)".to_string(),
@@ -425,6 +427,7 @@ fn substitute_symbols_inner(
         ExprDef::Lit(q) => Ok(ExprDef::Lit(q)),
         ExprDef::LitFuzzyBool(f) => Ok(ExprDef::LitFuzzyBool(f)),
         ExprDef::LitDate(gd) => Ok(ExprDef::LitDate(gd)),
+        ExprDef::ExternalStream(name) => Ok(ExprDef::ExternalStream(name)),
         ExprDef::LitTemporal(_) => panic!("unresolved LitTemporal: resolve() must be called before substitute_symbols"),
         ExprDef::LitSymbol(name) => {
             if bound_names.contains(&name) {

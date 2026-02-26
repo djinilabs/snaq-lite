@@ -234,6 +234,7 @@ fn rewrite_rec(
             let new_rhs = rewrite_rec(pool, out, *rhs, registry)?;
             Ok(out.intern(ExprNode::Binding(name.clone(), new_rhs), span))
         }
+        ExprNode::ExternalStream(name) => Ok(out.intern(ExprNode::ExternalStream(name.clone()), span)),
         ExprNode::Lambda(params, body_id) => {
             let new_params: Vec<(String, Option<ExprId>)> = params
                 .iter()

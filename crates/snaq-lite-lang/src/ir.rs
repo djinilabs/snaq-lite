@@ -4,7 +4,9 @@ use crate::date::GranularDate;
 use crate::error::Span;
 use crate::fuzzy::FuzzyBool;
 use crate::quantity::Quantity;
+use crate::stream_handle::StreamHandleId;
 use ordered_float::OrderedFloat;
+use std::collections::HashMap;
 
 /// Numeric literal with raw string for implicit significant-figure variance.
 /// Variance is derived from the number of decimal places in the source (mantissa only).
@@ -115,6 +117,8 @@ pub enum SpannedExprDefKind {
     WithPrecision(Box<SpannedExprDef>, Box<SpannedExprDef>),
     Block(Vec<SpannedExprDef>),
     Binding(String, Box<SpannedExprDef>),
+    /// External stream input: `$name` (e.g. $sales_data). Resolved as-is; eval looks up name in stream input registry.
+    ExternalStream(String),
     /// Map literal: { key: value, ... }. At least one entry; keys are unquoted idents.
     MapLiteral(Vec<(String, SpannedExprDef)>),
 }
@@ -193,6 +197,7 @@ impl SpannedExprDef {
             }
             SpannedExprDefKind::Block(list) => ExprDef::Block(list.iter().map(|e| e.to_expr_def()).collect()),
             SpannedExprDefKind::Binding(name, rhs) => ExprDef::Binding(name.clone(), Box::new(rhs.to_expr_def())),
+            SpannedExprDefKind::ExternalStream(name) => ExprDef::ExternalStream(name.clone()),
             SpannedExprDefKind::MapLiteral(entries) => ExprDef::MapLiteral(
                 entries
                     .iter()
@@ -264,6 +269,8 @@ pub enum ExprDef {
     Block(Vec<ExprDef>),
     /// Variable binding (in block context): name = value_expr. Extends scope for subsequent items.
     Binding(String, Box<ExprDef>),
+    /// External stream input: `$name`. Eval looks up name in stream input registry and returns a vector over that stream.
+    ExternalStream(String),
     /// Map literal: { key: value, ... }. At least one entry.
     MapLiteral(Vec<(String, Box<ExprDef>)>),
 }
@@ -277,6 +284,15 @@ pub struct ProgramDef {
     /// Spanned AST for the same root; when set, each expression node gets a span for error reporting.
     #[returns(ref)]
     pub spanned_root: Option<SpannedExprDef>,
+}
+
+/// Input that maps external stream names (`$name`) to [StreamHandleId](crate::stream_handle::StreamHandleId).
+/// The Host sets this when running programs that use `$name`; the actual receiver is in the thread-local
+/// stream handle registry. When not set or empty, evaluation of `$name` yields [UnboundStreamInput](crate::error::RunErrorKind::UnboundStreamInput).
+#[salsa::input]
+pub struct StreamInputRegistry {
+    #[returns(ref)]
+    pub inputs: HashMap<String, StreamHandleId>,
 }
 
 /// A single expression node in the computation graph (tracked by Salsa).
@@ -334,6 +350,8 @@ pub enum ExprData<'db> {
     Block(Vec<Expression<'db>>),
     /// Variable binding (in block context): name = value_expr.
     Binding(String, Expression<'db>),
+    /// External stream input: `$name`. Eval looks up name in stream input registry.
+    ExternalStream(String),
     /// Map literal: { key: value, ... }. At least one entry.
     MapLiteral(Vec<(String, Expression<'db>)>),
 }

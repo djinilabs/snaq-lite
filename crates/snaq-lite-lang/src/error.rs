@@ -77,6 +77,10 @@ pub enum RunErrorKind {
     InvalidArgument(String),
     /// Malformed temporal literal (e.g. invalid date or grain inference failed).
     InvalidTemporalLiteral(String),
+    /// External stream `$name` has no handle in the stream input registry.
+    UnboundStreamInput(String),
+    /// Stream input handle not available when consuming (already consumed or never registered).
+    StreamInputNotAvailable,
     /// Date ± Time: duration granularity is finer than the date's grain (e.g. Year + 3 hours).
     IncompatibleDateGrain(String),
 }
@@ -280,6 +284,12 @@ impl std::fmt::Display for RunError {
             RunErrorKind::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
             RunErrorKind::InvalidTemporalLiteral(msg) => {
                 write!(f, "invalid temporal literal: {msg}")
+            }
+            RunErrorKind::UnboundStreamInput(name) => {
+                write!(f, "unbound stream input: ${name}")
+            }
+            RunErrorKind::StreamInputNotAvailable => {
+                write!(f, "stream input not available (already consumed or not registered)")
             }
             RunErrorKind::IncompatibleDateGrain(msg) => {
                 write!(f, "incompatible date grain: {msg}")

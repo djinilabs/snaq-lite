@@ -23,19 +23,21 @@ pub mod unit_registry;
 pub mod vector;
 pub mod vector_registry;
 pub mod map_registry;
+pub mod stream_handle;
 
 pub use error::{format_run_error_with_source, ParseError, RunError, RunErrorKind, Span};
 pub use quantity::{Quantity, QuantityError, SnaqNumber};
 pub use unit::Unit;
-pub use ir::{ExprDef, Expression, NumLiteral, ProgramDef, SpannedExprDef};
+pub use ir::{ExprDef, Expression, NumLiteral, ProgramDef, SpannedExprDef, StreamInputRegistry};
 pub use scope::{empty_scope, Env, Scope, StoredValue};
 pub use parser::parse;
-pub use queries::{program, set_eval_registry, value, vector_into_stream};
+pub use queries::{program, set_eval_registry, set_stream_input_registry, value, vector_into_stream};
 pub use symbol_registry::SymbolRegistry;
 pub use fuzzy::FuzzyBool;
 pub use symbolic::{SymbolicQuantity, SymbolicExpr, Value};
 pub use vector::{LazyVector, VectorOrientation, VectorValue};
 pub use unit_registry::{default_si_registry, UnitRegistry};
+pub use stream_handle::{Chunk, StreamHandleId, register, take_receiver};
 
 /// Parse and evaluate the expression, returning a Value (symbolic by default, e.g. "6 + π").
 ///
@@ -60,6 +62,8 @@ pub fn run_with_registry(input: &str, registry: &UnitRegistry) -> Result<Value, 
     let root_def = root_spanned.to_expr_def();
     set_eval_registry(registry.clone());
     let db = salsa::DatabaseImpl::new();
+    let stream_input_registry = StreamInputRegistry::new(&db, std::collections::HashMap::new());
+    set_stream_input_registry(stream_input_registry);
     let program_def = ProgramDef::new(&db, root_def, Some(root_spanned));
     let root = program(&db, program_def);
     value(&db, empty_scope(&db), root)
@@ -111,10 +115,36 @@ pub fn run_with_registry_format(input: &str, registry: &UnitRegistry) -> Result<
     let root_def = root_spanned.to_expr_def();
     set_eval_registry(registry.clone());
     let db = salsa::DatabaseImpl::new();
+    let stream_input_registry = StreamInputRegistry::new(&db, std::collections::HashMap::new());
+    set_stream_input_registry(stream_input_registry);
     let program_def = ProgramDef::new(&db, root_def, Some(root_spanned));
     let root = program(&db, program_def);
     let val = value(&db, empty_scope(&db), root)?;
     format_value_for_display(&db, &val)
+}
+
+/// Like [run_with_registry], but with external stream inputs for programs that use `$name`.
+/// The Host creates channels (e.g. [futures::channel::mpsc::unbounded]), registers the
+/// receiver with [register], and passes a map from name to [StreamHandleId]. Returns the
+/// evaluated [Value] and the database so the Host can call [vector_into_stream] on any
+/// resulting vector (e.g. `$sales_data * 2`) to consume the stream while pushing chunks
+/// on the sender. Unbound `$name` yields [UnboundStreamInput](crate::RunErrorKind::UnboundStreamInput).
+pub fn run_with_stream_inputs(
+    input: &str,
+    registry: &UnitRegistry,
+    stream_inputs: std::collections::HashMap<String, StreamHandleId>,
+) -> Result<(Value, salsa::DatabaseImpl), RunError> {
+    let resolved = resolve::resolve(parse(input).map_err(RunError::from)?, registry)?;
+    let root_spanned = cas::simplify_symbolic(resolved, registry)?;
+    let root_def = root_spanned.to_expr_def();
+    set_eval_registry(registry.clone());
+    let db = salsa::DatabaseImpl::new();
+    let stream_input_registry = StreamInputRegistry::new(&db, stream_inputs);
+    set_stream_input_registry(stream_input_registry);
+    let program_def = ProgramDef::new(&db, root_def, Some(root_spanned));
+    let root = program(&db, program_def);
+    let val = value(&db, empty_scope(&db), root)?;
+    Ok((val, db))
 }
 
 /// Evaluate and substitute all symbols with their numeric values; returns a single Quantity.
@@ -134,6 +164,8 @@ pub fn run_numeric_with_registry(
     let root_def = cas::simplify_numeric(root_def, unit_registry, symbol_registry)?.to_expr_def();
     set_eval_registry(unit_registry.clone());
     let db = salsa::DatabaseImpl::new();
+    let stream_input_registry = StreamInputRegistry::new(&db, std::collections::HashMap::new());
+    set_stream_input_registry(stream_input_registry);
     let program_def = ProgramDef::new(&db, root_def, None);
     let root = program(&db, program_def);
     let v = value(&db, empty_scope(&db), root)?;
@@ -3135,6 +3167,208 @@ mod tests {
             (q.value() - (-2_f64.sqrt() / 2.0)).abs() < 1e-10,
             "sin((π+π/4) rad) = -√2/2"
         );
+    }
+
+    // --- External stream inputs ($name) ---
+
+    #[test]
+    fn parse_dollar_ident_external_stream() {
+        use crate::ir::SpannedExprDefKind;
+
+        let root = parse("$foo").unwrap();
+        let block = match &root.value {
+            SpannedExprDefKind::Block(ref items) => items,
+            _ => panic!("expected Block"),
+        };
+        assert_eq!(block.len(), 1);
+        match &block[0].value {
+            SpannedExprDefKind::ExternalStream(name) => assert_eq!(name, "foo"),
+            _ => panic!("expected ExternalStream(\"foo\")"),
+        }
+        let root2 = parse("$bar").unwrap();
+        let block2 = match &root2.value {
+            SpannedExprDefKind::Block(ref items) => items,
+            _ => panic!("expected Block"),
+        };
+        assert_eq!(block2.len(), 1);
+        match &block2[0].value {
+            SpannedExprDefKind::ExternalStream(name) => assert_eq!(name, "bar"),
+            _ => panic!("expected ExternalStream(\"bar\")"),
+        }
+    }
+
+    #[test]
+    fn resolve_external_stream_passthrough() {
+        use crate::ir::SpannedExprDefKind;
+
+        let registry = default_si_registry();
+        let root = resolve::resolve(parse("$foo").unwrap(), &registry).unwrap();
+        let block = match &root.value {
+            SpannedExprDefKind::Block(ref items) => items,
+            _ => panic!("expected Block"),
+        };
+        assert_eq!(block.len(), 1);
+        match &block[0].value {
+            SpannedExprDefKind::ExternalStream(name) => assert_eq!(name, "foo"),
+            _ => panic!("resolve should leave ExternalStream, got {:?}", block[0].value),
+        }
+    }
+
+    #[test]
+    fn value_external_stream_with_registry_returns_from_input_vector() {
+        use crate::queries::{program, set_eval_registry, set_stream_input_registry, value};
+        use crate::vector::LazyVector;
+        use salsa::DatabaseImpl;
+
+        let registry = default_si_registry();
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let handle_id = register(rx);
+        drop(tx);
+
+        let root_def = resolve::resolve(parse("$x").unwrap(), &registry).unwrap();
+        let root_def = cas::simplify_symbolic(root_def, &registry).unwrap().to_expr_def();
+        set_eval_registry(registry.clone());
+        let db = DatabaseImpl::new();
+        let stream_input_registry =
+            StreamInputRegistry::new(&db, std::collections::HashMap::from([("x".to_string(), handle_id)]));
+        set_stream_input_registry(stream_input_registry);
+        let program_def = ProgramDef::new(&db, root_def, None);
+        let root = program(&db, program_def);
+        let v = value(&db, empty_scope(&db), root).unwrap();
+        match &v {
+            Value::Vector(vec_val) => match &vec_val.inner {
+                LazyVector::FromInput(id) => assert_eq!(*id, handle_id),
+                other => panic!("expected LazyVector::FromInput, got {:?}", other),
+            },
+            _ => panic!("expected Value::Vector, got {:?}", v),
+        }
+    }
+
+    #[test]
+    fn value_external_stream_without_registry_returns_unbound() {
+        let registry = default_si_registry();
+        let result = run_with_stream_inputs("$missing", &registry, std::collections::HashMap::new());
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected Err(UnboundStreamInput)"),
+        };
+        assert!(
+            matches!(err.kind, RunErrorKind::UnboundStreamInput(ref n) if n == "missing"),
+            "expected UnboundStreamInput(\"missing\"), got {:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn external_stream_times_two_yields_map_over_from_input() {
+        use crate::queries::{program, set_eval_registry, set_stream_input_registry, value};
+        use crate::vector::LazyVector;
+        use salsa::DatabaseImpl;
+
+        let registry = default_si_registry();
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let handle_id = register(rx);
+        drop(tx);
+
+        let root_def = resolve::resolve(parse("$x * 2").unwrap(), &registry).unwrap();
+        let root_def = cas::simplify_symbolic(root_def, &registry).unwrap().to_expr_def();
+        set_eval_registry(registry.clone());
+        let db = DatabaseImpl::new();
+        let stream_input_registry =
+            StreamInputRegistry::new(&db, std::collections::HashMap::from([("x".to_string(), handle_id)]));
+        set_stream_input_registry(stream_input_registry);
+        let program_def = ProgramDef::new(&db, root_def, None);
+        let root = program(&db, program_def);
+        let v = value(&db, empty_scope(&db), root).unwrap();
+        match &v {
+            Value::Vector(vec_val) => match &vec_val.inner {
+                LazyVector::Map { source, .. } => match source.as_ref() {
+                    LazyVector::FromInput(id) => assert_eq!(*id, handle_id),
+                    other => panic!("expected Map over FromInput, got source {:?}", other),
+                },
+                other => panic!("expected LazyVector::Map over FromInput, got {:?}", other),
+            },
+            _ => panic!("expected Value::Vector, got {:?}", v),
+        }
+    }
+
+    #[test]
+    fn vector_into_stream_from_input_yields_elements_and_eof() {
+        use crate::quantity::Quantity;
+        use crate::symbolic::Value;
+        use futures::stream::StreamExt;
+
+        let registry = default_si_registry();
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let handle_id = register(rx);
+
+        let (val, db) = run_with_stream_inputs(
+            "$data",
+            &registry,
+            std::collections::HashMap::from([("data".to_string(), handle_id)]),
+        )
+        .unwrap();
+
+        let lv = match &val {
+            Value::Vector(v) => v.inner.clone(),
+            _ => panic!("expected vector"),
+        };
+
+        let scalar = Unit::scalar();
+        tx.unbounded_send(vec![
+            Ok(Some(Value::Numeric(Quantity::new(1.0, scalar.clone())))),
+            Ok(Some(Value::Numeric(Quantity::new(2.0, scalar)))),
+        ])
+        .unwrap();
+        drop(tx);
+
+        let stream = vector_into_stream(&db, lv);
+        let results: Vec<_> = futures::executor::block_on(stream.collect());
+        assert_eq!(results.len(), 2);
+        assert!(matches!(&results[0], Ok(Some(Value::Numeric(q))) if (q.value() - 1.0).abs() < 1e-10));
+        assert!(matches!(&results[1], Ok(Some(Value::Numeric(q))) if (q.value() - 2.0).abs() < 1e-10));
+    }
+
+    #[test]
+    fn vector_into_stream_from_input_when_handle_consumed_yields_one_error() {
+        use crate::quantity::Quantity;
+        use crate::symbolic::Value;
+        use futures::stream::StreamExt;
+
+        let registry = default_si_registry();
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let handle_id = register(rx);
+
+        let (val, db) = run_with_stream_inputs(
+            "$data",
+            &registry,
+            std::collections::HashMap::from([("data".to_string(), handle_id)]),
+        )
+        .unwrap();
+
+        let lv = match &val {
+            Value::Vector(v) => v.inner.clone(),
+            _ => panic!("expected vector"),
+        };
+
+        let scalar = Unit::scalar();
+        tx.unbounded_send(vec![Ok(Some(Value::Numeric(Quantity::new(1.0, scalar))))])
+            .unwrap();
+        drop(tx);
+
+        let stream1 = vector_into_stream(&db, lv.clone());
+        let _: Vec<_> = futures::executor::block_on(stream1.collect());
+
+        let stream2 = vector_into_stream(&db, lv);
+        let results: Vec<_> = futures::executor::block_on(stream2.collect());
+        assert_eq!(results.len(), 1);
+        assert!(matches!(
+            &results[0],
+            Err(RunError {
+                kind: RunErrorKind::StreamInputNotAvailable,
+                ..
+            })
+        ));
     }
 
     #[test]

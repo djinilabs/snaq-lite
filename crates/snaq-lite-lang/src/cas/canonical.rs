@@ -33,6 +33,7 @@ pub enum Rank {
     MapLiteral(Vec<(String, Rank)>),
     Lambda(Vec<(String, Option<Rank>)>, Box<Rank>),
     CallExpr(Box<Rank>, Vec<Rank>),
+    ExternalStream(String),
 }
 
 fn tag_order(r: &Rank) -> u8 {
@@ -64,6 +65,7 @@ fn tag_order(r: &Rank) -> u8 {
         Rank::MapLiteral(_) => 24,
         Rank::Lambda(..) => 25,
         Rank::CallExpr(..) => 26,
+        Rank::ExternalStream(_) => 27,
     }
 }
 
@@ -118,6 +120,7 @@ impl Ord for Rank {
                     }
                 })
                 .unwrap_or_else(|| a.len().cmp(&b.len())),
+            (Rank::ExternalStream(a), Rank::ExternalStream(b)) => a.cmp(b),
             (Rank::Lambda(ap, ab), Rank::Lambda(bp, bb)) => {
                 ap.len().cmp(&bp.len())
                     .then_with(|| {
@@ -223,6 +226,7 @@ pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
             Box::new(rank(pool, *callee_id)),
             args.iter().map(|(_, id)| rank(pool, *id)).collect(),
         ),
+        ExprNode::ExternalStream(name) => Rank::ExternalStream(name.clone()),
     }
 }
 
@@ -415,6 +419,7 @@ fn canonicalize_rec(
             let new_rhs = canonicalize_rec(pool, out, *rhs);
             out.intern(ExprNode::Binding(name.clone(), new_rhs), span)
         }
+        ExprNode::ExternalStream(name) => out.intern(ExprNode::ExternalStream(name.clone()), span),
         ExprNode::Lambda(params, body_id) => {
             let new_params: Vec<(String, Option<ExprId>)> = params
                 .iter()

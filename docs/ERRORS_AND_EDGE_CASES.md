@@ -39,6 +39,8 @@ This document lists the main error conditions and edge cases you may encounter w
 | **Invalid temporal literal** | A temporal literal after `@` is malformed or incomplete (e.g. `@20`, `@2026-13-01`, or `@2026-02-26T14:30:S`). See [DATES.md](DATES.md). |
 | **Incompatible date grain** | Date ± Time: the duration’s unit is finer than the date’s grain (e.g. `@2026 + 3 hours` — year grain cannot add hours). See [DATES.md](DATES.md). |
 | **Comparison with date** | Comparing a date with a non-date (e.g. `@2026 < 1`) returns an error: both operands must be dates. |
+| **Unbound stream input** | The program uses `$name` (external stream) but the Host did not set the stream input registry, or did not register that name. Evaluation fails with **unbound stream input: $name**. Use [run_with_stream_inputs](EXTERNAL_STREAMS.md#host-workflow) and register the receiver for each `$name`. |
+| **Stream input not available** | When consuming a vector stream (e.g. from `vector_into_stream`), the stream input handle was already consumed or never registered. The stream yields one error (**stream input not available (already consumed or not registered)**) then completes. See [EXTERNAL_STREAMS.md](EXTERNAL_STREAMS.md#limits-and-platform). |
 
 ### How runtime and parse errors are shown
 
@@ -85,6 +87,7 @@ See [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md) and [FUNCTIONS.md](FUNCTIONS.md
 ## See also
 
 - [DATES.md](DATES.md) — temporal literals and date arithmetic
+- [EXTERNAL_STREAMS.md](EXTERNAL_STREAMS.md) — `$name` external stream inputs, chunk format, and Host workflow
 - [FUNCTIONS.md](FUNCTIONS.md) — user-defined functions and built-ins; cannot shadow built-in names
 - [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md) — binding limits
 - [BLOCKS_AND_EXPRESSIONS.md](BLOCKS_AND_EXPRESSIONS.md) — undefined and empty blocks

@@ -61,6 +61,8 @@ pub enum ExprNode {
     CallExpr(ExprId, Vec<(Option<String>, ExprId)>),
     /// Map literal: (key, value expr id) pairs. Pass-through in CAS.
     MapLiteral(Vec<(String, ExprId)>),
+    /// External stream input: `$name`. Pass-through in CAS; eval looks up in stream input registry.
+    ExternalStream(String),
 }
 
 /// Central cache: same structure => same ExprId. New nodes are interned on construction.

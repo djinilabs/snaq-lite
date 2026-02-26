@@ -176,6 +176,7 @@ pub fn spanned_expr_def_to_interned(def: &SpannedExprDef, pool: &mut ExprInterne
                 .collect();
             pool.intern(ExprNode::CallExpr(callee_id, arg_ids), span)
         }
+        SpannedExprDefKind::ExternalStream(name) => pool.intern(ExprNode::ExternalStream(name.clone()), span),
         SpannedExprDefKind::LitScalar(..)
         | SpannedExprDefKind::LitWithUnit(..)
         | SpannedExprDefKind::LitUnit(..) => {
@@ -346,6 +347,7 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
                 .collect();
             pool.intern(ExprNode::CallExpr(callee_id, arg_ids), span)
         }
+        ExprDef::ExternalStream(name) => pool.intern(ExprNode::ExternalStream(name.clone()), span),
         ExprDef::MapLiteral(entries) => {
             let ids: Vec<(String, ExprId)> = entries
                 .iter()
@@ -476,6 +478,7 @@ pub fn interned_to_spanned_expr_def(pool: &ExprInterner, id: ExprId) -> SpannedE
             name.clone(),
             Box::new(interned_to_spanned_expr_def(pool, *rhs_id)),
         ),
+        ExprNode::ExternalStream(name) => SpannedExprDefKind::ExternalStream(name.clone()),
         ExprNode::MapLiteral(entries) => SpannedExprDefKind::MapLiteral(
             entries
                 .iter()

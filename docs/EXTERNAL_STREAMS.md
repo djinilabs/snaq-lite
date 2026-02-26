@@ -61,6 +61,61 @@ When the runtime runs as WebAssembly in the browser, the Host has no access to t
 3. **Feeder task:** For each stream that is backed by a byte source, call `startFeeder(streamIndex, readStream)` so the Host reads from the stream, parses in chunks, yields to the event loop, and pushes chunks. Alternatively, parse in JS and call `pushChunk(streamIndex, array)` in a loop; when done, call `closeStream(streamIndex)`.
 4. **Consumer task:** Call `consumeOutputStream(runIndex, onChunk, onDone, onError)`. The Host drives the output stream in an async task, yields periodically, and invokes the callbacks. Serialize or display results in JS (e.g. update the UI or trigger a download).
 
+## CLI
+
+The native CLI can run expressions that use `$name` by binding stream names to files.
+
+### Usage
+
+```text
+snaq-lite [--numeric] [--stream name=path ...] <expression>
+```
+
+- **--stream name=path** (or **-s name=path**): Bind the stream `$name` to the file at `path`. Repeat for multiple streams (e.g. `--stream a=1.txt --stream b=2.txt`).
+- **--numeric** / **-n**: Same as without streams; for vector results, each element is printed on its own line.
+- Each `$name` in the expression must have a corresponding `--stream name=path`; otherwise the runtime returns **unbound stream input: name**.
+
+### File format
+
+Input files are **newline-delimited numbers**: one numeric value per line. Empty lines are skipped. Invalid lines (non-numeric) yield a stream error and the run fails.
+
+### Example
+
+With a file `numbers.txt` containing:
+
+```text
+1
+2
+3
+```
+
+running:
+
+```text
+snaq-lite --stream data=numbers.txt '$data * 2'
+```
+
+prints the evaluated stream as a vector: `[2, 4, 6]`.
+
+With `--numeric`, the same command prints one value per line:
+
+```text
+2
+4
+6
+```
+
+### Output
+
+When the result is a vector (e.g. `$data * 2`), the CLI consumes the stream and prints it as `[e1, e2, ...]` (or, with `--numeric`, one element per line). When the result is not a vector (e.g. a scalar expression that does not use streams), the single value is formatted and printed.
+
+### Limits and edge cases (CLI)
+
+- **Duplicate stream name:** If you pass the same name twice (e.g. `--stream x=a.txt --stream x=b.txt`), the CLI exits with **duplicate stream name: x**.
+- **File not found:** If a file at `path` cannot be opened, the feeder thread logs to stderr and closes the sender; that stream yields no data, so the pipeline may produce an empty or partial result. The run does not fail; check stderr for I/O errors.
+- **Invalid line:** A non-numeric line in the file yields a stream error; the run fails and the CLI prints the error.
+- **Feeder thread panic:** If a feeder thread panics (e.g. bug in the feeder), the main thread reports **stream feeder thread panicked** and exits with code 1 after consumption finishes.
+
 ## Summary
 
 - **`$name`** — external stream reference; resolved from the Host’s stream input registry.

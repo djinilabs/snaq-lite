@@ -71,7 +71,8 @@ pub fn run_with_registry(input: &str, registry: &UnitRegistry) -> Result<Value, 
 
 /// Recursively format a value for display. Vectors are shown as `[e1, e2, ...]` with nested
 /// vectors fully expanded. Sparse (undefined) elements are shown as `?`.
-fn format_value_for_display(db: &dyn salsa::Database, value: &Value) -> Result<String, RunError> {
+/// Public so hosts (e.g. CLI) can format stream elements consistently.
+pub fn format_value_for_display(db: &dyn salsa::Database, value: &Value) -> Result<String, RunError> {
     match value {
         Value::Numeric(q) => Ok(format!("{q}")),
         Value::Symbolic(sq) => Ok(format!("{sq}")),

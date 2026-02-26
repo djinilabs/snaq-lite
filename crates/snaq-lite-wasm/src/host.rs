@@ -223,14 +223,14 @@ pub fn consume_output_stream_host(
                     let js = value_to_js(&v);
                     let _ = on_chunk.call1(&JsValue::NULL, &js);
                     yield_count += 1;
-                    if yield_count % CONSUMER_YIELD_EVERY == 0 {
+                    if yield_count.is_multiple_of(CONSUMER_YIELD_EVERY) {
                         yield_to_event_loop().await;
                     }
                 }
                 Some(Ok(None)) => {
                     let _ = on_chunk.call1(&JsValue::NULL, &JsValue::NULL);
                     yield_count += 1;
-                    if yield_count % CONSUMER_YIELD_EVERY == 0 {
+                    if yield_count.is_multiple_of(CONSUMER_YIELD_EVERY) {
                         yield_to_event_loop().await;
                     }
                 }
@@ -345,7 +345,7 @@ pub fn start_feeder_host(
             }
 
             read_count += 1;
-            if read_count % FEEDER_YIELD_EVERY == 0 {
+            if read_count.is_multiple_of(FEEDER_YIELD_EVERY) {
                 yield_to_event_loop().await;
             }
         }

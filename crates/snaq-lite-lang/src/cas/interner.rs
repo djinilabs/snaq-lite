@@ -30,8 +30,8 @@ pub enum ExprNode {
     VecLiteral(Vec<ExprId>),
     /// Postfix transpose: inner must evaluate to a vector. Pass-through in CAS.
     Transpose(ExprId),
-    /// Index/single-element access: base id, index id. Pass-through in CAS.
-    Index(ExprId, ExprId),
+    /// Index/key access: base id, key string (bracket content trimmed or dot-num). Pass-through in CAS.
+    Index(ExprId, String),
     /// Property access: base id, property name. Pass-through in CAS.
     Member(ExprId, String),
     /// Method call: base id, method name, args. Pass-through in CAS.
@@ -57,6 +57,8 @@ pub enum ExprNode {
     Lambda(Vec<(String, Option<ExprId>)>, ExprId),
     /// Call expression that evaluates to a function: callee id, args.
     CallExpr(ExprId, Vec<(Option<String>, ExprId)>),
+    /// Map literal: (key, value expr id) pairs. Pass-through in CAS.
+    MapLiteral(Vec<(String, ExprId)>),
 }
 
 /// Central cache: same structure => same ExprId. New nodes are interned on construction.

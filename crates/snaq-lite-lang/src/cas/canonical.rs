@@ -17,7 +17,7 @@ pub enum Rank {
     As(Box<Rank>, Box<Rank>),
     VecLiteral(Vec<Rank>),
     Transpose(Box<Rank>),
-    Index(Box<Rank>, Box<Rank>),
+    Index(Box<Rank>, String),
     Member(Box<Rank>, String),
     MethodCall(Box<Rank>, String, Vec<Rank>),
     Eq(Box<Rank>, Box<Rank>),
@@ -30,6 +30,7 @@ pub enum Rank {
     If(Box<Rank>, Box<Rank>, Box<Rank>),
     WithPrecision(Box<Rank>, Box<Rank>),
     Block(Vec<Rank>),
+    MapLiteral(Vec<(String, Rank)>),
     Lambda(Vec<(String, Option<Rank>)>, Box<Rank>),
     CallExpr(Box<Rank>, Vec<Rank>),
 }
@@ -60,8 +61,9 @@ fn tag_order(r: &Rank) -> u8 {
         Rank::If(..) => 21,
         Rank::WithPrecision(..) => 22,
         Rank::Block(_) => 23,
-        Rank::Lambda(..) => 24,
-        Rank::CallExpr(..) => 25,
+        Rank::MapLiteral(_) => 24,
+        Rank::Lambda(..) => 25,
+        Rank::CallExpr(..) => 26,
     }
 }
 
@@ -89,7 +91,7 @@ impl Ord for Rank {
             (Rank::As(a1, a2), Rank::As(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::VecLiteral(a), Rank::VecLiteral(b)) => a.cmp(b),
             (Rank::Transpose(a), Rank::Transpose(b)) => a.cmp(b),
-            (Rank::Index(a1, a2), Rank::Index(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
+            (Rank::Index(a1, a2), Rank::Index(b1, b2)) => a1.cmp(b1).then_with(|| a2.cmp(b2)),
             (Rank::Member(a, an), Rank::Member(b, bn)) => a.cmp(b).then_with(|| an.cmp(bn)),
             (Rank::MethodCall(a, an, aargs), Rank::MethodCall(b, bn, bargs)) => {
                 a.cmp(b).then_with(|| an.cmp(bn)).then_with(|| aargs.cmp(bargs))
@@ -104,6 +106,18 @@ impl Ord for Rank {
             (Rank::If(a1, a2, a3), Rank::If(b1, b2, b3)) => a1.cmp(b1).then(a2.cmp(b2)).then(a3.cmp(b3)),
             (Rank::WithPrecision(a1, a2), Rank::WithPrecision(b1, b2)) => a1.cmp(b1).then(a2.cmp(b2)),
             (Rank::Block(a), Rank::Block(b)) => a.cmp(b),
+            (Rank::MapLiteral(a), Rank::MapLiteral(b)) => a
+                .iter()
+                .zip(b.iter())
+                .find_map(|(ae, be)| {
+                    let c = ae.0.cmp(&be.0).then_with(|| ae.1.cmp(&be.1));
+                    if c != Ordering::Equal {
+                        Some(c)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| a.len().cmp(&b.len())),
             (Rank::Lambda(ap, ab), Rank::Lambda(bp, bb)) => {
                 ap.len().cmp(&bp.len())
                     .then_with(|| {
@@ -159,10 +173,7 @@ pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
         ExprNode::As(l, r) => Rank::As(Box::new(rank(pool, *l)), Box::new(rank(pool, *r))),
         ExprNode::VecLiteral(ids) => Rank::VecLiteral(ids.iter().map(|&i| rank(pool, i)).collect()),
         ExprNode::Transpose(inner) => Rank::Transpose(Box::new(rank(pool, *inner))),
-        ExprNode::Index(base, index) => Rank::Index(
-            Box::new(rank(pool, *base)),
-            Box::new(rank(pool, *index)),
-        ),
+        ExprNode::Index(base, key) => Rank::Index(Box::new(rank(pool, *base)), key.clone()),
         ExprNode::Member(base, name) => {
             Rank::Member(Box::new(rank(pool, *base)), name.clone())
         }
@@ -188,6 +199,12 @@ pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
             Box::new(rank(pool, *r)),
         ),
         ExprNode::Block(ids) => Rank::Block(ids.iter().map(|&i| rank(pool, i)).collect()),
+        ExprNode::MapLiteral(entries) => Rank::MapLiteral(
+            entries
+                .iter()
+                .map(|(k, id)| (k.clone(), rank(pool, *id)))
+                .collect(),
+        ),
         ExprNode::Binding(_, rhs) => rank(pool, *rhs),
         ExprNode::Lambda(params, body_id) => {
             let param_ranks: Vec<(String, Option<Rank>)> = params
@@ -316,10 +333,9 @@ fn canonicalize_rec(
             let new_inner = canonicalize_rec(pool, out, *inner);
             out.intern(ExprNode::Transpose(new_inner), span)
         }
-        ExprNode::Index(base, index) => {
+        ExprNode::Index(base, key) => {
             let new_base = canonicalize_rec(pool, out, *base);
-            let new_index = canonicalize_rec(pool, out, *index);
-            out.intern(ExprNode::Index(new_base, new_index), span)
+            out.intern(ExprNode::Index(new_base, key.clone()), span)
         }
         ExprNode::Member(base, name) => {
             let new_base = canonicalize_rec(pool, out, *base);
@@ -385,6 +401,13 @@ fn canonicalize_rec(
                 .map(|&id| canonicalize_rec(pool, out, id))
                 .collect();
             out.intern(ExprNode::Block(new_ids), span)
+        }
+        ExprNode::MapLiteral(entries) => {
+            let new_entries: Vec<(String, ExprId)> = entries
+                .iter()
+                .map(|(k, id)| (k.clone(), canonicalize_rec(pool, out, *id)))
+                .collect();
+            out.intern(ExprNode::MapLiteral(new_entries), span)
         }
         ExprNode::Binding(name, rhs) => {
             let new_rhs = canonicalize_rec(pool, out, *rhs);

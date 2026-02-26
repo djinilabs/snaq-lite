@@ -11,6 +11,7 @@ use crate::fuzzy::FuzzyBool;
 use crate::quantity::Quantity;
 use crate::symbolic::Value;
 use crate::user_function::UserFunction;
+use crate::map_registry;
 use crate::vector_registry;
 use im::OrdMap;
 use std::cell::RefCell;
@@ -33,10 +34,12 @@ pub enum StoredValue {
     Vector(vector_registry::VectorId),
     /// Built-in function by name (e.g. sqrt, sin); storable so e.g. f = sqrt works.
     BuiltinFunction(String),
+    /// Map (id into map_registry; payload stored there because Value in entries is not Eq+Hash).
+    Map(map_registry::MapId),
 }
 
 impl StoredValue {
-    /// Convert from runtime Value. Returns Err for Vector or Symbolic (cannot store in scope in v1).
+    /// Convert from runtime Value. Returns Err for Symbolic (cannot store in scope). Vector and Map are stored by id in their registries.
     pub fn from_value(v: &Value) -> Result<Self, crate::error::RunError> {
         match v {
             Value::Numeric(q) => Ok(StoredValue::Numeric(q.clone())),
@@ -53,6 +56,13 @@ impl StoredValue {
             }
             Value::Function(uf) => Ok(StoredValue::Function(uf.clone())),
             Value::BuiltinFunction(name) => Ok(StoredValue::BuiltinFunction(name.clone())),
+            Value::Map(id) => {
+                let entries = map_registry::get(*id).ok_or_else(|| {
+                    crate::error::RunError::new(crate::error::RunErrorKind::UndefinedResult)
+                })?;
+                let id = map_registry::register(entries);
+                Ok(StoredValue::Map(id))
+            }
         }
     }
 
@@ -67,6 +77,7 @@ impl StoredValue {
                 .map(Value::Vector)
                 .unwrap_or(Value::Undefined),
             StoredValue::BuiltinFunction(name) => Value::BuiltinFunction(name.clone()),
+            StoredValue::Map(id) => Value::Map(*id),
         }
     }
 }

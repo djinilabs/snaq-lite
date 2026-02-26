@@ -21,6 +21,7 @@ pub mod user_function;
 pub mod unit_registry;
 pub mod vector;
 pub mod vector_registry;
+pub mod map_registry;
 
 pub use error::{format_run_error_with_source, ParseError, RunError, RunErrorKind, Span};
 pub use quantity::{Quantity, QuantityError, SnaqNumber};
@@ -90,6 +91,7 @@ fn format_value_for_display(db: &dyn salsa::Database, value: &Value) -> Result<S
             }
             Ok(format!("[{}]", parts.join(", ")))
         }
+        Value::Map(_) => Ok("<map>".to_string()),
     }
 }
 
@@ -2208,6 +2210,133 @@ mod tests {
     fn run_vector_index_bracket() {
         assert_eq!(run_format("[1, 2, 3, 4][2]").unwrap(), "3");
         assert_eq!(run_format("[1, 2, 3, 4][0]").unwrap(), "1");
+    }
+
+    #[test]
+    fn run_bracket_key_trimmed() {
+        assert_eq!(run_format("[1, 2, 3, 4][ 1 ]").unwrap(), "2");
+        assert_eq!(run_format("[10, 20][  0  ]").unwrap(), "10");
+    }
+
+    #[test]
+    fn run_bracket_key_variable() {
+        assert_eq!(run_format("i = 1; [10, 20, 30][i]").unwrap(), "20");
+        assert_eq!(run_format("idx = 0; [7, 8, 9][idx]").unwrap(), "7");
+    }
+
+    #[test]
+    fn parse_map_literal() {
+        use crate::ir::ExprDef;
+        let r = parse("{ a: 1, b: 2 }").unwrap().to_expr_def();
+        assert!(matches!(r, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::MapLiteral(ref entries) if entries.len() == 2 && entries[0].0 == "a" && entries[1].0 == "b")));
+    }
+
+    #[test]
+    fn parse_map_vs_block_disambiguation() {
+        use crate::ir::ExprDef;
+        let block = parse("{ a = 1 }").unwrap().to_expr_def();
+        assert!(matches!(block, ExprDef::Block(_)));
+        let map = parse("{ a: 1 }").unwrap().to_expr_def();
+        assert!(matches!(map, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::MapLiteral(_))));
+    }
+
+    #[test]
+    fn parse_empty_braces_is_block_not_map() {
+        use crate::ir::ExprDef;
+        let r = parse("{ }").unwrap().to_expr_def();
+        assert!(matches!(r, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Block(inner) if inner.is_empty())));
+    }
+
+    #[test]
+    fn run_map_literal() {
+        assert_eq!(run_format("{ x: 10 }").unwrap(), "<map>");
+        assert_eq!(run_format("{ a: 1, b: 2 }.a").unwrap(), "1");
+        assert_eq!(run_format("{ a: 1, b: 2 }[b]").unwrap(), "2");
+    }
+
+    #[test]
+    fn run_map_bracket_key_trimmed() {
+        assert_eq!(run_format("m = { key: 7 }; m[ key ]").unwrap(), "7");
+        assert_eq!(run_format("m = { key: 7 }; m[  key  ]").unwrap(), "7");
+    }
+
+    #[test]
+    fn run_map_missing_key_returns_undefined() {
+        assert_eq!(run_format("{ a: 1 }.b").unwrap(), "undefined");
+        assert_eq!(run_format("{ a: 1 }[missing]").unwrap(), "undefined");
+    }
+
+    #[test]
+    fn run_map_binding() {
+        assert_eq!(run_format("m = { x: 5, y: 10 }; m.x + m.y").unwrap(), "15");
+        assert_eq!(run_format("m = { a: 1 }; m.a").unwrap(), "1");
+    }
+
+    #[test]
+    fn run_map_nested() {
+        assert_eq!(run_format("{ outer: { inner: 99 } }.outer.inner").unwrap(), "99");
+    }
+
+    #[test]
+    fn run_map_dot_and_bracket_same_key() {
+        assert_eq!(run_format("{ a: 42 }.a").unwrap(), "42");
+        assert_eq!(run_format("{ a: 42 }[a]").unwrap(), "42");
+        assert_eq!(run_format("m = { x: 10 }; m.x").unwrap(), "10");
+        assert_eq!(run_format("m = { x: 10 }; m[x]").unwrap(), "10");
+    }
+
+    #[test]
+    fn run_map_value_undefined() {
+        // Empty block yields Undefined; map value can be undefined
+        assert_eq!(run_format("{ a: {} }.a").unwrap(), "undefined");
+    }
+
+    #[test]
+    fn run_map_value_vector() {
+        // Map entry can be a vector; member and index work on the stored vector
+        assert_eq!(run_format("{ v: [1, 2, 3] }.v.length").unwrap(), "3");
+        assert_eq!(run_format("{ v: [1, 2, 3] }.v[1]").unwrap(), "2");
+        assert_eq!(run_format("m = { arr: [10, 20] }; m.arr[0]").unwrap(), "10");
+    }
+
+    #[test]
+    fn run_numeric_map_returns_err() {
+        let e = run_numeric("{ a: 1 }").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::UnsupportedVectorOperation));
+        let e = run_numeric("m = { x: 5 }; m").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::UnsupportedVectorOperation));
+    }
+
+    #[test]
+    fn run_index_on_non_vector_non_map_errors() {
+        // Index on number (or other non-map, non-vector) → ExpectedVector
+        let e = run("(5)[0]").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::ExpectedVector));
+        let e = run("(3)[key]").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::ExpectedVector));
+    }
+
+    #[test]
+    fn run_map_member_on_number_still_errors() {
+        // Member on number → ExpectedVector (same as before maps)
+        let e = run("(5).x").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::ExpectedVector));
+    }
+
+    #[test]
+    fn run_map_order_preserved() {
+        // Keys are ordered; first and second entry accessible by position of definition
+        assert_eq!(run_format("{ first: 1, second: 2 }.first").unwrap(), "1");
+        assert_eq!(run_format("{ first: 1, second: 2 }.second").unwrap(), "2");
+        assert_eq!(run_format("{ first: 1, second: 2 }[first]").unwrap(), "1");
+        assert_eq!(run_format("{ first: 1, second: 2 }[second]").unwrap(), "2");
+    }
+
+    #[test]
+    fn run_map_duplicate_key_first_wins() {
+        // Duplicate keys: first occurrence wins
+        assert_eq!(run_format("{ a: 1, a: 2 }.a").unwrap(), "1");
+        assert_eq!(run_format("{ a: 1, a: 2 }[a]").unwrap(), "1");
     }
 
     #[test]

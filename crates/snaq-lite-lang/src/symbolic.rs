@@ -606,6 +606,8 @@ pub enum Value {
     Function(Box<crate::user_function::UserFunction>),
     /// Built-in function by name (e.g. sqrt, sin); usable where a lambda is required (e.g. .map()).
     BuiltinFunction(String),
+    /// Map (object) stored by id in map_registry; ordered key-value pairs.
+    Map(u64),
 }
 
 impl Value {
@@ -635,6 +637,7 @@ impl Value {
             Value::Function(_) | Value::BuiltinFunction(_) => Err(RunError::new(RunErrorKind::BindingValueNotSupported(
                 "function value cannot be converted to quantity".to_string(),
             ))),
+            Value::Map(_) => Err(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
         }
     }
 
@@ -660,6 +663,7 @@ impl fmt::Display for Value {
             Value::Vector(v) => write!(f, "{v}"),
             Value::Undefined => write!(f, "undefined"),
             Value::Function(_) | Value::BuiltinFunction(_) => write!(f, "<function>"),
+            Value::Map(_) => write!(f, "<map>"),
         }
     }
 }

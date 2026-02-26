@@ -102,13 +102,16 @@ pub enum SpannedExprDefKind {
     As(Box<SpannedExprDef>, Box<SpannedExprDef>),
     VecLiteral(Vec<SpannedExprDef>),
     Transpose(Box<SpannedExprDef>),
-    Index(Box<SpannedExprDef>, Box<SpannedExprDef>),
+    /// Bracket or dot-num index: key string (bracket content trimmed, or ".0" → "0").
+    Index(Box<SpannedExprDef>, String),
     Member(Box<SpannedExprDef>, String),
     MethodCall(Box<SpannedExprDef>, String, Vec<SpannedCallArg>),
     If(Box<SpannedExprDef>, Box<SpannedExprDef>, Box<SpannedExprDef>),
     WithPrecision(Box<SpannedExprDef>, Box<SpannedExprDef>),
     Block(Vec<SpannedExprDef>),
     Binding(String, Box<SpannedExprDef>),
+    /// Map literal: { key: value, ... }. At least one entry; keys are unquoted idents.
+    MapLiteral(Vec<(String, SpannedExprDef)>),
 }
 
 impl SpannedExprDef {
@@ -161,9 +164,7 @@ impl SpannedExprDef {
             SpannedExprDefKind::As(l, r) => ExprDef::As(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
             SpannedExprDefKind::VecLiteral(elems) => ExprDef::VecLiteral(elems.iter().map(|e| e.to_expr_def()).collect()),
             SpannedExprDefKind::Transpose(inner) => ExprDef::Transpose(Box::new(inner.to_expr_def())),
-            SpannedExprDefKind::Index(base, index) => {
-                ExprDef::Index(Box::new(base.to_expr_def()), Box::new(index.to_expr_def()))
-            }
+            SpannedExprDefKind::Index(base, key) => ExprDef::Index(Box::new(base.to_expr_def()), key.clone()),
             SpannedExprDefKind::Member(base, name) => ExprDef::Member(Box::new(base.to_expr_def()), name.clone()),
             SpannedExprDefKind::MethodCall(base, name, args) => ExprDef::MethodCall(
                 Box::new(base.to_expr_def()),
@@ -185,6 +186,12 @@ impl SpannedExprDef {
             }
             SpannedExprDefKind::Block(list) => ExprDef::Block(list.iter().map(|e| e.to_expr_def()).collect()),
             SpannedExprDefKind::Binding(name, rhs) => ExprDef::Binding(name.clone(), Box::new(rhs.to_expr_def())),
+            SpannedExprDefKind::MapLiteral(entries) => ExprDef::MapLiteral(
+                entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Box::new(v.to_expr_def())))
+                    .collect(),
+            ),
         }
     }
 }
@@ -232,8 +239,8 @@ pub enum ExprDef {
     VecLiteral(Vec<ExprDef>),
     /// Postfix transpose: `expr'` (e.g. [1,2,3]'). Inner must evaluate to a vector.
     Transpose(Box<ExprDef>),
-    /// Index/single-element access: `V[index]` or `V.0`. Base must be vector; index 0-based; yields scalar.
-    Index(Box<ExprDef>, Box<ExprDef>),
+    /// Index/key access: `V[key]` or `V.0`. Key is string (bracket content trimmed, or ".0" → "0"). Vector: key parsed as int or variable; map: key for lookup.
+    Index(Box<ExprDef>, String),
     /// Property access: `V.length`. Base and property name; dispatch at eval (e.g. vector.length).
     Member(Box<ExprDef>, String),
     /// Method call: `V.map(fn)`, `V.take(1, 3)`. Base, method name, args; dispatch at eval.
@@ -246,6 +253,8 @@ pub enum ExprDef {
     Block(Vec<ExprDef>),
     /// Variable binding (in block context): name = value_expr. Extends scope for subsequent items.
     Binding(String, Box<ExprDef>),
+    /// Map literal: { key: value, ... }. At least one entry.
+    MapLiteral(Vec<(String, Box<ExprDef>)>),
 }
 
 /// Input that holds the root expression definition.
@@ -299,8 +308,8 @@ pub enum ExprData<'db> {
     VecLiteral(Vec<Expression<'db>>),
     /// Postfix transpose: inner must evaluate to a vector.
     Transpose(Expression<'db>),
-    /// Index/single-element access: base must be vector, index 0-based; yields scalar.
-    Index(Expression<'db>, Expression<'db>),
+    /// Index/key access: key string (bracket trimmed or dot-num). Vector: key → integer index; map: key for lookup.
+    Index(Expression<'db>, String),
     /// Property access: base and property name (e.g. vector.length).
     Member(Expression<'db>, String),
     /// Method call: base, method name, args (e.g. vector.map(fn), vector.take(1, 3)).
@@ -313,4 +322,6 @@ pub enum ExprData<'db> {
     Block(Vec<Expression<'db>>),
     /// Variable binding (in block context): name = value_expr.
     Binding(String, Expression<'db>),
+    /// Map literal: { key: value, ... }. At least one entry.
+    MapLiteral(Vec<(String, Expression<'db>)>),
 }

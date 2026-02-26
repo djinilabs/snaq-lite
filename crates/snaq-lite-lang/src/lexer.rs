@@ -35,6 +35,8 @@ pub enum Tok {
     LBracket,
     /// Vector literal end: `]`
     RBracket,
+    /// Bracket key: content between `[` and `]` when used as index/key (e.g. m[foo bar]); trimmed.
+    BracketKey(String),
     /// Property/index access: `V.0`, `V.1` (dot before integer).
     Dot,
     /// Postfix transpose: `'` (e.g. [1,2,3]')
@@ -113,6 +115,10 @@ pub struct Lexer<'input> {
     any_token_emitted: bool,
     /// True after emitting Dot; so ". map (" yields MethodIdent("map") and ". length" yields Ident("length").
     after_dot: bool,
+    /// True after a token that can end a PostfixFactor (Ident, Num, RParen, RBracket, RBrace); next `[` emits BracketKey(content until `]` trimmed) instead of LBracket.
+    after_postfix_factor: bool,
+    /// When we emit BracketKey we produce multiple tokens; buffer (start, tok, end) to return in order.
+    token_buffer: Vec<(usize, Tok, usize)>,
 }
 
 impl<'input> Lexer<'input> {
@@ -123,6 +129,8 @@ impl<'input> Lexer<'input> {
             last_was_number: false,
             any_token_emitted: false,
             after_dot: false,
+            after_postfix_factor: false,
+            token_buffer: Vec::new(),
         }
     }
 
@@ -222,7 +230,12 @@ impl<'input> Lexer<'input> {
 impl<'input> Iterator for Lexer<'input> {
     type Item = Spanned<Tok, usize, LexicalError>;
 
+    #[allow(clippy::cognitive_complexity)]
     fn next(&mut self) -> Option<Self::Item> {
+        if let Some((start, tok, end)) = self.token_buffer.pop() {
+            self.after_postfix_factor = matches!(&tok, Tok::RBracket);
+            return Some(Ok((start, tok, end)));
+        }
         self.skip_whitespace();
         if self.pos >= self.input.len() {
             return None;
@@ -329,6 +342,35 @@ impl<'input> Iterator for Lexer<'input> {
         let c = it.next()?;
         self.pos += c.len_utf8();
 
+        // When after a PostfixFactor, `[` starts bracket-key: read until `]`, trim, emit LBracket + BracketKey + RBracket.
+        if c == '[' && self.after_postfix_factor {
+            let lbracket_end = self.pos;
+            let key_start = self.pos;
+            let mut depth = 1u32;
+            let mut key_end = self.pos;
+            while depth > 0 && self.pos < self.input.len() {
+                let rest_inner = &self.input[self.pos..];
+                let ch = rest_inner.chars().next()?;
+                self.pos += ch.len_utf8();
+                match ch {
+                    '[' => depth += 1,
+                    ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            key_end = self.pos - ch.len_utf8();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let key = self.input[key_start..key_end].trim().to_string();
+            self.token_buffer.push((key_end, Tok::RBracket, self.pos));
+            self.token_buffer.push((key_start, Tok::BracketKey(key), key_end));
+            self.token_buffer.push((start, Tok::LBracket, lbracket_end));
+            self.after_postfix_factor = false;
+            return self.next();
+        }
+
         let tok = match c {
             '(' => Tok::LParen,
             ')' => Tok::RParen,
@@ -413,6 +455,11 @@ impl<'input> Iterator for Lexer<'input> {
         self.last_was_number = matches!(&tok, Tok::Num(_));
         self.any_token_emitted = true;
         self.after_dot = matches!(&tok, Tok::Dot);
+        self.after_postfix_factor = matches!(
+            &tok,
+            Tok::Num(_) | Tok::Ident(_) | Tok::FuncIdent(_) | Tok::MethodIdent(_)
+                | Tok::RParen | Tok::RBracket | Tok::RBrace
+        );
         let end = self.pos;
         Some(Ok((start, tok, end)))
     }

@@ -58,14 +58,20 @@ pub fn spanned_expr_def_to_interned(def: &SpannedExprDef, pool: &mut ExprInterne
             let ids: Vec<_> = elems.iter().map(|e| spanned_expr_def_to_interned(e, pool)).collect();
             pool.intern(ExprNode::VecLiteral(ids), span)
         }
+        SpannedExprDefKind::MapLiteral(entries) => {
+            let ids: Vec<(String, ExprId)> = entries
+                .iter()
+                .map(|(k, v)| (k.clone(), spanned_expr_def_to_interned(v, pool)))
+                .collect();
+            pool.intern(ExprNode::MapLiteral(ids), span)
+        }
         SpannedExprDefKind::Transpose(inner) => {
             let id = spanned_expr_def_to_interned(inner, pool);
             pool.intern(ExprNode::Transpose(id), span)
         }
-        SpannedExprDefKind::Index(base, index) => {
+        SpannedExprDefKind::Index(base, key) => {
             let base_id = spanned_expr_def_to_interned(base, pool);
-            let index_id = spanned_expr_def_to_interned(index, pool);
-            pool.intern(ExprNode::Index(base_id, index_id), span)
+            pool.intern(ExprNode::Index(base_id, key.clone()), span)
         }
         SpannedExprDefKind::Member(base, name) => {
             let base_id = spanned_expr_def_to_interned(base, pool);
@@ -231,10 +237,9 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
             let id = expr_def_to_interned(inner, pool);
             pool.intern(ExprNode::Transpose(id), span)
         }
-        ExprDef::Index(base, index) => {
+        ExprDef::Index(base, key) => {
             let base_id = expr_def_to_interned(base, pool);
-            let index_id = expr_def_to_interned(index, pool);
-            pool.intern(ExprNode::Index(base_id, index_id), span)
+            pool.intern(ExprNode::Index(base_id, key.clone()), span)
         }
         ExprDef::Member(base, name) => {
             let base_id = expr_def_to_interned(base, pool);
@@ -335,6 +340,13 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
                 .collect();
             pool.intern(ExprNode::CallExpr(callee_id, arg_ids), span)
         }
+        ExprDef::MapLiteral(entries) => {
+            let ids: Vec<(String, ExprId)> = entries
+                .iter()
+                .map(|(k, v)| (k.clone(), expr_def_to_interned(v, pool)))
+                .collect();
+            pool.intern(ExprNode::MapLiteral(ids), span)
+        }
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved ExprDef: resolve() must be called before CAS")
         }
@@ -386,9 +398,9 @@ pub fn interned_to_spanned_expr_def(pool: &ExprInterner, id: ExprId) -> SpannedE
         ExprNode::Transpose(inner) => {
             SpannedExprDefKind::Transpose(Box::new(interned_to_spanned_expr_def(pool, *inner)))
         }
-        ExprNode::Index(base, index) => SpannedExprDefKind::Index(
+        ExprNode::Index(base, key) => SpannedExprDefKind::Index(
             Box::new(interned_to_spanned_expr_def(pool, *base)),
-            Box::new(interned_to_spanned_expr_def(pool, *index)),
+            key.clone(),
         ),
         ExprNode::Member(base_id, name) => SpannedExprDefKind::Member(
             Box::new(interned_to_spanned_expr_def(pool, *base_id)),
@@ -456,6 +468,12 @@ pub fn interned_to_spanned_expr_def(pool: &ExprInterner, id: ExprId) -> SpannedE
         ExprNode::Binding(name, rhs_id) => SpannedExprDefKind::Binding(
             name.clone(),
             Box::new(interned_to_spanned_expr_def(pool, *rhs_id)),
+        ),
+        ExprNode::MapLiteral(entries) => SpannedExprDefKind::MapLiteral(
+            entries
+                .iter()
+                .map(|(k, id)| (k.clone(), interned_to_spanned_expr_def(pool, *id)))
+                .collect(),
         ),
         ExprNode::Lambda(params, body_id) => {
             let params: Vec<(String, Option<Box<SpannedExprDef>>)> = params

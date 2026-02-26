@@ -19,6 +19,7 @@ extern {
         ")" => Tok::RParen,
         "[" => Tok::LBracket,
         "]" => Tok::RBracket,
+        BracketKey => Tok::BracketKey(<String>),
         "." => Tok::Dot,
         "+" => Tok::Plus,
         "-" => Tok::Minus,
@@ -385,12 +386,12 @@ PostfixFactor: SpannedExprDef = {
             vec![SpannedCallArg::Positional(Box::new(f))],
         ),
     },
-    <lo:@L> <f:PostfixFactor> "[" <index:Expr> "]" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Index(Box::new(f), Box::new(index)) },
+    <lo:@L> <f:PostfixFactor> "[" <key:BracketKey> "]" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Index(Box::new(f), key) },
     <lo:@L> <f:PostfixFactor> "." <id:MethodIdent> "(" <args:ArgList> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::MethodCall(Box::new(f), id, args) },
     <lo:@L> <f:PostfixFactor> "." <id:Ident> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Member(Box::new(f), id) },
     <lo:@L> <f:PostfixFactor> "." <n:Num> <hi:@R> => SpannedExprDef {
         span: Span { start: lo, end: hi },
-        value: SpannedExprDefKind::Index(Box::new(f), Box::new(SpannedExprDef { span: Span { start: lo + 1, end: hi }, value: SpannedExprDefKind::LitScalar(n) }))
+        value: SpannedExprDefKind::Index(Box::new(f), n.raw.clone())
     },
     <lo:@L> <f:PostfixFactor> "'" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Transpose(Box::new(f)) },
     Factor,
@@ -440,7 +441,25 @@ Factor: SpannedExprDef = {
     <ii:IdentIdents> => ii,
     <lo:@L> "(" <e:Expr> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: e.value },
     <lo:@L> "[" <elems:VecExprList> "]" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::VecLiteral(elems) },
+    <lo:@L> "{" <k:Ident> ":" <v:Expr> <rest:MapEntryListRest> "}" <hi:@R> => SpannedExprDef {
+        span: Span { start: lo, end: hi },
+        value: SpannedExprDefKind::MapLiteral({
+            let mut e = vec![(k, v)];
+            e.extend(rest);
+            e
+        }),
+    },
     <lo:@L> <content:BlockBracedContent> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Block(content) },
+};
+
+// Map literal: { key: value, ... }. At least one entry (empty {} is block). Keys are unquoted idents.
+MapEntryListRest: Vec<(String, SpannedExprDef)> = {
+    => vec![],
+    "," <k:Ident> ":" <v:Expr> <rest:MapEntryListRest> => {
+        let mut r = vec![(k, v)];
+        r.extend(rest);
+        r
+    },
 };
 
 // Comma-separated list of expressions for vector literal: [ expr, expr, ... ] or [].

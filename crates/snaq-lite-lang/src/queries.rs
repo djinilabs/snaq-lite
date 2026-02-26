@@ -7,7 +7,8 @@
 use crate::error::{RunError, RunErrorKind, Span};
 use crate::functions;
 use crate::ir::{CallArg, ExprData, ExprDef, Expression, ProgramDef, SpannedExprDef, SpannedExprDefKind};
-use crate::scope::{closure_env_get, closure_env_register, Scope, StoredValue};
+use crate::map_registry;
+use crate::scope::{closure_env_get, closure_env_register, Env, Scope, StoredValue};
 use crate::user_function;
 use crate::quantity::Quantity;
 use crate::stat_compare::{
@@ -693,6 +694,40 @@ fn collect_vector_stream(
     futures::executor::block_on(async move { stream.collect().await })
 }
 
+/// Parse bracket-key string as vector index: non-negative integer literal, or variable name (look up in scope).
+fn parse_index_key(
+    env: &Env,
+    key_string: &str,
+) -> Result<usize, RunErrorKind> {
+    if let Ok(n) = key_string.parse::<u64>() {
+        let u = n as usize;
+        if u as u64 == n {
+            return Ok(u);
+        }
+    }
+    if let Some(stored) = env.get(key_string) {
+        let val = stored.to_value();
+        let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+        if let Ok(q) = val.to_quantity(&sym_reg) {
+            let f = q.value();
+            if !f.is_finite() || f < 0.0 {
+                return Err(RunErrorKind::InvalidIndex(
+                    "index must be a non-negative integer".to_string(),
+                ));
+            }
+            if f.fract() != 0.0 {
+                return Err(RunErrorKind::InvalidIndex(
+                    "index must be an integer".to_string(),
+                ));
+            }
+            return Ok(f as usize);
+        }
+    }
+    Err(RunErrorKind::InvalidIndex(
+        "index must be a non-negative integer or a variable name".to_string(),
+    ))
+}
+
 /// Build the tracked expression graph from the program definition; returns the root.
 /// When [ProgramDef::spanned_root] is set, each node gets a source span for runtime error location.
 #[salsa::tracked]
@@ -907,6 +942,24 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef, spanned: Option<Span
                 .collect();
             ExprData::VecLiteral(exprs)
         }
+        ExprDef::MapLiteral(entries) => {
+            let value_spans = spanned.as_ref().and_then(|s| {
+                if let SpannedExprDefKind::MapLiteral(es) = &s.value {
+                    Some(es.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>())
+                } else {
+                    None
+                }
+            });
+            let exprs: Vec<(String, Expression<'_>)> = entries
+                .into_iter()
+                .enumerate()
+                .map(|(i, (k, d))| {
+                    let child_span = value_spans.as_ref().and_then(|v| v.get(i).cloned());
+                    (k, build_expression(db, *d, child_span))
+                })
+                .collect();
+            ExprData::MapLiteral(exprs)
+        }
         ExprDef::Transpose(inner) => {
             let inner_s = child1(&spanned, |s| {
                 if let SpannedExprDefKind::Transpose(x) = &s.value {
@@ -918,17 +971,16 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef, spanned: Option<Span
             let inner_expr = build_expression(db, *inner, inner_s);
             ExprData::Transpose(inner_expr)
         }
-        ExprDef::Index(base, index) => {
-            let (bs, is) = children2(&spanned, |s| {
-                if let SpannedExprDefKind::Index(b, i) = &s.value {
-                    Some((*b.clone(), *i.clone()))
+        ExprDef::Index(base, key) => {
+            let base_s = child1(&spanned, |s| {
+                if let SpannedExprDefKind::Index(b, _) = &s.value {
+                    Some((**b).clone())
                 } else {
                     None
                 }
             });
-            let base_expr = build_expression(db, *base, bs);
-            let index_expr = build_expression(db, *index, is);
-            ExprData::Index(base_expr, index_expr)
+            let base_expr = build_expression(db, *base, base_s);
+            ExprData::Index(base_expr, key)
         }
         ExprDef::Member(base, name) => {
             let base_s = child1(&spanned, |s| {
@@ -1242,6 +1294,7 @@ pub fn value<'db>(
                     Ok(Value::Symbolic(SymbolicQuantity::new(scaled, target_unit)))
                 }
                 Value::Vector(_) => Err(run_err_with_span(db, expr, RunErrorKind::UnsupportedVectorOperation)),
+                Value::Map(_) => Err(run_err_with_span(db, expr, RunErrorKind::UnsupportedVectorOperation)),
                 Value::Undefined => Err(run_err_with_span(db, expr, RunErrorKind::UndefinedResult)),
                 Value::Function(_) | Value::BuiltinFunction(_) => Err(run_err_with_span(db, expr, RunErrorKind::BindingValueNotSupported(
                     "function value cannot be converted to quantity".to_string(),
@@ -1259,6 +1312,14 @@ pub fn value<'db>(
                 results,
             ))))
         }
+        ExprData::MapLiteral(entries) => {
+            let evaluated: Vec<(String, Value)> = entries
+                .iter()
+                .map(|(k, e)| Ok((k.clone(), value(db, scope, *e)?)))
+                .collect::<Result<Vec<_>, RunError>>()?;
+            let id = map_registry::register(evaluated);
+            Ok(Value::Map(id))
+        }
         ExprData::Transpose(inner) => {
             let v = value(db, scope, *inner)?;
             match v {
@@ -1268,17 +1329,23 @@ pub fn value<'db>(
         }
         ExprData::Member(base, name) => {
             let base_val = value(db, scope, *base)?;
-            let VectorValue { inner, .. } = match &base_val {
-                Value::Vector(v) => v.clone(),
-                _ => return Err(run_err_with_span(db, expr, RunErrorKind::ExpectedVector)),
-            };
-            match name.as_str() {
-                "length" => {
-                    let collected = collect_vector_stream(db, inner);
-                    let len = collected.len();
-                    Ok(Value::Numeric(Quantity::from_exact_scalar(len as f64)))
+            match &base_val {
+                Value::Map(id) => {
+                    let v = map_registry::get_key(*id, name);
+                    Ok(v.unwrap_or(Value::Undefined))
                 }
-                _ => Err(run_err_with_span(db, expr, RunErrorKind::UnknownProperty(name.clone()))),
+                Value::Vector(v) => {
+                    let VectorValue { inner, .. } = v.clone();
+                    match name.as_str() {
+                        "length" => {
+                            let collected = collect_vector_stream(db, inner);
+                            let len = collected.len();
+                            Ok(Value::Numeric(Quantity::from_exact_scalar(len as f64)))
+                        }
+                        _ => Err(run_err_with_span(db, expr, RunErrorKind::UnknownProperty(name.clone()))),
+                    }
+                }
+                _ => Err(run_err_with_span(db, expr, RunErrorKind::ExpectedVector)),
             }
         }
         ExprData::MethodCall(base, name, args) => {
@@ -1615,45 +1682,37 @@ pub fn value<'db>(
                 _ => Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(name.clone()))),
             }
         }
-        ExprData::Index(base, index_expr) => {
+        ExprData::Index(base, key_string) => {
             let base_val = value(db, scope, *base)?;
-            let VectorValue { inner, .. } = match &base_val {
-                Value::Vector(v) => v.clone(),
-                _ => return Err(run_err_with_span(db, expr, RunErrorKind::ExpectedVector)),
-            };
-            let index_val = value(db, scope, *index_expr)?;
-            let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
-            let index_q = index_val.to_quantity(&sym_reg).map_err(|_| {
-                RunError::new(RunErrorKind::InvalidIndex("index must be numeric".to_string()))
-            })?;
-            let index_f = index_q.value();
-            if !index_f.is_finite() || index_f < 0.0 {
-                return Err(run_err_with_span(db, expr, RunErrorKind::InvalidIndex(
-                    "index must be a non-negative integer".to_string(),
-                )));
-            }
-            if index_f.fract() != 0.0 {
-                return Err(run_err_with_span(db, expr, RunErrorKind::InvalidIndex(
-                    "index must be an integer".to_string(),
-                )));
-            }
-            let index_u = index_f as usize;
-            let slice = LazyVector::Take {
-                source: Box::new(inner),
-                start: index_u,
-                length: 1,
-            };
-            let collected = collect_vector_stream(db, slice);
-            if collected.is_empty() {
-                return Err(run_err_with_span(db, expr, RunErrorKind::IndexOutOfBounds {
-                    index: index_u,
-                    length: index_u,
-                }));
-            }
-            match &collected[0] {
-                Ok(Some(elem)) => Ok(elem.clone()),
-                Ok(None) => Ok(Value::Undefined),
-                Err(e) => Err(e.clone()),
+            let env = scope.env(db);
+            match &base_val {
+                Value::Map(id) => {
+                    let v = map_registry::get_key(*id, key_string);
+                    Ok(v.unwrap_or(Value::Undefined))
+                }
+                Value::Vector(v) => {
+                    let VectorValue { inner, .. } = v.clone();
+                    let index_u = parse_index_key(env, key_string)
+                        .map_err(|k| run_err_with_span(db, expr, k))?;
+                    let slice = LazyVector::Take {
+                        source: Box::new(inner),
+                        start: index_u,
+                        length: 1,
+                    };
+                    let collected = collect_vector_stream(db, slice);
+                    if collected.is_empty() {
+                        return Err(run_err_with_span(db, expr, RunErrorKind::IndexOutOfBounds {
+                            index: index_u,
+                            length: index_u,
+                        }));
+                    }
+                    match &collected[0] {
+                        Ok(Some(elem)) => Ok(elem.clone()),
+                        Ok(None) => Ok(Value::Undefined),
+                        Err(e) => Err(e.clone()),
+                    }
+                }
+                _ => Err(run_err_with_span(db, expr, RunErrorKind::ExpectedVector)),
             }
         }
         ExprData::WithPrecision(left, right) => {
@@ -1819,10 +1878,16 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
                 .map(|e| expression_to_def(db, *e))
                 .collect(),
         ),
+        ExprData::MapLiteral(entries) => ExprDef::MapLiteral(
+            entries
+                .iter()
+                .map(|(k, e)| (k.clone(), Box::new(expression_to_def(db, *e))))
+                .collect(),
+        ),
         ExprData::Transpose(inner) => ExprDef::Transpose(Box::new(expression_to_def(db, *inner))),
-        ExprData::Index(base, index) => ExprDef::Index(
+        ExprData::Index(base, key) => ExprDef::Index(
             Box::new(expression_to_def(db, *base)),
-            Box::new(expression_to_def(db, *index)),
+            key.clone(),
         ),
         ExprData::Member(base, name) => ExprDef::Member(
             Box::new(expression_to_def(db, *base)),
@@ -2242,6 +2307,7 @@ fn value_to_symbolic_expr(v: &Value) -> SymbolicExpr {
         Value::Vector(_) => panic!("value_to_symbolic_expr: vector not supported"),
         Value::Undefined => panic!("value_to_symbolic_expr: undefined not supported"),
         Value::Function(_) | Value::BuiltinFunction(_) => panic!("value_to_symbolic_expr: function not supported"),
+        Value::Map(_) => panic!("value_to_symbolic_expr: map not supported"),
     }
 }
 
@@ -3131,6 +3197,7 @@ fn neg_value(v: &Value, span: Option<Span>) -> Result<Value, RunError> {
             SymbolicExpr::neg(&sq.expr),
             sq.unit.clone(),
         ))),
+        Value::Map(_) => Err(err(RunErrorKind::UnsupportedVectorOperation)),
     }
 }
 
@@ -3142,6 +3209,7 @@ fn value_to_expr_unit(v: &Value) -> (SymbolicExpr, Unit) {
         Value::Vector(_) => panic!("value_to_expr_unit: vector not supported"),
         Value::Undefined => panic!("value_to_expr_unit: undefined not supported"),
         Value::Function(_) | Value::BuiltinFunction(_) => panic!("value_to_expr_unit: function not supported"),
+        Value::Map(_) => panic!("value_to_expr_unit: map not supported"),
     }
 }
 
@@ -3188,5 +3256,6 @@ RunError::new(RunErrorKind::DimensionMismatch { left, right })
         Value::Vector(_) => Err(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
         Value::Undefined => Err(RunError::new(RunErrorKind::UndefinedResult)),
         Value::Function(_) | Value::BuiltinFunction(_) => Err(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
+        Value::Map(_) => Err(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
     }
 }

@@ -32,10 +32,7 @@ fn collect_bound_names(def: &ExprDef) -> HashSet<String> {
                 go(r, names);
             }
             ExprDef::Neg(inner) | ExprDef::Transpose(inner) => go(inner, names),
-            ExprDef::Index(base, index) => {
-                go(base, names);
-                go(index, names);
-            }
+            ExprDef::Index(base, _key) => go(base, names),
             ExprDef::Member(base, _) => go(base, names),
             ExprDef::MethodCall(base, _, args) => {
                 go(base, names);
@@ -77,6 +74,11 @@ fn collect_bound_names(def: &ExprDef) -> HashSet<String> {
             ExprDef::VecLiteral(elems) => {
                 for e in elems {
                     go(e, names);
+                }
+            }
+            ExprDef::MapLiteral(entries) => {
+                for (_, v) in entries {
+                    go(v, names);
                 }
             }
             ExprDef::Lit(_) | ExprDef::LitFuzzyBool(_) | ExprDef::LitSymbol(_)
@@ -122,10 +124,7 @@ fn collect_bound_names_spanned(def: &SpannedExprDef) -> HashSet<String> {
                 go(r, names);
             }
             SpannedExprDefKind::Neg(inner) | SpannedExprDefKind::Transpose(inner) => go(inner, names),
-            SpannedExprDefKind::Index(base, index) => {
-                go(base, names);
-                go(index, names);
-            }
+            SpannedExprDefKind::Index(base, _key) => go(base, names),
             SpannedExprDefKind::Member(base, _) => go(base, names),
             SpannedExprDefKind::MethodCall(base, _, args) => {
                 go(base, names);
@@ -167,6 +166,11 @@ fn collect_bound_names_spanned(def: &SpannedExprDef) -> HashSet<String> {
             SpannedExprDefKind::VecLiteral(elems) => {
                 for e in elems {
                     go(e, names);
+                }
+            }
+            SpannedExprDefKind::MapLiteral(entries) => {
+                for (_, v) in entries {
+                    go(v, names);
                 }
             }
             SpannedExprDefKind::Lit(_) | SpannedExprDefKind::LitFuzzyBool(_) | SpannedExprDefKind::LitSymbol(_)
@@ -258,9 +262,9 @@ fn substitute_symbols_spanned_inner(
         SpannedExprDefKind::Transpose(inner) => {
             SpannedExprDefKind::Transpose(Box::new(substitute_symbols_spanned_inner(*inner, symbol_registry, unit_registry, bound_names)?))
         }
-        SpannedExprDefKind::Index(base, index) => SpannedExprDefKind::Index(
+        SpannedExprDefKind::Index(base, key) => SpannedExprDefKind::Index(
             Box::new(substitute_symbols_spanned_inner(*base, symbol_registry, unit_registry, bound_names)?),
-            Box::new(substitute_symbols_spanned_inner(*index, symbol_registry, unit_registry, bound_names)?),
+            key,
         ),
         SpannedExprDefKind::Member(base, name) => SpannedExprDefKind::Member(
             Box::new(substitute_symbols_spanned_inner(*base, symbol_registry, unit_registry, bound_names)?),
@@ -340,6 +344,15 @@ fn substitute_symbols_spanned_inner(
                 .map(|e| substitute_symbols_spanned_inner(e, symbol_registry, unit_registry, bound_names))
                 .collect::<Result<Vec<_>, RunError>>()?;
             SpannedExprDefKind::Block(exprs)
+        }
+        SpannedExprDefKind::MapLiteral(entries) => {
+            let entries = entries
+                .into_iter()
+                .map(|(k, v)| {
+                    Ok((k, substitute_symbols_spanned_inner(v, symbol_registry, unit_registry, bound_names)?))
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            SpannedExprDefKind::MapLiteral(entries)
         }
         SpannedExprDefKind::Lambda(params, body) => {
             let mut lambda_bound = bound_names.clone();
@@ -458,10 +471,22 @@ fn substitute_symbols_inner(
                 .collect::<Result<Vec<_>, RunError>>()?;
             Ok(ExprDef::VecLiteral(elems))
         }
+        ExprDef::MapLiteral(entries) => {
+            let entries = entries
+                .into_iter()
+                .map(|(k, v)| {
+                    Ok((
+                        k,
+                        Box::new(substitute_symbols_inner(*v, symbol_registry, unit_registry, bound_names)?),
+                    ))
+                })
+                .collect::<Result<Vec<_>, RunError>>()?;
+            Ok(ExprDef::MapLiteral(entries))
+        }
         ExprDef::Transpose(inner) => Ok(ExprDef::Transpose(Box::new(substitute_symbols_inner(*inner, symbol_registry, unit_registry, bound_names)?))),
-        ExprDef::Index(base, index) => Ok(ExprDef::Index(
+        ExprDef::Index(base, key) => Ok(ExprDef::Index(
             Box::new(substitute_symbols_inner(*base, symbol_registry, unit_registry, bound_names)?),
-            Box::new(substitute_symbols_inner(*index, symbol_registry, unit_registry, bound_names)?),
+            key,
         )),
         ExprDef::Member(base, name) => Ok(ExprDef::Member(
             Box::new(substitute_symbols_inner(*base, symbol_registry, unit_registry, bound_names)?),

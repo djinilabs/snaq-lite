@@ -28,7 +28,7 @@ Variables are **immutable** and **lexically scoped**. You bind a name to a value
 
 ## Limits (current)
 
-- Variables can hold **numeric** values, **fuzzy booleans**, **user-defined functions**, **vectors**, or **undefined**. Binding a **symbolic** value to a variable is not supported yet; the runtime returns an error in that case.
+- Variables can hold **numeric** values, **fuzzy booleans**, **user-defined functions**, **vectors**, **maps**, or **undefined**. Binding a **symbolic** value to a variable is not supported yet; the runtime returns an error in that case.
 - **Built-in function names cannot be shadowed.** You cannot bind a variable (or a user-defined function) to the names `sin`, `cos`, `tan`, `max`, `min`, `sqrt`, or `take`. An attempt to do so (e.g. `sin = 3` or `sqrt = 2`) returns a **cannot shadow built-in function** error. You *can* bind a built-in function *value* to another name and use it (e.g. `f = sqrt; [1, 4, 9].map(f)` → `[1, 2, 3]`). See [FUNCTIONS.md](FUNCTIONS.md) for user-defined functions and built-ins.
 - **run_numeric** substitutes identifiers from the symbol and unit registries, but **names that are bound in the same program** are left as identifiers so that evaluation resolves them from scope. So variable bindings that shadow unit names (e.g. `DEF=3; DEF+2`) work in both **run()** and **run_numeric()** — the variable takes precedence over the unit.
 

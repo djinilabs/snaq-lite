@@ -32,12 +32,13 @@ When you evaluate a program or expression, the result is one of the following **
 | **Symbolic** | An expression that still contains symbols (e.g. π, or an unknown identifier). | When symbols are not substituted (e.g. `1 + pi`, `1 + x` with `x` unbound and not a unit). |
 | **FuzzyBool** | A boolean-like result: `true`, `false`, or `uncertain(probability)`. | Comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`) when operands have the same dimension. |
 | **Vector** | A vector of values (possibly nested). | Vector literals, transpose, and vector–scalar or vector–vector operations. |
+| **Map** | A key–value collection with ordered keys. | Map literals `{ key: value, ... }`. See [MAPS.md](MAPS.md). |
 | **Undefined** | No value. | Empty program or empty block `{}`. |
 
 ### How results are used
 
-- **`run(expression)`** returns a **Value** (one of the types above). Display (e.g. in a CLI) shows a string form: numbers with units, symbolic expressions like `1 + π`, `true`/`false`/`uncertain(…)`, vector as `[ ... ]`, or `undefined`.
-- **`run_numeric(expression)`** substitutes all symbols and expects a **single numeric quantity**. If the result is not numeric (e.g. it is a comparison, a vector, or undefined), an error is returned. See [SYMBOLS.md](SYMBOLS.md) and [ERRORS_AND_EDGE_CASES.md](ERRORS_AND_EDGE_CASES.md).
+- **`run(expression)`** returns a **Value** (one of the types above). Display (e.g. in a CLI) shows a string form: numbers with units, symbolic expressions like `1 + π`, `true`/`false`/`uncertain(…)`, vector as `[ ... ]`, map as `<map>`, or `undefined`.
+- **`run_numeric(expression)`** substitutes all symbols and expects a **single numeric quantity**. If the result is not numeric (e.g. it is a comparison, a vector, a map, or undefined), an error is returned. See [SYMBOLS.md](SYMBOLS.md) and [ERRORS_AND_EDGE_CASES.md](ERRORS_AND_EDGE_CASES.md).
 - **`run_scalar(expression)`** is like `run_numeric` but the result must be **dimensionless** (a plain number).
 
 ## See also

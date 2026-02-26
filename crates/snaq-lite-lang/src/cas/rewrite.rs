@@ -118,10 +118,9 @@ fn rewrite_rec(
             let new_inner = rewrite_rec(pool, out, *inner, registry)?;
             Ok(out.intern(ExprNode::Transpose(new_inner), span))
         }
-        ExprNode::Index(base, index) => {
+        ExprNode::Index(base, key) => {
             let new_base = rewrite_rec(pool, out, *base, registry)?;
-            let new_index = rewrite_rec(pool, out, *index, registry)?;
-            Ok(out.intern(ExprNode::Index(new_base, new_index), span))
+            Ok(out.intern(ExprNode::Index(new_base, key.clone()), span))
         }
         ExprNode::Member(base, name) => {
             let new_base = rewrite_rec(pool, out, *base, registry)?;
@@ -222,6 +221,13 @@ fn rewrite_rec(
                 .map(|&id| rewrite_rec(pool, out, id, registry))
                 .collect::<Result<Vec<_>, RunError>>()?;
             Ok(out.intern(ExprNode::Block(new_ids), span))
+        }
+        ExprNode::MapLiteral(entries) => {
+            let new_entries: Vec<(String, ExprId)> = entries
+                .iter()
+                .map(|(k, id)| Ok((k.clone(), rewrite_rec(pool, out, *id, registry)?)))
+                .collect::<Result<Vec<_>, RunError>>()?;
+            Ok(out.intern(ExprNode::MapLiteral(new_entries), span))
         }
         ExprNode::Binding(name, rhs) => {
             let new_rhs = rewrite_rec(pool, out, *rhs, registry)?;

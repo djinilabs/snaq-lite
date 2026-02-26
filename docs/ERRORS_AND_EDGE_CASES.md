@@ -18,14 +18,14 @@ This document lists the main error conditions and edge cases you may encounter w
 | **Unknown function** | The call uses a name that is not a built-in and not bound to a user-defined function in scope. For user-defined functions: missing required argument (no default), unknown parameter name in a named argument, duplicate parameter name in a call, or too many arguments also yield an error. Calling a non-function value (e.g. applying arguments to a number) yields "expression is not callable". |
 | **Cannot shadow built-in function** | You tried to bind a variable or user-defined function to a built-in name (`sin`, `cos`, `tan`, `max`, `min`). Those names cannot be redefined. |
 | **Expected angle** | A trig function (sin, cos, tan) received an argument that is not an angle (e.g. length or dimensionless number without unit). The message may suggest adding `rad` (e.g. `sin(pi * rad)`). |
-| **Operation not supported for vector** | An operation that expects a scalar was given a vector (e.g. converting the result to a single quantity when the result is a vector). |
+| **Operation not supported for vector** | An operation that expects a scalar was given a vector (e.g. converting the result to a single quantity when the result is a vector). The same error occurs when the result is a **map** and you request a numeric quantity (`run_numeric`). |
 | **Transpose requires a vector** | The postfix `'` was applied to a non-vector (e.g. a scalar or symbolic expression). |
 | **Invalid index** | A vector index (e.g. `V[i]` or `take(V, start, length)`) used a non-numeric, negative, or non-finite value for the index, start, or length. |
 | **Index out of bounds** | Single-element access `V[index]` or `V.0` was used with an index not less than the vector length. |
-| **Unknown property** | Property access (e.g. `V.length`) used a name that is not supported on the value. Vectors support only `length`. |
+| **Unknown property** | Property access (e.g. `V.length`) used a name that is not supported on the value. Vectors support only `length`. Maps support any key via `.key` (lookup by name); missing key returns **undefined**, not an error. |
 | **Unknown method** | Method call (e.g. `V.map(...)`, `V.sum()`) used a name that is not supported on the value. Vectors support `map`, `take`, `sum`, `mean`, `min`, `max`, `median`, `quantile`, `dot`, `norm`, `product`, `variance`, `stddev`, `all`, `any`. Wrong number of arguments or wrong argument type (e.g. `map(1)` instead of a function, `map(max)` because max takes two parameters, or `dot` with non-vector) also yields an error. |
 | **Empty vector reduction** | The methods **mean**, **min**, **max**, **median**, **quantile**, **variance**, and **stddev** require at least one (numeric) element. Called on an empty vector, they return **empty vector: &lt;method&gt; requires at least one element**. |
-| **Property/method on non-vector** | Dot access for a property or method (e.g. `(1).length`, `x.map(fn (a)=>a)`) was applied to a non-vector (scalar or symbolic). The runtime returns an error that a vector was expected. |
+| **Property/method on non-vector and non-map** | Dot access for a property or method (e.g. `(1).length`, `(5).x`) or bracket index (e.g. `(5)[0]`) was applied to a value that is neither a vector nor a map (e.g. a scalar). The runtime returns an error that a vector was expected. Maps support `.key` and `[key]` for lookup; vectors support `.length`, `[index]`, and methods. |
 | **Vector length mismatch** | A vector operation (element-wise or similar) required two vectors of the same length; the lengths differed. |
 | **Boolean result** | You requested a numeric quantity but the result is a comparison (true/false/uncertain). |
 | **Expected condition** | The condition of `if ... then ... else ...` must evaluate to a boolean (true, false, or uncertain), not a number or symbolic expression. The same error is used when a logical-and (e.g. from a chained comparison like `a < b < c`) receives a non-boolean operand. |
@@ -72,7 +72,7 @@ There is **no NaN** in the language; only +∞ and −∞ for infinite values.
 
 ## Binding limits
 
-- **Allowed:** Binding a **numeric** value, a **FuzzyBool** (true/false/uncertain), a **user-defined function**, a **vector**, or **undefined** to a variable.
+- **Allowed:** Binding a **numeric** value, a **FuzzyBool** (true/false/uncertain), a **user-defined function**, a **vector**, a **map**, or **undefined** to a variable.
 - **Not allowed (current):** Binding a **symbolic** value. The runtime returns an error: **binding value not supported** (or similar message).
 - **Built-in names:** You cannot bind to `sin`, `cos`, `tan`, `max`, `min`, `sqrt`, or `take`; the runtime returns **cannot shadow built-in function**.
 

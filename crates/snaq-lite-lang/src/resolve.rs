@@ -192,6 +192,16 @@ pub fn resolve(def: SpannedExprDef, registry: &UnitRegistry) -> Result<SpannedEx
                 value: SpannedExprDefKind::VecLiteral(elems),
             })
         }
+        SpannedExprDefKind::MapLiteral(entries) => {
+            let entries = entries
+                .into_iter()
+                .map(|(k, v)| Ok((k, resolve(v, registry)?)))
+                .collect::<Result<Vec<_>, RunError>>()?;
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::MapLiteral(entries),
+            })
+        }
         SpannedExprDefKind::Transpose(inner) => {
             let inner = resolve(*inner, registry)?;
             Ok(SpannedExprDef {
@@ -199,12 +209,11 @@ pub fn resolve(def: SpannedExprDef, registry: &UnitRegistry) -> Result<SpannedEx
                 value: SpannedExprDefKind::Transpose(Box::new(inner)),
             })
         }
-        SpannedExprDefKind::Index(base, index) => {
+        SpannedExprDefKind::Index(base, key) => {
             let base = resolve(*base, registry)?;
-            let index = resolve(*index, registry)?;
             Ok(SpannedExprDef {
                 span,
-                value: SpannedExprDefKind::Index(Box::new(base), Box::new(index)),
+                value: SpannedExprDefKind::Index(Box::new(base), key),
             })
         }
         SpannedExprDefKind::Member(base, name) => {
@@ -347,7 +356,8 @@ fn resolve_unit_expr(
         | SpannedExprDefKind::Member(..)
         | SpannedExprDefKind::MethodCall(..)
         | SpannedExprDefKind::If(..)
-        | SpannedExprDefKind::Block(..) => Err(RunError::at(span, RunErrorKind::UnknownUnit(
+        | SpannedExprDefKind::Block(..)
+        | SpannedExprDefKind::MapLiteral(..) => Err(RunError::at(span, RunErrorKind::UnknownUnit(
             "as: right side must be a unit or composed units (e.g. m, meters per second)"
                 .to_string(),
         ))),

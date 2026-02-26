@@ -161,6 +161,7 @@ pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
     match pool.get(id) {
         ExprNode::Lit(_) => Rank::Constant,
         ExprNode::LitFuzzyBool(_) => Rank::Constant,
+        ExprNode::LitDate(_) => Rank::Constant,
         ExprNode::LitSymbol(s) => Rank::Symbol(s.clone()),
         ExprNode::Neg(inner) => Rank::Neg(Box::new(rank(pool, *inner))),
         ExprNode::Add(ids) => Rank::Add(ids.iter().map(|&i| rank(pool, i)).collect()),
@@ -271,6 +272,7 @@ fn canonicalize_rec(
         ExprNode::Lit(q) => out.intern(ExprNode::Lit(q.clone()), span),
         ExprNode::LitFuzzyBool(f) => out.intern(ExprNode::LitFuzzyBool(f.clone()), span),
         ExprNode::LitSymbol(s) => out.intern(ExprNode::LitSymbol(s.clone()), span),
+        ExprNode::LitDate(gd) => out.intern(ExprNode::LitDate(gd.clone()), span),
         ExprNode::Neg(inner) => {
             let new_inner = canonicalize_rec(pool, out, *inner);
             out.intern(ExprNode::Neg(new_inner), span)

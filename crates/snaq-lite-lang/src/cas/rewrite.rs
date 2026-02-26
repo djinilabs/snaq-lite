@@ -34,6 +34,7 @@ fn rewrite_rec(
         ExprNode::Lit(q) => Ok(out.intern(ExprNode::Lit(q.clone()), span)),
         ExprNode::LitFuzzyBool(f) => Ok(out.intern(ExprNode::LitFuzzyBool(f.clone()), span)),
         ExprNode::LitSymbol(s) => Ok(out.intern(ExprNode::LitSymbol(s.clone()), span)),
+        ExprNode::LitDate(gd) => Ok(out.intern(ExprNode::LitDate(gd.clone()), span)),
         ExprNode::Neg(inner) => {
             let new_inner = rewrite_rec(pool, out, *inner, registry)?;
             // Neg(Neg(x)) -> x

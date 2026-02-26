@@ -58,6 +58,7 @@ extern {
         Ident => Tok::Ident(<String>),
         FuncIdent => Tok::FuncIdent(<String>),
         MethodIdent => Tok::MethodIdent(<String>),
+        TemporalLiteral => Tok::TemporalLiteral(<String>),
     }
 }
 
@@ -219,17 +220,17 @@ Expr: SpannedExprDef = {
         SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
     },
     #[precedence(level="1")]
-    <lo:@L> <l:AddExpr> "==" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Eq(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> "==" <r:AddExpr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Eq(Box::new(l), Box::new(r)) },
     #[precedence(level="1")]
-    <lo:@L> <l:AddExpr> "!=" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Ne(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> "!=" <r:AddExpr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Ne(Box::new(l), Box::new(r)) },
     #[precedence(level="1")]
-    <lo:@L> <l:AddExpr> "<" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lt(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> "<" <r:AddExpr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lt(Box::new(l), Box::new(r)) },
     #[precedence(level="1")]
-    <lo:@L> <l:AddExpr> "<=" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Le(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> "<=" <r:AddExpr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Le(Box::new(l), Box::new(r)) },
     #[precedence(level="1")]
-    <lo:@L> <l:AddExpr> ">" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Gt(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> ">" <r:AddExpr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Gt(Box::new(l), Box::new(r)) },
     #[precedence(level="1")]
-    <lo:@L> <l:AddExpr> ">=" <r:Expr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Ge(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> ">=" <r:AddExpr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Ge(Box::new(l), Box::new(r)) },
     #[precedence(level="2")]
     AddExpr,
 };
@@ -436,6 +437,7 @@ Factor: SpannedExprDef = {
     },
     <ni:NumIdents> => ni,
     <lo:@L> <n:Num> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::LitScalar(n) },
+    <lo:@L> <t:TemporalLiteral> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::LitTemporal(t) },
     <pi:PiIdents> => pi,
     <lo:@L> <id:FuncIdent> "(" <args:ArgList> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Call(id, args) },
     <ii:IdentIdents> => ii,

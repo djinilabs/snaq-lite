@@ -1,5 +1,6 @@
 //! IR: inputs and tracked expression graph for the reactive computation.
 
+use crate::date::GranularDate;
 use crate::error::Span;
 use crate::fuzzy::FuzzyBool;
 use crate::quantity::Quantity;
@@ -83,6 +84,10 @@ pub enum SpannedExprDefKind {
     Lit(Quantity),
     LitFuzzyBool(FuzzyBool),
     LitSymbol(String),
+    /// Parsed: temporal literal after `@` (e.g. "2026", "2026-02-26"). Resolved to LitDate.
+    LitTemporal(String),
+    /// Resolved: granular date (anchor + grain).
+    LitDate(GranularDate),
     Add(Box<SpannedExprDef>, Box<SpannedExprDef>),
     Sub(Box<SpannedExprDef>, Box<SpannedExprDef>),
     Mul(Box<SpannedExprDef>, Box<SpannedExprDef>),
@@ -124,6 +129,8 @@ impl SpannedExprDef {
             SpannedExprDefKind::Lit(q) => ExprDef::Lit(q.clone()),
             SpannedExprDefKind::LitFuzzyBool(f) => ExprDef::LitFuzzyBool(f.clone()),
             SpannedExprDefKind::LitSymbol(s) => ExprDef::LitSymbol(s.clone()),
+            SpannedExprDefKind::LitTemporal(s) => ExprDef::LitTemporal(s.clone()),
+            SpannedExprDefKind::LitDate(gd) => ExprDef::LitDate(gd.clone()),
             SpannedExprDefKind::Add(l, r) => ExprDef::Add(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
             SpannedExprDefKind::Sub(l, r) => ExprDef::Sub(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
             SpannedExprDefKind::Mul(l, r) => ExprDef::Mul(Box::new(l.to_expr_def()), Box::new(r.to_expr_def())),
@@ -212,6 +219,10 @@ pub enum ExprDef {
     LitFuzzyBool(FuzzyBool),
     /// Resolved: bare symbol (e.g. pi, e). Identifier not found in unit registry.
     LitSymbol(String),
+    /// Parsed: temporal literal after `@` (raw string). Resolved to LitDate.
+    LitTemporal(String),
+    /// Resolved: granular date (anchor + grain).
+    LitDate(GranularDate),
     Add(Box<ExprDef>, Box<ExprDef>),
     Sub(Box<ExprDef>, Box<ExprDef>),
     Mul(Box<ExprDef>, Box<ExprDef>),
@@ -283,6 +294,7 @@ pub enum ExprData<'db> {
     Lit(Quantity),
     LitFuzzyBool(FuzzyBool),
     LitSymbol(String),
+    LitDate(GranularDate),
     Add(Expression<'db>, Expression<'db>),
     Sub(Expression<'db>, Expression<'db>),
     Mul(Expression<'db>, Expression<'db>),

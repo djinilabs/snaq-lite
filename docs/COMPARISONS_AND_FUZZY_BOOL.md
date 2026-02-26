@@ -48,6 +48,10 @@ When one or both operands are **vectors**, the comparison is applied according t
 
 Same **dimension** is required for the scalar operands in each comparison; length mismatch is required for element-wise and outer cases as above.
 
+## Date comparison
+
+Comparing **two dates** (e.g. `@2026 < @2027` or `@2026 == @2026-02`) also yields a **FuzzyBool**. Each date is an interval; if the intervals are disjoint, the result is crisp **true** or **false**; if they overlap (e.g. a year and a month inside it), the result is **uncertain(0.5)**. See [DATES.md](DATES.md) for details. Comparing a date with a non-date (e.g. `@2026 == 1`) is an error.
+
 ## Use cases
 
 - **Conditions:** FuzzyBool is the expected type for the condition in `if condition then ... else ...`. Crisp true/false choose one branch; uncertain leads to superposition (see [CONDITIONALS.md](CONDITIONALS.md)).
@@ -59,5 +63,6 @@ Same **dimension** is required for the scalar operands in each comparison; lengt
 - [CONDITIONALS.md](CONDITIONALS.md) — if/then/else and FuzzyBool conditions
 - [VECTORS.md](VECTORS.md) — vector orientation and vector–vector operations
 - [LITERALS_AND_VALUES.md](LITERALS_AND_VALUES.md) — value types
+- [DATES.md](DATES.md) — date literals and date-vs-date comparison
 - [ERRORS_AND_EDGE_CASES.md](ERRORS_AND_EDGE_CASES.md) — dimension mismatch, length mismatch, boolean result
 - [README.md](README.md) — language overview and index

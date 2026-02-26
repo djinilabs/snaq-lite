@@ -36,6 +36,8 @@ pub enum StoredValue {
     BuiltinFunction(String),
     /// Map (id into map_registry; payload stored there because Value in entries is not Eq+Hash).
     Map(map_registry::MapId),
+    /// Granular date (temporal interval with grain).
+    Date(crate::date::GranularDate),
 }
 
 impl StoredValue {
@@ -63,6 +65,7 @@ impl StoredValue {
                 let id = map_registry::register(entries);
                 Ok(StoredValue::Map(id))
             }
+            Value::Date(gd) => Ok(StoredValue::Date(gd.clone())),
         }
     }
 
@@ -78,6 +81,7 @@ impl StoredValue {
                 .unwrap_or(Value::Undefined),
             StoredValue::BuiltinFunction(name) => Value::BuiltinFunction(name.clone()),
             StoredValue::Map(id) => Value::Map(*id),
+            StoredValue::Date(gd) => Value::Date(gd.clone()),
         }
     }
 }

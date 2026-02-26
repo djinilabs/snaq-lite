@@ -12,6 +12,10 @@ pub fn spanned_expr_def_to_interned(def: &SpannedExprDef, pool: &mut ExprInterne
         SpannedExprDefKind::Lit(q) => pool.intern(ExprNode::Lit(q.clone()), span),
         SpannedExprDefKind::LitFuzzyBool(f) => pool.intern(ExprNode::LitFuzzyBool(f.clone()), span),
         SpannedExprDefKind::LitSymbol(s) => pool.intern(ExprNode::LitSymbol(s.clone()), span),
+        SpannedExprDefKind::LitDate(gd) => pool.intern(ExprNode::LitDate(gd.clone()), span),
+        SpannedExprDefKind::LitTemporal(_) => {
+            panic!("unresolved LitTemporal: resolve() must convert to LitDate before CAS")
+        }
         SpannedExprDefKind::Add(l, r) => {
             let lid = spanned_expr_def_to_interned(l, pool);
             let rid = spanned_expr_def_to_interned(r, pool);
@@ -187,6 +191,8 @@ pub fn expr_def_to_interned(def: &ExprDef, pool: &mut ExprInterner) -> ExprId {
         ExprDef::Lit(q) => pool.intern(ExprNode::Lit(q.clone()), span),
         ExprDef::LitFuzzyBool(f) => pool.intern(ExprNode::LitFuzzyBool(f.clone()), span),
         ExprDef::LitSymbol(s) => pool.intern(ExprNode::LitSymbol(s.clone()), span),
+        ExprDef::LitDate(gd) => pool.intern(ExprNode::LitDate(gd.clone()), span),
+        ExprDef::LitTemporal(_) => panic!("unresolved LitTemporal: resolve() must convert to LitDate before CAS"),
         ExprDef::Add(l, r) => {
             let lid = expr_def_to_interned(l, pool);
             let rid = expr_def_to_interned(r, pool);
@@ -360,6 +366,7 @@ pub fn interned_to_spanned_expr_def(pool: &ExprInterner, id: ExprId) -> SpannedE
         ExprNode::Lit(q) => SpannedExprDefKind::Lit(q.clone()),
         ExprNode::LitFuzzyBool(f) => SpannedExprDefKind::LitFuzzyBool(f.clone()),
         ExprNode::LitSymbol(s) => SpannedExprDefKind::LitSymbol(s.clone()),
+        ExprNode::LitDate(gd) => SpannedExprDefKind::LitDate(gd.clone()),
         ExprNode::Add(ids) => return binaryize_add_spanned(pool, ids),
         ExprNode::Mul(ids) => return binaryize_mul_spanned(pool, ids),
         ExprNode::Sub(l, r) => SpannedExprDefKind::Sub(

@@ -1,6 +1,7 @@
 //! snaq-lite: reactive arithmetic language (Salsa-based).
 
 pub mod cas;
+pub mod date;
 pub mod dimension;
 pub mod error;
 pub mod fuzzy;
@@ -92,6 +93,7 @@ fn format_value_for_display(db: &dyn salsa::Database, value: &Value) -> Result<S
             Ok(format!("[{}]", parts.join(", ")))
         }
         Value::Map(_) => Ok("<map>".to_string()),
+        Value::Date(gd) => Ok(format!("{gd}")),
     }
 }
 
@@ -2337,6 +2339,226 @@ mod tests {
         // Duplicate keys: first occurrence wins
         assert_eq!(run_format("{ a: 1, a: 2 }.a").unwrap(), "1");
         assert_eq!(run_format("{ a: 1, a: 2 }[a]").unwrap(), "1");
+    }
+
+    // --- Date / temporal literal (@ sigil) tests ---
+
+    #[test]
+    fn parse_temporal_literal_factor() {
+        use crate::ir::ExprDef;
+        // All six grains at parse level (Factor → LitTemporal)
+        let r = parse("@2026").unwrap().to_expr_def();
+        assert_eq!(r, block_one(ExprDef::LitTemporal("2026".to_string())));
+        let r = parse("@2026-02").unwrap().to_expr_def();
+        assert_eq!(r, block_one(ExprDef::LitTemporal("2026-02".to_string())));
+        let r = parse("@2026-02-26").unwrap().to_expr_def();
+        assert_eq!(r, block_one(ExprDef::LitTemporal("2026-02-26".to_string())));
+        let r = parse("@2026-02-26T14").unwrap().to_expr_def();
+        assert_eq!(r, block_one(ExprDef::LitTemporal("2026-02-26T14".to_string())));
+        let r = parse("@2026-02-26T14:30").unwrap().to_expr_def();
+        assert_eq!(r, block_one(ExprDef::LitTemporal("2026-02-26T14:30".to_string())));
+        let r = parse("@2026-02-26T14:30:00").unwrap().to_expr_def();
+        assert_eq!(r, block_one(ExprDef::LitTemporal("2026-02-26T14:30:00".to_string())));
+    }
+
+    #[test]
+    fn run_date_literal_valid_formats() {
+        let registry = default_si_registry();
+        // All six grains: Year, Month, Day, Hour, Minute, Second
+        assert_eq!(run_with_registry("@2026", &registry).unwrap().to_string(), "@2026");
+        assert_eq!(run_with_registry("@2026-02", &registry).unwrap().to_string(), "@2026-02");
+        assert_eq!(run_with_registry("@2026-02-26", &registry).unwrap().to_string(), "@2026-02-26");
+        assert_eq!(run_with_registry("@2026-02-26T14", &registry).unwrap().to_string(), "@2026-02-26T14");
+        assert_eq!(run_with_registry("@2026-02-26T14:30", &registry).unwrap().to_string(), "@2026-02-26T14:30");
+        assert_eq!(run_with_registry("@2026-02-26T14:30:00", &registry).unwrap().to_string(), "@2026-02-26T14:30:00");
+    }
+
+    #[test]
+    fn run_date_binding_and_retrieval() {
+        let registry = default_si_registry();
+        // Binding and retrieval for all grains
+        assert_eq!(run_with_registry_format("d = @2026; d", &registry).unwrap(), "@2026");
+        assert_eq!(run_with_registry_format("d = @2026-02; d", &registry).unwrap(), "@2026-02");
+        assert_eq!(run_with_registry_format("d = @2026-02-26; d", &registry).unwrap(), "@2026-02-26");
+        assert_eq!(run_with_registry_format("d = @2026-02-26T14; d", &registry).unwrap(), "@2026-02-26T14");
+        assert_eq!(run_with_registry_format("d = @2026-02-26T14:30; d", &registry).unwrap(), "@2026-02-26T14:30");
+        assert_eq!(run_with_registry_format("d = @2026-02-26T14:30:00; d", &registry).unwrap(), "@2026-02-26T14:30:00");
+    }
+
+    #[test]
+    fn run_date_invalid_temporal_literal_errors() {
+        let registry = default_si_registry();
+        // @ alone: lexer rejects (need 4-digit year) → parse error
+        let e = run_with_registry("@", &registry).unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::Parse(_)));
+        // @20: lexer rejects (need 4-digit year) → parse error
+        let e = run_with_registry("@20", &registry).unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::Parse(_)));
+        // @2026-13-01: lexer accepts, resolve rejects invalid month → InvalidTemporalLiteral
+        let e = run_with_registry("@2026-13-01", &registry).unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::InvalidTemporalLiteral(_)));
+    }
+
+    #[test]
+    fn run_date_plus_time_same_grain_allowed() {
+        let registry = default_si_registry();
+        // Day + days → ok
+        assert_eq!(run_with_registry_format("@2026-02-26 + 1 day", &registry).unwrap(), "@2026-02-27");
+        assert_eq!(run_with_registry_format("@2026-02-26 + 2 days", &registry).unwrap(), "@2026-02-28");
+        // Hour + hours → ok; result keeps hour grain so displays as @YYYY-MM-DDTHH
+        assert_eq!(run_with_registry_format("@2026-02-26T14 + 2 hours", &registry).unwrap(), "@2026-02-26T16");
+    }
+
+    #[test]
+    fn run_date_plus_time_all_grains_compatible() {
+        let registry = default_si_registry();
+        // Year + years
+        assert_eq!(run_with_registry_format("@2026 + 1 year", &registry).unwrap(), "@2027");
+        // Month + months
+        assert_eq!(run_with_registry_format("@2026-02 + 1 month", &registry).unwrap(), "@2026-03");
+        // Day + days (already in run_date_plus_time_same_grain_allowed)
+        assert_eq!(run_with_registry_format("@2026-02-26 + 1 day", &registry).unwrap(), "@2026-02-27");
+        // Hour + hours
+        assert_eq!(run_with_registry_format("@2026-02-26T14 + 1 hour", &registry).unwrap(), "@2026-02-26T15");
+        // Minute + minutes
+        assert_eq!(run_with_registry_format("@2026-02-26T14:30 + 1 minute", &registry).unwrap(), "@2026-02-26T14:31");
+        // Second + seconds
+        assert_eq!(run_with_registry_format("@2026-02-26T14:30:00 + 1 second", &registry).unwrap(), "@2026-02-26T14:30:01");
+    }
+
+    #[test]
+    fn run_date_plus_time_incompatible_grain_errors() {
+        let registry = default_si_registry();
+        // Year + finer unit → error
+        let e = run_with_registry("@2026 + 3 hours", &registry).unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::IncompatibleDateGrain(_)));
+        // Month + hour → error
+        let e = run_with_registry("@2026-02 + 1 hour", &registry).unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::IncompatibleDateGrain(_)));
+        // Day + second → error (day grain coarser than second)
+        let e = run_with_registry("@2026-02-26 + 1 second", &registry).unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::IncompatibleDateGrain(_)));
+        // Hour + second → error
+        let e = run_with_registry("@2026-02-26T14 + 1 second", &registry).unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::IncompatibleDateGrain(_)));
+        // Minute + second → error
+        let e = run_with_registry("@2026-02-26T14:30 + 1 second", &registry).unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::IncompatibleDateGrain(_)));
+    }
+
+    #[test]
+    fn run_date_minus_time() {
+        let registry = default_si_registry();
+        assert_eq!(run_with_registry_format("@2026-02-27 - 1 day", &registry).unwrap(), "@2026-02-26");
+    }
+
+    #[test]
+    fn run_date_minus_time_all_grains() {
+        let registry = default_si_registry();
+        // Julian year = 365.25 days; 2027-01-01 00:00 - 365.25 days = 2025-12-31 18:00 → year grain shows @2025
+        assert_eq!(run_with_registry_format("@2027 - 1 year", &registry).unwrap(), "@2025");
+        // 1 month = year/12 ≈ 30.4 days; 2026-03-01 - 30.4 days → late Jan 2026 → month grain @2026-01
+        assert_eq!(run_with_registry_format("@2026-03 - 1 month", &registry).unwrap(), "@2026-01");
+        assert_eq!(run_with_registry_format("@2026-02-27 - 1 day", &registry).unwrap(), "@2026-02-26");
+        assert_eq!(run_with_registry_format("@2026-02-26T16 - 1 hour", &registry).unwrap(), "@2026-02-26T15");
+        assert_eq!(run_with_registry_format("@2026-02-26T14:31 - 1 minute", &registry).unwrap(), "@2026-02-26T14:30");
+        assert_eq!(run_with_registry_format("@2026-02-26T14:30:01 - 1 second", &registry).unwrap(), "@2026-02-26T14:30:00");
+    }
+
+    #[test]
+    fn run_date_minus_date_yields_seconds() {
+        let registry = default_si_registry();
+        let v = run_with_registry("@2026-02-26 - @2026-01-01", &registry).unwrap();
+        match &v {
+            Value::Numeric(q) => {
+                assert!((q.value() - 56.0 * 24.0 * 3600.0).abs() < 1.0, "about 56 days in seconds");
+                assert_eq!(q.unit().to_string(), "s");
+            }
+            _ => panic!("expected numeric seconds, got {:?}", v),
+        }
+    }
+
+    #[test]
+    fn run_date_minus_date_all_grains() {
+        let registry = default_si_registry();
+        // Any grain − any grain → seconds (anchor difference)
+        let v = run_with_registry("@2027 - @2026", &registry).unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 365.25 * 24.0 * 3600.0).abs() < 24.0 * 3600.0); // ~1 year in seconds
+        assert_eq!(q.unit().to_string(), "s");
+
+        let v = run_with_registry("@2026-03 - @2026-02", &registry).unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 28.0 * 24.0 * 3600.0).abs() < 24.0 * 3600.0); // Feb 2026
+        assert_eq!(q.unit().to_string(), "s");
+
+        let v = run_with_registry("@2026-02-26T14:30:01 - @2026-02-26T14:30:00", &registry).unwrap();
+        let Value::Numeric(q) = v else { panic!("expected numeric") };
+        assert!((q.value() - 1.0).abs() < 1e-6);
+        assert_eq!(q.unit().to_string(), "s");
+    }
+
+    #[test]
+    fn run_date_compare_disjoint_intervals() {
+        let registry = default_si_registry();
+        // Year vs year
+        assert_eq!(run_with_registry_format("@2025 < @2026", &registry).unwrap(), "true");
+        assert_eq!(run_with_registry_format("@2026 > @2025", &registry).unwrap(), "true");
+        assert_eq!(run_with_registry_format("@2025 == @2026", &registry).unwrap(), "false");
+        assert_eq!(run_with_registry_format("@2025 != @2026", &registry).unwrap(), "true");
+    }
+
+    #[test]
+    fn run_date_compare_disjoint_all_grains() {
+        let registry = default_si_registry();
+        // Disjoint: different months, days, hours, minutes, seconds
+        assert_eq!(run_with_registry_format("@2026-01 < @2026-02", &registry).unwrap(), "true");
+        assert_eq!(run_with_registry_format("@2026-02-25 < @2026-02-26", &registry).unwrap(), "true");
+        assert_eq!(run_with_registry_format("@2026-02-26T13 < @2026-02-26T14", &registry).unwrap(), "true");
+        assert_eq!(run_with_registry_format("@2026-02-26T14:29 < @2026-02-26T14:30", &registry).unwrap(), "true");
+        assert_eq!(run_with_registry_format("@2026-02-26T14:30:00 < @2026-02-26T14:30:01", &registry).unwrap(), "true");
+    }
+
+    #[test]
+    fn run_date_compare_overlap_uncertain() {
+        let registry = default_si_registry();
+        // Year vs month
+        let s = run_with_registry_format("@2026 == @2026-02", &registry).unwrap();
+        assert!(s.starts_with("uncertain("), "overlapping intervals → uncertain, got {}", s);
+        let s = run_with_registry_format("@2026 < @2026-02", &registry).unwrap();
+        assert!(s.starts_with("uncertain("), "overlapping → uncertain, got {}", s);
+    }
+
+    #[test]
+    fn run_date_compare_overlap_all_grains() {
+        let registry = default_si_registry();
+        // Overlapping pairs: year⊃month, month⊃day, day⊃hour, hour⊃minute, minute⊃second
+        for (a, b) in [
+            ("@2026", "@2026-02"),
+            ("@2026-02", "@2026-02-26"),
+            ("@2026-02-26", "@2026-02-26T14"),
+            ("@2026-02-26T14", "@2026-02-26T14:30"),
+            ("@2026-02-26T14:30", "@2026-02-26T14:30:00"),
+        ] {
+            let s = run_with_registry_format(&format!("{} == {}", a, b), &registry).unwrap();
+            assert!(s.starts_with("uncertain("), "{} == {} should be uncertain, got {}", a, b, s);
+        }
+    }
+
+    #[test]
+    fn run_numeric_date_returns_err() {
+        let e = run_numeric("@2026").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::InvalidArgument(msg) if msg.contains("date")));
+        let e = run_numeric("d = @2026-02-26; d").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::InvalidArgument(msg) if msg.contains("date")));
+    }
+
+    #[test]
+    fn run_date_compare_with_non_date_errors() {
+        let registry = default_si_registry();
+        // Comparing date with number → invalid argument (both operands must be dates)
+        let e = run_with_registry("@2026 == 1", &registry).unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::InvalidArgument(msg) if msg.contains("date")));
     }
 
     #[test]

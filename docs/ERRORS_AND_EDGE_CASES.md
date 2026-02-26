@@ -19,6 +19,7 @@ This document lists the main error conditions and edge cases you may encounter w
 | **Cannot shadow built-in function** | You tried to bind a variable or user-defined function to a built-in name (`sin`, `cos`, `tan`, `max`, `min`). Those names cannot be redefined. |
 | **Expected angle** | A trig function (sin, cos, tan) received an argument that is not an angle (e.g. length or dimensionless number without unit). The message may suggest adding `rad` (e.g. `sin(pi * rad)`). |
 | **Operation not supported for vector** | An operation that expects a scalar was given a vector (e.g. converting the result to a single quantity when the result is a vector). The same error occurs when the result is a **map** and you request a numeric quantity (`run_numeric`). |
+| **Invalid argument (date)** | When the result is a **date** and you request a numeric quantity (`run_numeric`), the runtime returns **invalid argument**: date value cannot be converted to quantity. Use `run()` to obtain a `Value` (which may be a date). See [DATES.md](DATES.md). |
 | **Transpose requires a vector** | The postfix `'` was applied to a non-vector (e.g. a scalar or symbolic expression). |
 | **Invalid index** | A vector index (e.g. `V[i]` or `take(V, start, length)`) used a non-numeric, negative, or non-finite value for the index, start, or length. |
 | **Index out of bounds** | Single-element access `V[index]` or `V.0` was used with an index not less than the vector length. |
@@ -35,6 +36,9 @@ This document lists the main error conditions and edge cases you may encounter w
 | **Result is undefined** | You requested a numeric quantity (or scalar) but the result is undefined (e.g. empty program or empty block). |
 | **Binding value not supported** | You tried to bind a symbolic value to a variable (vectors are supported; only symbolic is not). Converting a function to a quantity (e.g. in unit conversion) also yields this (or a similar) error. |
 | **Invalid argument** | A built-in function received an invalid argument (e.g. `sqrt(-1)` → argument must be non-negative; `quantile(p)` with p outside [0, 1]; `corr(a, b)` with non-numeric elements or fewer than 2 pairs). |
+| **Invalid temporal literal** | A temporal literal after `@` is malformed or incomplete (e.g. `@20`, `@2026-13-01`, or `@2026-02-26T14:30:S`). See [DATES.md](DATES.md). |
+| **Incompatible date grain** | Date ± Time: the duration’s unit is finer than the date’s grain (e.g. `@2026 + 3 hours` — year grain cannot add hours). See [DATES.md](DATES.md). |
+| **Comparison with date** | Comparing a date with a non-date (e.g. `@2026 < 1`) returns an error: both operands must be dates. |
 
 ### How runtime and parse errors are shown
 
@@ -72,7 +76,7 @@ There is **no NaN** in the language; only +∞ and −∞ for infinite values.
 
 ## Binding limits
 
-- **Allowed:** Binding a **numeric** value, a **FuzzyBool** (true/false/uncertain), a **user-defined function**, a **vector**, a **map**, or **undefined** to a variable.
+- **Allowed:** Binding a **numeric** value, a **FuzzyBool** (true/false/uncertain), a **user-defined function**, a **vector**, a **map**, a **date**, or **undefined** to a variable.
 - **Not allowed (current):** Binding a **symbolic** value. The runtime returns an error: **binding value not supported** (or similar message).
 - **Built-in names:** You cannot bind to `sin`, `cos`, `tan`, `max`, `min`, `sqrt`, or `take`; the runtime returns **cannot shadow built-in function**.
 
@@ -80,6 +84,7 @@ See [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md) and [FUNCTIONS.md](FUNCTIONS.md
 
 ## See also
 
+- [DATES.md](DATES.md) — temporal literals and date arithmetic
 - [FUNCTIONS.md](FUNCTIONS.md) — user-defined functions and built-ins; cannot shadow built-in names
 - [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md) — binding limits
 - [BLOCKS_AND_EXPRESSIONS.md](BLOCKS_AND_EXPRESSIONS.md) — undefined and empty blocks

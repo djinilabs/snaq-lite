@@ -10,6 +10,7 @@ workspace = true
 lalrpop = "0.21"
 
 [dependencies]
+chrono = "0.4"
 futures = "0.3"
 im = "15"
 singularize = "0.1"

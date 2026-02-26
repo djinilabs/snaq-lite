@@ -608,6 +608,8 @@ pub enum Value {
     BuiltinFunction(String),
     /// Map (object) stored by id in map_registry; ordered key-value pairs.
     Map(u64),
+    /// Granular date (temporal interval with grain). Syntax: @YYYY, @YYYY-MM-DD, etc.
+    Date(crate::date::GranularDate),
 }
 
 impl Value {
@@ -638,6 +640,9 @@ impl Value {
                 "function value cannot be converted to quantity".to_string(),
             ))),
             Value::Map(_) => Err(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
+            Value::Date(_) => Err(RunError::new(RunErrorKind::InvalidArgument(
+                "date value cannot be converted to quantity".to_string(),
+            ))),
         }
     }
 
@@ -664,6 +669,7 @@ impl fmt::Display for Value {
             Value::Undefined => write!(f, "undefined"),
             Value::Function(_) | Value::BuiltinFunction(_) => write!(f, "<function>"),
             Value::Map(_) => write!(f, "<map>"),
+            Value::Date(gd) => write!(f, "{gd}"),
         }
     }
 }

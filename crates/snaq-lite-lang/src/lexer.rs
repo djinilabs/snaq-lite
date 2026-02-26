@@ -75,12 +75,20 @@ pub enum Tok {
     Semicolon,
     /// Newline (expression separator; \n or \r\n).
     Newline,
+    /// Temporal literal: `@` followed by ISO 8601 date/time (e.g. @2026, @2026-02-26T14:30). Raw string without the @.
+    TemporalLiteral(String),
 }
 
 /// Lexer error with optional byte span (start, end) for source snippet.
 #[derive(Clone, Debug)]
 pub enum LexicalError {
     InvalidFloat {
+        snippet: String,
+        start: usize,
+        end: usize,
+    },
+    /// Malformed temporal literal after `@` (e.g. @20, incomplete or invalid ISO 8601).
+    InvalidTemporal {
         snippet: String,
         start: usize,
         end: usize,
@@ -92,6 +100,7 @@ impl LexicalError {
     pub fn span(&self) -> Option<(usize, usize)> {
         match self {
             LexicalError::InvalidFloat { start, end, .. } => Some((*start, *end)),
+            LexicalError::InvalidTemporal { start, end, .. } => Some((*start, *end)),
         }
     }
 }
@@ -100,6 +109,9 @@ impl std::fmt::Display for LexicalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LexicalError::InvalidFloat { snippet, .. } => write!(f, "invalid float: {snippet}"),
+            LexicalError::InvalidTemporal { snippet, .. } => {
+                write!(f, "invalid temporal literal: @{snippet}")
+            }
         }
     }
 }
@@ -225,6 +237,58 @@ impl<'input> Lexer<'input> {
             })),
         }
     }
+
+    /// Consume `@` and an ISO 8601 date/time sequence. Caller must have verified rest starts with `@`.
+    /// Returns the raw string without `@` (e.g. "2026", "2026-02-26T14:30") or InvalidTemporal.
+    fn take_temporal_literal(&mut self, start: usize) -> Result<String, LexicalError> {
+        let rest = &self.input[self.pos..];
+        if !rest.starts_with('@') {
+            return Err(LexicalError::InvalidTemporal {
+                snippet: String::new(),
+                start,
+                end: self.pos,
+            });
+        }
+        self.pos += 1;
+        let rest = &self.input[self.pos..];
+        let bytes = rest.as_bytes();
+        let n = bytes.len();
+
+        fn take_digits(b: &[u8], from: usize, count: usize) -> bool {
+            from + count <= b.len() && b[from..from + count].iter().all(|&c| c.is_ascii_digit())
+        }
+        if !take_digits(bytes, 0, 4) {
+            return Err(LexicalError::InvalidTemporal {
+                snippet: rest.chars().take(10).collect(),
+                start,
+                end: self.pos + rest.len().min(10),
+            });
+        }
+        let mut end = 4usize;
+        // Optional -MM
+        if end + 3 <= n && bytes[end] == b'-' && take_digits(bytes, end + 1, 2) {
+            end += 3;
+            // Optional -DD
+            if end + 3 <= n && bytes[end] == b'-' && take_digits(bytes, end + 1, 2) {
+                end += 3;
+                // Optional THH
+                if end + 3 <= n && (bytes[end] == b'T' || bytes[end] == b't') && take_digits(bytes, end + 1, 2) {
+                    end += 3;
+                    // Optional :MM
+                    if end + 3 <= n && bytes[end] == b':' && take_digits(bytes, end + 1, 2) {
+                        end += 3;
+                        // Optional :SS
+                        if end + 3 <= n && bytes[end] == b':' && take_digits(bytes, end + 1, 2) {
+                            end += 3;
+                        }
+                    }
+                }
+            }
+        }
+        let raw = rest[..end].to_string();
+        self.pos += end;
+        Ok(raw)
+    }
 }
 
 impl<'input> Iterator for Lexer<'input> {
@@ -336,6 +400,19 @@ impl<'input> Iterator for Lexer<'input> {
             self.any_token_emitted = true;
             self.pos += 2;
             return Some(Ok((start, Tok::Arrow, self.pos)));
+        }
+        // Temporal literal: @YYYY, @YYYY-MM, @YYYY-MM-DD, @YYYY-MM-DDTHH, @YYYY-MM-DDTHH:MM, @YYYY-MM-DDTHH:MM:SS
+        if rest.starts_with('@') {
+            match self.take_temporal_literal(start) {
+                Ok(raw) => {
+                    self.last_was_number = false;
+                    self.any_token_emitted = true;
+                    self.after_postfix_factor = true;
+                    let end = self.pos;
+                    return Some(Ok((start, Tok::TemporalLiteral(raw), end)));
+                }
+                Err(e) => return Some(Err(e)),
+            }
         }
 
         let mut it = rest.chars();
@@ -459,6 +536,7 @@ impl<'input> Iterator for Lexer<'input> {
             &tok,
             Tok::Num(_) | Tok::Ident(_) | Tok::FuncIdent(_) | Tok::MethodIdent(_)
                 | Tok::RParen | Tok::RBracket | Tok::RBrace
+                | Tok::TemporalLiteral(_)
         );
         let end = self.pos;
         Some(Ok((start, tok, end)))

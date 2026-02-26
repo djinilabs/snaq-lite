@@ -33,12 +33,13 @@ When you evaluate a program or expression, the result is one of the following **
 | **FuzzyBool** | A boolean-like result: `true`, `false`, or `uncertain(probability)`. | Comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`) when operands have the same dimension. |
 | **Vector** | A vector of values (possibly nested). | Vector literals, transpose, and vector–scalar or vector–vector operations. |
 | **Map** | A key–value collection with ordered keys. | Map literals `{ key: value, ... }`. See [MAPS.md](MAPS.md). |
+| **Date** | A temporal interval with a grain (year, month, day, hour, minute, second). | Temporal literals `@YYYY`, `@YYYY-MM-DD`, etc. See [DATES.md](DATES.md). |
 | **Undefined** | No value. | Empty program or empty block `{}`. |
 
 ### How results are used
 
-- **`run(expression)`** returns a **Value** (one of the types above). Display (e.g. in a CLI) shows a string form: numbers with units, symbolic expressions like `1 + π`, `true`/`false`/`uncertain(…)`, vector as `[ ... ]`, map as `<map>`, or `undefined`.
-- **`run_numeric(expression)`** substitutes all symbols and expects a **single numeric quantity**. If the result is not numeric (e.g. it is a comparison, a vector, a map, or undefined), an error is returned. See [SYMBOLS.md](SYMBOLS.md) and [ERRORS_AND_EDGE_CASES.md](ERRORS_AND_EDGE_CASES.md).
+- **`run(expression)`** returns a **Value** (one of the types above). Display (e.g. in a CLI) shows a string form: numbers with units, symbolic expressions like `1 + π`, `true`/`false`/`uncertain(…)`, vector as `[ ... ]`, map as `<map>`, date as `@2026` or `@2026-02-26`, or `undefined`.
+- **`run_numeric(expression)`** substitutes all symbols and expects a **single numeric quantity**. If the result is not numeric (e.g. it is a comparison, a vector, a map, a **date**, or undefined), an error is returned. See [SYMBOLS.md](SYMBOLS.md), [DATES.md](DATES.md), and [ERRORS_AND_EDGE_CASES.md](ERRORS_AND_EDGE_CASES.md).
 - **`run_scalar(expression)`** is like `run_numeric` but the result must be **dimensionless** (a plain number).
 
 ## See also

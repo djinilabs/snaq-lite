@@ -1,6 +1,7 @@
 //! Hash-consing interner for CAS expression nodes.
 //! Stores a source span per ExprId for error reporting.
 
+use crate::date::GranularDate;
 use crate::error::Span;
 use crate::fuzzy::FuzzyBool;
 use crate::quantity::Quantity;
@@ -18,6 +19,7 @@ pub enum ExprNode {
     Lit(Quantity),
     LitFuzzyBool(FuzzyBool),
     LitSymbol(String),
+    LitDate(GranularDate),
     Add(Vec<ExprId>),
     Mul(Vec<ExprId>),
     Sub(ExprId, ExprId),

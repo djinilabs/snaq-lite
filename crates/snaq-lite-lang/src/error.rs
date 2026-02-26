@@ -75,6 +75,10 @@ pub enum RunErrorKind {
     UnknownMethod(String),
     EmptyVectorReduction(String),
     InvalidArgument(String),
+    /// Malformed temporal literal (e.g. invalid date or grain inference failed).
+    InvalidTemporalLiteral(String),
+    /// Date ± Time: duration granularity is finer than the date's grain (e.g. Year + 3 hours).
+    IncompatibleDateGrain(String),
 }
 
 /// Errors that can occur when running a snaq-lite expression.
@@ -274,6 +278,12 @@ impl std::fmt::Display for RunError {
                 write!(f, "empty vector: {method} requires at least one element")
             }
             RunErrorKind::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
+            RunErrorKind::InvalidTemporalLiteral(msg) => {
+                write!(f, "invalid temporal literal: {msg}")
+            }
+            RunErrorKind::IncompatibleDateGrain(msg) => {
+                write!(f, "incompatible date grain: {msg}")
+            }
         }
     }
 }

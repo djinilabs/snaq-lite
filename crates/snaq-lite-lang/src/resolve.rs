@@ -1,7 +1,8 @@
-//! Resolve parsed expression (LitScalar, LitWithUnit, LitUnit) to Lit(Quantity) or LitSymbol.
+//! Resolve parsed expression (LitScalar, LitWithUnit, LitUnit, LitTemporal) to Lit(Quantity), LitSymbol, or LitDate.
 //! Identifiers that are units resolve to quantities; others resolve to symbols.
 //! Preserves source spans through resolution.
 
+use crate::date;
 use crate::error::{RunError, RunErrorKind};
 use crate::ir::{SpannedCallArg, SpannedExprDef, SpannedExprDefKind};
 use crate::quantity::{Quantity, SnaqNumber};
@@ -46,6 +47,18 @@ pub fn resolve(def: SpannedExprDef, registry: &UnitRegistry) -> Result<SpannedEx
                 })
             }
         }
+        SpannedExprDefKind::LitTemporal(ref s) => {
+            let gd = date::parse_temporal_literal(s)
+                .map_err(|msg| RunError::at(span, RunErrorKind::InvalidTemporalLiteral(msg)))?;
+            Ok(SpannedExprDef {
+                span,
+                value: SpannedExprDefKind::LitDate(gd),
+            })
+        }
+        SpannedExprDefKind::LitDate(gd) => Ok(SpannedExprDef {
+            span,
+            value: SpannedExprDefKind::LitDate(gd),
+        }),
         SpannedExprDefKind::LitUnit(ref name) => Ok(SpannedExprDef {
             span,
             value: SpannedExprDefKind::LitSymbol(name.clone()),

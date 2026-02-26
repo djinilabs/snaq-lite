@@ -82,6 +82,7 @@ fn collect_bound_names(def: &ExprDef) -> HashSet<String> {
                 }
             }
             ExprDef::Lit(_) | ExprDef::LitFuzzyBool(_) | ExprDef::LitSymbol(_)
+            | ExprDef::LitTemporal(_) | ExprDef::LitDate(_)
             | ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {}
         }
     }
@@ -174,6 +175,7 @@ fn collect_bound_names_spanned(def: &SpannedExprDef) -> HashSet<String> {
                 }
             }
             SpannedExprDefKind::Lit(_) | SpannedExprDefKind::LitFuzzyBool(_) | SpannedExprDefKind::LitSymbol(_)
+            | SpannedExprDefKind::LitTemporal(_) | SpannedExprDefKind::LitDate(_)
             | SpannedExprDefKind::LitScalar(..) | SpannedExprDefKind::LitWithUnit(..)
             | SpannedExprDefKind::LitUnit(..) => {}
         }
@@ -202,6 +204,12 @@ fn substitute_symbols_spanned_inner(
     let value = match def.value {
         SpannedExprDefKind::Lit(q) => SpannedExprDefKind::Lit(q),
         SpannedExprDefKind::LitFuzzyBool(f) => SpannedExprDefKind::LitFuzzyBool(f),
+        SpannedExprDefKind::LitDate(gd) => SpannedExprDefKind::LitDate(gd),
+        SpannedExprDefKind::LitTemporal(_) => {
+            return Err(RunError::at(span, RunErrorKind::InvalidTemporalLiteral(
+                "unresolved temporal literal (resolve must run before substitute)".to_string(),
+            )));
+        }
         SpannedExprDefKind::LitSymbol(name) => {
             if bound_names.contains(&name) {
                 SpannedExprDefKind::LitSymbol(name)
@@ -416,6 +424,8 @@ fn substitute_symbols_inner(
     match def {
         ExprDef::Lit(q) => Ok(ExprDef::Lit(q)),
         ExprDef::LitFuzzyBool(f) => Ok(ExprDef::LitFuzzyBool(f)),
+        ExprDef::LitDate(gd) => Ok(ExprDef::LitDate(gd)),
+        ExprDef::LitTemporal(_) => panic!("unresolved LitTemporal: resolve() must be called before substitute_symbols"),
         ExprDef::LitSymbol(name) => {
             if bound_names.contains(&name) {
                 Ok(ExprDef::LitSymbol(name))
@@ -608,3 +618,4 @@ fn substitute_symbols_inner(
         }
     }
 }
+

@@ -8,6 +8,7 @@ snaq-lite is an expression-oriented language for arithmetic with **physical quan
 - **Symbols** — Built-in constants like `pi` and `e`; unknown identifiers stay symbolic until you ask for a numeric result.
 - **Vectors** — Literals `[ ... ]`, transpose `'`, and operations with scalars or other vectors (element-wise, outer product, dot product).
 - **Maps** — Literals `{ key: value, ... }` with unquoted keys; access via `.key` or `[key]` (bracket content trimmed); missing key → undefined. See [MAPS.md](MAPS.md).
+- **Dates** — Temporal literals `@YYYY`, `@YYYY-MM-DD`, etc.; Date ± Time (grain rule), Date − Date → duration; comparison yields true/false/uncertain by interval overlap. See [DATES.md](DATES.md).
 - **Comparisons** — `==`, `!=`, `<`, `<=`, `>`, `>=`; same dimension required; result is a boolean-like value (true, false, or uncertain when operands have variance).
 - **Conditionals** — `if condition then expression else expression`; condition can be uncertain (superposition of both branches).
 - **Functions** — Built-ins: `sin`, `cos`, `tan` (angle argument), `sqrt` (non-negative), `max`, `min` (two same-dimension arguments). Vectors support methods such as `.sum()`, `.mean()`, `.min()`, `.max()`, `.dot(other)`, `.norm()`, `.product()`, `.variance()`, `.stddev()`, `.all()`, `.any()` (see [VECTORS.md](VECTORS.md)).
@@ -27,6 +28,7 @@ Programs are **expression lists**: multiple expressions separated by newlines or
 | **Comparisons and FuzzyBool** — Comparison operators, true/false/uncertain, vector comparisons | [COMPARISONS_AND_FUZZY_BOOL.md](COMPARISONS_AND_FUZZY_BOOL.md) |
 | **Vectors** — Literals, transpose, orientation, vector–scalar and vector–vector operations | [VECTORS.md](VECTORS.md) |
 | **Maps** — Map literals, dot and bracket access, missing key → undefined | [MAPS.md](MAPS.md) |
+| **Dates** — Temporal literals, grain, Date ± Time, Date − Date, comparison | [DATES.md](DATES.md) |
 | **Functions** — Call syntax, built-ins (sin, cos, tan, max, min), arity and dimensions | [FUNCTIONS.md](FUNCTIONS.md) |
 | **Precision** — Implicit (decimal places) and explicit (`value ~ error`) | [PRECISION.md](PRECISION.md) |
 | **Errors and edge cases** — When things go wrong, division by zero, undefined, binding limits | [ERRORS_AND_EDGE_CASES.md](ERRORS_AND_EDGE_CASES.md) |

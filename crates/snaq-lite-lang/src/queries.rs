@@ -745,6 +745,10 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef, spanned: Option<Span
         ExprDef::Lit(q) => return Expression::new(db, ExprData::Lit(q), span),
         ExprDef::LitFuzzyBool(f) => return Expression::new(db, ExprData::LitFuzzyBool(f.clone()), span),
         ExprDef::LitSymbol(name) => return Expression::new(db, ExprData::LitSymbol(name), span),
+        ExprDef::LitDate(gd) => return Expression::new(db, ExprData::LitDate(gd.clone()), span),
+        ExprDef::LitTemporal(_) => {
+            panic!("unresolved LitTemporal: resolve() must convert to LitDate before building the graph")
+        }
         ExprDef::LitScalar(..) | ExprDef::LitWithUnit(..) | ExprDef::LitUnit(..) => {
             panic!("unresolved expression: resolve() must be called before building the graph")
         }
@@ -1175,6 +1179,7 @@ pub fn value<'db>(
     with_registry(|registry| match data {
         ExprData::Lit(q) => Ok(Value::Numeric(q.clone())),
         ExprData::LitFuzzyBool(f) => Ok(Value::FuzzyBool(f.clone())),
+        ExprData::LitDate(gd) => Ok(Value::Date(gd.clone())),
         ExprData::LitSymbol(name) => {
             // Scope first (variables shadow units), then built-in function name, then unit, then symbolic.
             if let Some(stored) = env.get(name) {
@@ -1298,6 +1303,9 @@ pub fn value<'db>(
                 Value::Undefined => Err(run_err_with_span(db, expr, RunErrorKind::UndefinedResult)),
                 Value::Function(_) | Value::BuiltinFunction(_) => Err(run_err_with_span(db, expr, RunErrorKind::BindingValueNotSupported(
                     "function value cannot be converted to quantity".to_string(),
+                ))),
+                Value::Date(_) => Err(run_err_with_span(db, expr, RunErrorKind::InvalidArgument(
+                    "date value cannot be converted to quantity".to_string(),
                 ))),
             }
         }
@@ -1811,6 +1819,7 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
         ExprData::Lit(q) => ExprDef::Lit(q.clone()),
         ExprData::LitFuzzyBool(f) => ExprDef::LitFuzzyBool(f.clone()),
         ExprData::LitSymbol(name) => ExprDef::LitSymbol(name.clone()),
+        ExprData::LitDate(gd) => ExprDef::LitDate(gd.clone()),
         ExprData::Add(l, r) => ExprDef::Add(
             Box::new(expression_to_def(db, *l)),
             Box::new(expression_to_def(db, *r)),
@@ -2308,6 +2317,7 @@ fn value_to_symbolic_expr(v: &Value) -> SymbolicExpr {
         Value::Undefined => panic!("value_to_symbolic_expr: undefined not supported"),
         Value::Function(_) | Value::BuiltinFunction(_) => panic!("value_to_symbolic_expr: function not supported"),
         Value::Map(_) => panic!("value_to_symbolic_expr: map not supported"),
+        Value::Date(_) => panic!("value_to_symbolic_expr: date not supported"),
     }
 }
 
@@ -2660,6 +2670,31 @@ fn cmp_values(
                 }
             }
         }
+        (Value::Date(a), Value::Date(b)) => {
+            let a_min = a.min_epoch_sec();
+            let a_max = a.max_epoch_sec();
+            let b_min = b.min_epoch_sec();
+            let b_max = b.max_epoch_sec();
+            let fuzzy = if a_max < b_min {
+                // A strictly before B
+                match op {
+                    CmpOp::Lt | CmpOp::Le => crate::fuzzy::FuzzyBool::True,
+                    CmpOp::Gt | CmpOp::Ge | CmpOp::Eq => crate::fuzzy::FuzzyBool::False,
+                    CmpOp::Ne => crate::fuzzy::FuzzyBool::True,
+                }
+            } else if a_min > b_max {
+                // A strictly after B
+                match op {
+                    CmpOp::Gt | CmpOp::Ge => crate::fuzzy::FuzzyBool::True,
+                    CmpOp::Lt | CmpOp::Le | CmpOp::Eq => crate::fuzzy::FuzzyBool::False,
+                    CmpOp::Ne => crate::fuzzy::FuzzyBool::True,
+                }
+            } else {
+                // Intervals overlap → uncertain
+                crate::fuzzy::FuzzyBool::Uncertain(ordered_float::OrderedFloat::from(0.5))
+            };
+            Ok(Value::FuzzyBool(fuzzy))
+        }
         (Value::Numeric(qa), Value::Numeric(qb)) => {
             if !registry.same_dimension(qa.unit(), qb.unit()).unwrap_or(false) {
                 return Err(err(RunErrorKind::DimensionMismatch {
@@ -2696,6 +2731,9 @@ fn cmp_values(
             let fuzzy = probability_to_fuzzy_bool(prob, CONFIDENCE_THRESHOLD);
             Ok(Value::FuzzyBool(fuzzy))
         }
+        (Value::Date(_), _) | (_, Value::Date(_)) => Err(err(RunErrorKind::InvalidArgument(
+            "comparison with date requires both operands to be dates".to_string(),
+        ))),
         (Value::FuzzyBool(_), _) | (_, Value::FuzzyBool(_)) => Err(err(RunErrorKind::BooleanResult)),
         (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
             Err(err(RunErrorKind::UnknownFunction("function value cannot be used in comparison".to_string())))
@@ -2832,6 +2870,39 @@ fn add_values(
                 }
             }
         }
+        (Value::Date(d), Value::Numeric(q)) | (Value::Numeric(q), Value::Date(d)) => {
+            let sec_unit = Unit::from_base_unit("s");
+            if !registry.same_dimension(q.unit(), &sec_unit).unwrap_or(false) {
+                return Err(err(RunErrorKind::DimensionMismatch {
+                    left: q.unit().clone(),
+                    right: sec_unit,
+                }));
+            }
+            let duration_grain = d.grain();
+            let unit_grain = q.unit().iter()
+                .filter_map(|f| crate::date::grain_for_time_unit_name(&f.unit_name))
+                .max_by(|a, b| a.strictness().cmp(&b.strictness()));
+            let Some(dur_grain) = unit_grain else {
+                return Err(err(RunErrorKind::IncompatibleDateGrain(
+                    "duration unit could not be mapped to a grain".to_string(),
+                )));
+            };
+            if !duration_grain.at_least_as_fine_as(dur_grain) {
+                return Err(err(RunErrorKind::IncompatibleDateGrain(
+                    format!("date grain {duration_grain:?} is coarser than duration grain {dur_grain:?}"),
+                )));
+            }
+            let (_, factor) = registry.to_base_unit_representation(q.unit()).ok_or_else(|| {
+                err(RunErrorKind::DimensionMismatch {
+                    left: q.unit().clone(),
+                    right: sec_unit,
+                })
+            })?;
+            let secs = q.value() * factor;
+            // Truncate to i64 for second-scale arithmetic; sub-second duration is not used with current grains.
+            let new_anchor = d.anchor_epoch_sec() + secs as i64;
+            Ok(Value::Date(d.clone().with_anchor_epoch_sec(new_anchor)))
+        }
         (Value::Numeric(qa), Value::Numeric(qb)) => qa
             .clone()
             .add(qb, registry)
@@ -2947,6 +3018,16 @@ fn sub_values(
                     sub_values(&sum_left, &sum_right, registry, None, span)
                 }
             }
+        }
+        (Value::Date(da), Value::Date(db)) => {
+            let span_sec = da.anchor_epoch_sec() - db.anchor_epoch_sec();
+            Ok(Value::Numeric(Quantity::new(
+                span_sec as f64,
+                Unit::from_base_unit("s"),
+            )))
+        }
+        (Value::Date(_d), Value::Numeric(q)) => {
+            add_values(a, &Value::Numeric(q.clone().neg()), registry, db, span)
         }
         (Value::Numeric(qa), Value::Numeric(qb)) => qa
             .clone()
@@ -3198,6 +3279,9 @@ fn neg_value(v: &Value, span: Option<Span>) -> Result<Value, RunError> {
             sq.unit.clone(),
         ))),
         Value::Map(_) => Err(err(RunErrorKind::UnsupportedVectorOperation)),
+        Value::Date(_) => Err(err(RunErrorKind::InvalidArgument(
+            "date value cannot be negated".to_string(),
+        ))),
     }
 }
 
@@ -3210,6 +3294,7 @@ fn value_to_expr_unit(v: &Value) -> (SymbolicExpr, Unit) {
         Value::Undefined => panic!("value_to_expr_unit: undefined not supported"),
         Value::Function(_) | Value::BuiltinFunction(_) => panic!("value_to_expr_unit: function not supported"),
         Value::Map(_) => panic!("value_to_expr_unit: map not supported"),
+        Value::Date(_) => panic!("value_to_expr_unit: date not supported"),
     }
 }
 
@@ -3257,5 +3342,8 @@ RunError::new(RunErrorKind::DimensionMismatch { left, right })
         Value::Undefined => Err(RunError::new(RunErrorKind::UndefinedResult)),
         Value::Function(_) | Value::BuiltinFunction(_) => Err(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
         Value::Map(_) => Err(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
+        Value::Date(_) => Err(RunError::new(RunErrorKind::InvalidArgument(
+            "scale_expr_to_unit: date not supported".to_string(),
+        ))),
     }
 }

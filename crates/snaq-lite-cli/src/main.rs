@@ -38,11 +38,19 @@ fn print_numeric_quantity(result: &snaq_lite_lang::Quantity) {
     }
 }
 
-/// Parse CLI args into streams (name, path), numeric flag, and expression.
-/// Returns (streams, numeric, expression). Expression is empty if missing.
-fn parse_args(args: &[String]) -> (Vec<(String, String)>, bool, String) {
+/// Parse CLI args into streams (name, path), numeric flag, stream variance mode, and expression.
+/// Returns (streams, numeric, stream_variance, expression). Expression is empty if missing.
+fn parse_args(
+    args: &[String],
+) -> (
+    Vec<(String, String)>,
+    bool,
+    snaq_lite_lang::StreamVarianceMode,
+    String,
+) {
     let mut streams: Vec<(String, String)> = Vec::new();
     let mut numeric = false;
+    let mut stream_variance = snaq_lite_lang::StreamVarianceMode::Zero;
     let mut expression = String::new();
     let mut i = 0;
 
@@ -73,6 +81,24 @@ fn parse_args(args: &[String]) -> (Vec<(String, String)>, bool, String) {
                 }
                 i += 1;
             }
+            "--stream-variance" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --stream-variance requires zero or infer");
+                    std::process::exit(1);
+                }
+                match args[i].as_str().trim().to_lowercase().as_str() {
+                    "zero" => stream_variance = snaq_lite_lang::StreamVarianceMode::Zero,
+                    "infer" => {
+                        stream_variance = snaq_lite_lang::StreamVarianceMode::InferFromDecimalPlaces
+                    }
+                    other => {
+                        eprintln!("error: --stream-variance must be zero or infer, got {other:?}");
+                        std::process::exit(1);
+                    }
+                }
+                i += 1;
+            }
             _ => {
                 expression = args[i..].join(" ").trim().to_string();
                 break;
@@ -80,18 +106,19 @@ fn parse_args(args: &[String]) -> (Vec<(String, String)>, bool, String) {
         }
     }
 
-    (streams, numeric, expression)
+    (streams, numeric, stream_variance, expression)
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (streams, numeric, expression) = parse_args(&args);
+    let (streams, numeric, stream_variance, expression) = parse_args(&args);
 
     if expression.is_empty() {
-        eprintln!("usage: snaq-lite [--numeric] [--stream name=path ...] <expression>");
+        eprintln!("usage: snaq-lite [--numeric] [--stream-variance zero|infer] [--stream name=path ...] <expression>");
         eprintln!("  e.g. snaq-lite \"1 + 2 * 3\"");
         eprintln!("  e.g. snaq-lite --numeric \"1 + pi\"");
         eprintln!("  e.g. snaq-lite --stream data=numbers.txt '$data * 2'");
+        eprintln!("  e.g. snaq-lite --stream-variance infer --stream d=data.csv '$d.map(fn r => (r.x))'");
         std::process::exit(1);
     }
 
@@ -100,7 +127,7 @@ fn main() {
         return;
     }
 
-    run_stream_mode(&expression, numeric, &streams);
+    run_stream_mode(&expression, numeric, &streams, stream_variance);
 }
 
 /// Current behavior when no --stream is used.
@@ -151,7 +178,12 @@ fn run_standard(expression: &str, numeric: bool) {
 }
 
 /// Run with stream inputs: create channels, run_with_stream_inputs, feed files, consume output.
-fn run_stream_mode(expression: &str, numeric: bool, streams: &[(String, String)]) {
+fn run_stream_mode(
+    expression: &str,
+    numeric: bool,
+    streams: &[(String, String)],
+    variance_mode: snaq_lite_lang::StreamVarianceMode,
+) {
     use futures::stream::StreamExt;
 
     let registry = snaq_lite_lang::default_si_registry();
@@ -188,8 +220,11 @@ fn run_stream_mode(expression: &str, numeric: bool, streams: &[(String, String)]
             let inner = v.inner.clone();
             let mut join_handles = Vec::with_capacity(feeders.len());
             for (path, sender) in feeders {
+                let mode = variance_mode;
                 let handle = std::thread::spawn(move || {
-                    if let Err(e) = stream_feed_dispatch::feed_stream_file_to_sender(&path, sender) {
+                    if let Err(e) =
+                        stream_feed_dispatch::feed_stream_file_to_sender(&path, sender, mode)
+                    {
                         eprintln!("error: reading {}: {}", path.display(), e);
                     }
                 });

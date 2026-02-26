@@ -2,7 +2,8 @@
 //! Used by the CLI when running with `--stream name=path`.
 
 use snaq_lite_lang::{
-    Chunk, Quantity, RunError, RunErrorKind, SnaqNumber, Unit, Value,
+    decimal_string_to_quantity, Chunk, Quantity, RunError, RunErrorKind, SnaqNumber,
+    StreamVarianceMode, Unit, Value,
 };
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
@@ -16,10 +17,11 @@ const CHUNK_SIZE: usize = 8192;
 pub fn feed_file_to_sender(
     path: &Path,
     sender: futures::channel::mpsc::UnboundedSender<Chunk>,
+    variance_mode: StreamVarianceMode,
 ) -> Result<(), std::io::Error> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
-    feed_read_to_sender(reader, sender);
+    feed_read_to_sender(reader, sender, variance_mode);
     Ok(())
 }
 
@@ -28,6 +30,7 @@ pub fn feed_file_to_sender(
 pub fn feed_read_to_sender<R: Read>(
     reader: R,
     sender: futures::channel::mpsc::UnboundedSender<Chunk>,
+    variance_mode: StreamVarianceMode,
 ) {
     let scalar = Unit::scalar();
     let mut chunk = Vec::with_capacity(CHUNK_SIZE);
@@ -38,17 +41,40 @@ pub fn feed_read_to_sender<R: Read>(
         if s.is_empty() {
             continue;
         }
-        match s.parse::<f64>() {
-            Ok(n) => {
-                let q = Quantity::with_number(SnaqNumber::new(n, 0.0), scalar.clone());
-                chunk.push(Ok(Some(Value::Numeric(q))));
-            }
-            Err(_) => {
-                chunk.push(Err(RunError::new(RunErrorKind::InvalidArgument(format!(
-                    "stream feeder: invalid number: {s:?}"
-                )))));
-            }
-        }
+        let (n, variance) = match variance_mode {
+            StreamVarianceMode::Zero => match s.parse::<f64>() {
+                Ok(v) => (v, 0.0),
+                Err(_) => {
+                    chunk.push(Err(RunError::new(RunErrorKind::InvalidArgument(format!(
+                        "stream feeder: invalid number: {s:?}"
+                    )))));
+                    if chunk.len() >= CHUNK_SIZE {
+                        if sender.unbounded_send(std::mem::take(&mut chunk)).is_err() {
+                            return;
+                        }
+                        chunk = Vec::with_capacity(CHUNK_SIZE);
+                    }
+                    continue;
+                }
+            },
+            StreamVarianceMode::InferFromDecimalPlaces => match decimal_string_to_quantity(s) {
+                Some((v, var)) => (v, var),
+                None => {
+                    chunk.push(Err(RunError::new(RunErrorKind::InvalidArgument(format!(
+                        "stream feeder: invalid number: {s:?}"
+                    )))));
+                    if chunk.len() >= CHUNK_SIZE {
+                        if sender.unbounded_send(std::mem::take(&mut chunk)).is_err() {
+                            return;
+                        }
+                        chunk = Vec::with_capacity(CHUNK_SIZE);
+                    }
+                    continue;
+                }
+            },
+        };
+        let q = Quantity::with_number(SnaqNumber::new(n, variance), scalar.clone());
+        chunk.push(Ok(Some(Value::Numeric(q))));
         if chunk.len() >= CHUNK_SIZE {
             if sender.unbounded_send(std::mem::take(&mut chunk)).is_err() {
                 return;
@@ -71,7 +97,11 @@ mod tests {
     #[test]
     fn feed_read_to_sender_yields_chunks_and_eof() {
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        feed_read_to_sender("1\n2\n3\n".as_bytes(), tx);
+        feed_read_to_sender(
+            "1\n2\n3\n".as_bytes(),
+            tx,
+            StreamVarianceMode::Zero,
+        );
 
         let mut collected: Chunk = Vec::new();
         while let Some(c) = futures::executor::block_on(rx.next()) {
@@ -83,6 +113,7 @@ mod tests {
             let val = r.as_ref().unwrap().as_ref().unwrap();
             if let Value::Numeric(q) = val {
                 assert!((q.value() - (i + 1) as f64).abs() < 1e-10);
+                assert_eq!(q.variance(), 0.0, "Zero mode must yield variance 0");
             } else {
                 panic!("expected numeric");
             }
@@ -92,7 +123,11 @@ mod tests {
     #[test]
     fn feed_read_to_sender_skips_empty_lines() {
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        feed_read_to_sender("1\n\n2\n\n\n3".as_bytes(), tx);
+        feed_read_to_sender(
+            "1\n\n2\n\n\n3".as_bytes(),
+            tx,
+            StreamVarianceMode::Zero,
+        );
 
         let mut collected: Chunk = Vec::new();
         while let Some(c) = futures::executor::block_on(rx.next()) {
@@ -105,13 +140,63 @@ mod tests {
     #[test]
     fn feed_read_to_sender_invalid_line_yields_error() {
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        feed_read_to_sender("1\nfoo\n3".as_bytes(), tx);
+        feed_read_to_sender(
+            "1\nfoo\n3".as_bytes(),
+            tx,
+            StreamVarianceMode::Zero,
+        );
 
         let mut collected: Chunk = Vec::new();
         while let Some(c) = futures::executor::block_on(rx.next()) {
             collected.extend(c);
         }
 
+        assert_eq!(collected.len(), 3);
+        assert!(collected[0].as_ref().unwrap().as_ref().is_some());
+        assert!(collected[1].as_ref().is_err());
+        assert!(collected[2].as_ref().unwrap().as_ref().is_some());
+    }
+
+    #[test]
+    fn feed_read_to_sender_infer_variance_from_decimal_places() {
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        feed_read_to_sender(
+            "10.5\n10.50\n".as_bytes(),
+            tx,
+            StreamVarianceMode::InferFromDecimalPlaces,
+        );
+
+        let mut collected: Chunk = Vec::new();
+        while let Some(c) = futures::executor::block_on(rx.next()) {
+            collected.extend(c);
+        }
+        assert_eq!(collected.len(), 2);
+        let v0 = match &collected[0] {
+            Ok(Some(Value::Numeric(q))) => q,
+            _ => panic!("expected numeric"),
+        };
+        let v1 = match &collected[1] {
+            Ok(Some(Value::Numeric(q))) => q,
+            _ => panic!("expected numeric"),
+        };
+        assert_eq!(v0.value(), 10.5);
+        assert_eq!(v1.value(), 10.5);
+        assert!(v1.variance() < v0.variance(), "10.50 should have smaller variance than 10.5");
+    }
+
+    #[test]
+    fn feed_read_to_sender_infer_invalid_line_yields_error() {
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        feed_read_to_sender(
+            "10.5\nnot_a_number\n10.50".as_bytes(),
+            tx,
+            StreamVarianceMode::InferFromDecimalPlaces,
+        );
+
+        let mut collected: Chunk = Vec::new();
+        while let Some(c) = futures::executor::block_on(rx.next()) {
+            collected.extend(c);
+        }
         assert_eq!(collected.len(), 3);
         assert!(collected[0].as_ref().unwrap().as_ref().is_some());
         assert!(collected[1].as_ref().is_err());

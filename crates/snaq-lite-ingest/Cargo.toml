@@ -9,7 +9,12 @@ workspace = true
 [dependencies]
 snaq-lite-lang = { path = "../snaq-lite-lang" }
 csv = "1.3"
+arrow = { version = "53", optional = true }
+arrow-ipc = { version = "53", optional = true }
+bytes = { version = "1", optional = true }
+parquet = { version = "53", optional = true }
 
 [features]
 default = []
-# parquet = ["dep:arrow", "dep:parquet"]  # future: for .parquet/.arrow files
+# Parquet and Arrow IPC support (streaming row-by-row; requires Read+Seek for Parquet/Arrow file format).
+parquet = ["dep:arrow", "dep:arrow-ipc", "dep:bytes", "dep:parquet"]

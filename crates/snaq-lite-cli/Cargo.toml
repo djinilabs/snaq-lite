@@ -12,5 +12,10 @@ workspace = true
 
 [dependencies]
 futures = "0.3"
-snaq-lite-ingest = { path = "../snaq-lite-ingest" }
+snaq-lite-ingest = { path = "../snaq-lite-ingest", default-features = false }
 snaq-lite-lang = { path = "../snaq-lite-lang" }
+
+[features]
+default = []
+# Enable Parquet and Arrow IPC file support for --stream name=path (adds arrow/parquet deps).
+parquet = ["snaq-lite-ingest/parquet"]

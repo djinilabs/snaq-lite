@@ -68,22 +68,24 @@ The native CLI can run expressions that use `$name` by binding stream names to f
 ### Usage
 
 ```text
-snaq-lite [--numeric] [--stream name=path ...] <expression>
+snaq-lite [--numeric] [--stream-variance zero|infer] [--stream name=path ...] <expression>
 ```
 
 - **--stream name=path** (or **-s name=path**): Bind the stream `$name` to the file at `path`. Repeat for multiple streams (e.g. `--stream a=1.txt --stream b=2.txt`).
+- **--stream-variance zero|infer**: How to assign variance (uncertainty) to numbers read from stream files. **zero** (default): treat all numbers as exact (variance 0). **infer**: infer variance from the number of decimal places in the **text** (same rule as language literals: no decimal point → ±0.5; N decimal places → ±5×10^−(N+1)). Important for scientific work where reported precision (e.g. `10.50` vs `10.5`) should propagate as uncertainty. **Infer applies only to text-based sources** (CSV cells, newline-delimited lines); Parquet and Arrow always use zero variance (binary formats have no “decimal places expressed”).
 - **--numeric** / **-n**: Same as without streams; for vector results, each element is printed on its own line.
 - Each `$name` in the expression must have a corresponding `--stream name=path`; otherwise the runtime returns **unbound stream input: name**.
 
 ### File formats
 
-Format is detected from the file path (extension):
+Format is detected from the file path (extension, and optionally magic bytes for extension-less files):
 
 - **CSV** (`.csv`): First row = column headers; each following row becomes one stream element as a **map** (e.g. `{ x: 1, y: 2 }`). Cells are parsed as numbers; empty cells → undefined. Use e.g. `$data.map(fn r => (r.column_name))` to extract a column.
-- **Parquet / Arrow** (`.parquet`, `.arrow`): Intended for future support; same row-as-map semantics. Not yet implemented in the CLI.
+- **Parquet** (`.parquet`, or magic `PAR1`): Row-as-map semantics; each row is one stream element. **Requires building the CLI with the `parquet` feature** (e.g. `cargo build --features parquet`). Parsing streams row-by-row (record-batch-sized internal buffering only). Column values: numeric types → numeric; null → undefined; other types (e.g. string) → undefined.
+- **Arrow IPC** (`.arrow`, `.ipc`, or magic `ARROW1`): Same row-as-map semantics as Parquet. Also requires the `parquet` feature. Supports both IPC file format (with footer) and IPC stream format (sequential). Same column policy: numeric → numeric, null → undefined, unsupported type → undefined.
 - **Other** (e.g. no extension, `.txt`): Treated as **newline-delimited numbers**: one numeric value per line. Empty lines are skipped. Invalid lines (non-numeric) yield a stream error.
 
-Tabular files (CSV) yield a stream of maps; the language can index by column with `row.col` or `row["col"]`.
+Tabular files (CSV, and Parquet/Arrow when the feature is enabled) yield a stream of maps; the language can index by column with `row.col` or `row["col"]`. The parser trait (**TabularParser**) is implemented for each format so new formats (e.g. NDJSON, Excel) can be added by implementing it and extending format detection.
 
 ### Example (numeric lines)
 
@@ -111,6 +113,12 @@ With `--numeric`, the same command prints one value per line:
 6
 ```
 
+With **--stream-variance infer**, numeric values from text (CSV cells or newline-delimited lines) get variance from decimal places (e.g. `10.5` → larger variance than `10.50`). Example:
+
+```text
+snaq-lite --stream-variance infer --stream d=data.csv '$d.map(fn r => (r.x))'
+```
+
 ### Example (CSV tabular)
 
 With a file `data.csv` containing:
@@ -135,6 +143,7 @@ When the result is a vector (e.g. `$data * 2`), the CLI consumes the stream and 
 
 ### Limits and edge cases (CLI)
 
+- **Invalid --stream-variance:** The value must be **zero** or **infer** (case-insensitive). Any other value (e.g. `--stream-variance exact`) causes the CLI to exit with **error: --stream-variance must be zero or infer, got "…"**. The option is global (applies to all streams in the run).
 - **Duplicate stream name:** If you pass the same name twice (e.g. `--stream x=a.txt --stream x=b.txt`), the CLI exits with **duplicate stream name: x**.
 - **File not found:** If a file at `path` cannot be opened, the feeder thread logs to stderr and closes the sender; that stream yields no data, so the pipeline may produce an empty or partial result. The run does not fail; check stderr for I/O errors.
 - **Invalid line (numeric files):** A non-numeric line in a newline-delimited numeric file yields a stream error; the run fails and the CLI prints the error.
@@ -147,4 +156,4 @@ When the result is a vector (e.g. `$data * 2`), the CLI consumes the stream and 
 - **Chunks** — batches of elements (Ok(Some(value)), Ok(None), or Err) pushed by the Host.
 - **Registry** — maps names to stream handle ids; the actual receiver is registered separately and consumed when the stream is driven.
 - **Host** — creates channel, registers receiver, sets stream input map, runs with **run_with_stream_inputs**, then consumes the vector stream while pushing chunks and closing the sender for EOF.
-- **Tabular (CLI):** CSV files (by extension) are parsed as rows; each row is one stream element as a map. Parquet/Arrow are planned; in WASM, the host can parse in JS and push row-shaped chunks via a future API (e.g. `pushChunkRows`).
+- **Tabular (CLI):** CSV files (by extension) are parsed as rows; each row is one stream element as a map. Parquet and Arrow IPC are supported when the CLI is built with the `parquet` feature; parsing is row-by-row (no full-file materialization of rows). In WASM, the host can parse in JS and push row-shaped chunks via `pushChunk` with map values.

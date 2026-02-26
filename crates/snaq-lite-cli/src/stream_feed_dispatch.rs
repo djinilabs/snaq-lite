@@ -2,11 +2,10 @@
 //! Uses [snaq_lite_ingest] for format detection and tabular parsing.
 
 use crate::stream_feeder;
-use snaq_lite_ingest::{detect_format, parse_tabular};
+use snaq_lite_ingest::{detect_format, parse_tabular, ReadSeek};
 use snaq_lite_lang::{
-    record_to_chunk_element, Chunk, RunError, RunErrorKind,
+    record_to_chunk_element, Chunk, RunError, RunErrorKind, StreamVarianceMode,
 };
-use std::io::Read;
 use std::path::Path;
 
 /// Maximum rows per chunk (tabular) to avoid huge allocations.
@@ -18,13 +17,14 @@ const CHUNK_SIZE: usize = 8192;
 pub fn feed_stream_file_to_sender(
     path: &Path,
     sender: futures::channel::mpsc::UnboundedSender<Chunk>,
+    variance_mode: StreamVarianceMode,
 ) -> Result<(), std::io::Error> {
     let format = detect_format(path, None);
 
     if format.is_tabular() && format.is_supported() {
-        feed_tabular_to_sender(path, sender)
+        feed_tabular_to_sender(path, sender, variance_mode)
     } else {
-        stream_feeder::feed_file_to_sender(path, sender)
+        stream_feeder::feed_file_to_sender(path, sender, variance_mode)
     }
 }
 
@@ -32,12 +32,13 @@ pub fn feed_stream_file_to_sender(
 fn feed_tabular_to_sender(
     path: &Path,
     sender: futures::channel::mpsc::UnboundedSender<Chunk>,
+    variance_mode: StreamVarianceMode,
 ) -> Result<(), std::io::Error> {
     let file = std::fs::File::open(path)?;
     let format = detect_format(path, None);
-    let reader: Box<dyn Read + Send> = Box::new(file);
+    let reader: Box<dyn ReadSeek> = Box::new(file);
 
-    let iter = match parse_tabular(format, reader) {
+    let iter = match parse_tabular(format, reader, variance_mode) {
         Ok(it) => it,
         Err(e) => {
             let run_err = RunError::new(RunErrorKind::InvalidArgument(e.to_string()));
@@ -89,6 +90,15 @@ mod tests {
         contents: &str,
         unique: &str,
     ) -> Vec<Result<Option<Value>, RunError>> {
+        feed_temp_file_and_collect_with_mode(extension, contents, unique, StreamVarianceMode::Zero)
+    }
+
+    fn feed_temp_file_and_collect_with_mode(
+        extension: &str,
+        contents: &str,
+        unique: &str,
+        variance_mode: StreamVarianceMode,
+    ) -> Vec<Result<Option<Value>, RunError>> {
         let tmp = std::env::temp_dir().join(format!(
             "snaq_dispatch_{}_{}.{}",
             std::process::id(),
@@ -97,13 +107,20 @@ mod tests {
         ));
         std::fs::write(&tmp, contents).expect("write");
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        feed_stream_file_to_sender(&tmp, tx).expect("feed");
+        feed_stream_file_to_sender(&tmp, tx, variance_mode).expect("feed");
         let _ = std::fs::remove_file(&tmp);
         let mut chunks = Vec::new();
         while let Some(chunk) = futures::executor::block_on(rx.next()) {
             chunks.push(chunk);
         }
         chunks.into_iter().flatten().collect()
+    }
+
+    fn numeric_variance(v: &Value) -> Option<f64> {
+        match v {
+            Value::Numeric(q) => Some(q.variance()),
+            _ => None,
+        }
     }
 
     #[test]
@@ -155,5 +172,27 @@ mod tests {
         let run_err = flat[0].as_ref().unwrap_err();
         assert!(matches!(run_err.kind, RunErrorKind::InvalidArgument(_)));
         assert!(run_err.to_string().contains("invalid number"));
+    }
+
+    #[test]
+    fn feed_tabular_csv_with_infer_variance_yields_different_variances() {
+        let flat = feed_temp_file_and_collect_with_mode(
+            "csv",
+            "a,b\n10.5,10.50",
+            "infer_var",
+            StreamVarianceMode::InferFromDecimalPlaces,
+        );
+        assert_eq!(flat.len(), 1, "one row");
+        let val = flat[0].as_ref().expect("no error").as_ref().expect("some value");
+        let id = match val {
+            Value::Map(id) => *id,
+            _ => panic!("expected Map"),
+        };
+        let va = snaq_lite_lang::map_registry::get_key(id, "a");
+        let vb = snaq_lite_lang::map_registry::get_key(id, "b");
+        let var_a = va.and_then(|v| numeric_variance(&v));
+        let var_b = vb.and_then(|v| numeric_variance(&v));
+        assert!(var_a.is_some() && var_b.is_some(), "both columns numeric");
+        assert!(var_b.unwrap() < var_a.unwrap(), "10.50 should have smaller variance than 10.5");
     }
 }

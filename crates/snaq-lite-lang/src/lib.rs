@@ -24,6 +24,7 @@ pub mod vector;
 pub mod vector_registry;
 pub mod map_registry;
 pub mod stream_handle;
+pub mod stream_variance;
 
 pub use error::{format_run_error_with_source, ParseError, RunError, RunErrorKind, Span};
 pub use quantity::{Quantity, QuantityError, SnaqNumber};
@@ -41,6 +42,7 @@ pub use stream_handle::{Chunk, StreamHandleId, create_stream_input, register, ta
 pub use map_registry::{
     MapId, Record, record_to_chunk_element, record_to_value,
 };
+pub use stream_variance::{decimal_string_to_quantity, StreamVarianceMode};
 
 /// Parse and evaluate the expression, returning a Value (symbolic by default, e.g. "6 + π").
 ///

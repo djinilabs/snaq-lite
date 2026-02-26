@@ -37,7 +37,7 @@ pub use fuzzy::FuzzyBool;
 pub use symbolic::{SymbolicQuantity, SymbolicExpr, Value};
 pub use vector::{LazyVector, VectorOrientation, VectorValue};
 pub use unit_registry::{default_si_registry, UnitRegistry};
-pub use stream_handle::{Chunk, StreamHandleId, register, take_receiver};
+pub use stream_handle::{Chunk, StreamHandleId, create_stream_input, register, take_receiver};
 
 /// Parse and evaluate the expression, returning a Value (symbolic by default, e.g. "6 + π").
 ///
@@ -3290,6 +3290,42 @@ mod tests {
             },
             _ => panic!("expected Value::Vector, got {:?}", v),
         }
+    }
+
+    #[test]
+    fn create_stream_input_returns_id_and_sender() {
+        use crate::quantity::Quantity;
+        use crate::symbolic::Value;
+        use futures::stream::StreamExt;
+
+        let registry = default_si_registry();
+        let (handle_id, tx) = create_stream_input();
+
+        let (val, db) = run_with_stream_inputs(
+            "$data",
+            &registry,
+            std::collections::HashMap::from([("data".to_string(), handle_id)]),
+        )
+        .unwrap();
+
+        let lv = match &val {
+            Value::Vector(v) => v.inner.clone(),
+            _ => panic!("expected vector"),
+        };
+
+        let scalar = Unit::scalar();
+        tx.unbounded_send(vec![
+            Ok(Some(Value::Numeric(Quantity::new(1.0, scalar.clone())))),
+            Ok(Some(Value::Numeric(Quantity::new(2.0, scalar)))),
+        ])
+        .unwrap();
+        drop(tx);
+
+        let stream = vector_into_stream(&db, lv);
+        let results: Vec<_> = futures::executor::block_on(stream.collect());
+        assert_eq!(results.len(), 2);
+        assert!(matches!(&results[0], Ok(Some(Value::Numeric(q))) if (q.value() - 1.0).abs() < 1e-10));
+        assert!(matches!(&results[1], Ok(Some(Value::Numeric(q))) if (q.value() - 2.0).abs() < 1e-10));
     }
 
     #[test]

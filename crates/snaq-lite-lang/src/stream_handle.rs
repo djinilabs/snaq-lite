@@ -34,6 +34,20 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+/// Create a new stream input: allocates a channel, registers the receiver, and returns
+/// the handle id and the sender. The Host uses the sender to push [Chunk]s; dropping
+/// the sender signals EOF. Use the returned id in the stream input registry (e.g. for
+/// [run_with_stream_inputs](crate::run_with_stream_inputs)).
+///
+/// The receiver is single-consumer: the first call to [take_receiver] that uses this id
+/// will take the receiver out; subsequent use of the same id will get None.
+pub fn create_stream_input(
+) -> (StreamHandleId, futures::channel::mpsc::UnboundedSender<Chunk>) {
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    let id = register(rx);
+    (id, tx)
+}
+
 /// Register the receiving end of an unbounded channel. The Host holds the sender and pushes
 /// [Chunk]s; dropping the sender signals EOF. Returns the handle id to use in
 /// the stream input registry.

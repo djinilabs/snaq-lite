@@ -1178,10 +1178,15 @@ dependencies = [
 name = "snaq-lite-wasm"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "getrandom",
+ "js-sys",
+ "salsa",
  "snaq-lite-lang",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wasm-bindgen-test",
+ "web-sys",
 ]
 
 [[package]]

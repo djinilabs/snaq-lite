@@ -41,6 +41,7 @@ This document lists the main error conditions and edge cases you may encounter w
 | **Comparison with date** | Comparing a date with a non-date (e.g. `@2026 < 1`) returns an error: both operands must be dates. |
 | **Unbound stream input** | The program uses `$name` (external stream) but the Host did not set the stream input registry, or did not register that name. Evaluation fails with **unbound stream input: $name**. Use [run_with_stream_inputs](EXTERNAL_STREAMS.md#host-workflow) and register the receiver for each `$name`. |
 | **Stream input not available** | When consuming a vector stream (e.g. from `vector_into_stream`), the stream input handle was already consumed or never registered. The stream yields one error (**stream input not available (already consumed or not registered)**) then completes. See [EXTERNAL_STREAMS.md](EXTERNAL_STREAMS.md#limits-and-platform). |
+| **WASM Host API** | When using the WASM Host API: **stream index not found** (createStreamInput/pushChunk/closeStream/startFeeder with invalid index); **stream_input_map value must be a non-negative integer** (runWithStreamInputs with non-integer or negative value); **stream sender closed** (pushChunk after closeStream); **run result already consumed or invalid runIndex** / **run result is not a vector** (consumeOutputStream); **chunk element must be number or null** (pushChunk with invalid array element); **argument must be a ReadableStream** (startFeeder). See [EXTERNAL_STREAMS.md](EXTERNAL_STREAMS.md#wasm-host-browser). |
 
 ### How runtime and parse errors are shown
 

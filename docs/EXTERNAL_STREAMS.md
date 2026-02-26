@@ -34,6 +34,33 @@ The Host pushes data in **chunks**. Each chunk is a list of elements in the runt
 - **Stream handle is single-consumer:** Each registered receiver is taken by the runtime when you call **vector_into_stream** on a pipeline that uses that input. Calling **vector_into_stream** again on the same pipeline (or another expression that uses the same `$name`) will not see the data again; the stream yields one error (**stream input not available (already consumed or not registered)**) then completes.
 - **WASM:** The stream handle registry is thread-local. On WASM, drive the stream in an async task (e.g. with `wasm-bindgen-futures` or your async runtime) so that the main thread is not blocked. Chunked push and consumption work the same as on native targets.
 
+## WASM Host (browser)
+
+When the runtime runs as WebAssembly in the browser, the Host has no access to the native file system. Data must come from browser APIs (e.g. `fetch()` response body, `File.stream()` from an file input). The WASM build exposes a Host API that uses **single-threaded async**: channels and streams are driven via `wasm-bindgen-futures` so the main thread is not blocked and the UI stays responsive.
+
+### I/O safeguards
+
+- **No file paths:** All input is from JS: pass a `ReadableStream` (e.g. `response.body` or `file.stream()`) into the feeder, or build chunks in JS and call `pushChunk(streamIndex, array)`.
+- **Memory limit:** WASM is constrained to a 4GB address space. The Host must not load entire files into memory; use chunked reading and fixed-size batches (e.g. 8,192 rows per chunk when parsing).
+- **Event-loop yielding:** The consumer and feeder yield to the browser event loop periodically (consumer: every 16 elements; feeder: every 4 read calls) so the tab can paint and handle input. These intervals are fixed; a future version could expose them as options.
+- **Indices:** Stream and run indices are not reclaimed; slots grow with use over the page lifetime. For long-lived apps with many runs, consider reusing a small set of stream inputs where possible.
+
+### Host API (WASM)
+
+- **createStreamInput()** → `streamIndex` (number). Creates a channel and registers the receiver; the Host uses the returned index in the stream input map and for pushing data.
+- **runWithStreamInputs(script, streamInputMap)** → `{ runIndex, isVector }`. `streamInputMap` is a JS object mapping stream names to **non-negative integer** stream indices from `createStreamInput` (e.g. `{ data: 0 }`). Returns a run index for consumption.
+- **pushChunk(streamIndex, array)** — Push a chunk: `array` is a JS array of numbers (or `null` for sparse). Converts to scalar dimensionless values (variance 0). Fails if the stream was already closed.
+- **closeStream(streamIndex)** — Signal end-of-stream for that stream. After this, `pushChunk` for this index will fail.
+- **startFeeder(streamIndex, readableStream)** — Start an async task that reads from the JS `ReadableStream`, parses **newline-delimited numbers**, pushes chunks, and yields to the event loop. When the ReadableStream ends or a read fails, the feeder closes the stream (consumer sees EOF). For other formats (CSV, Parquet, etc.), parse in JS and use `pushChunk` instead.
+- **consumeOutputStream(runIndex, onChunk, onDone, onError)** — Drive the output stream: `onChunk(element)` for each element (number for numeric, `null` for sparse/undefined, or object `{ uncertain: p }` for fuzzy boolean), `onDone()` at end, `onError(message)` when the run result is invalid or the stream yields an error. Yields every 16 elements. **Callbacks must not throw**; if they do, behavior is unspecified.
+
+### Host execution loop
+
+1. **Initialization:** For each `$name` used in the script, call `createStreamInput()` and build a map from name to stream index (e.g. `{ data: createStreamInput() }`).
+2. **Pipeline construction:** Call `runWithStreamInputs(script, streamInputMap)`. This runs Salsa synchronously and returns the terminal value (and a run index). If the result is a vector, it is a pipeline that will read from the registered streams.
+3. **Feeder task:** For each stream that is backed by a byte source, call `startFeeder(streamIndex, readStream)` so the Host reads from the stream, parses in chunks, yields to the event loop, and pushes chunks. Alternatively, parse in JS and call `pushChunk(streamIndex, array)` in a loop; when done, call `closeStream(streamIndex)`.
+4. **Consumer task:** Call `consumeOutputStream(runIndex, onChunk, onDone, onError)`. The Host drives the output stream in an async task, yields periodically, and invokes the callbacks. Serialize or display results in JS (e.g. update the UI or trigger a download).
+
 ## Summary
 
 - **`$name`** — external stream reference; resolved from the Host’s stream input registry.

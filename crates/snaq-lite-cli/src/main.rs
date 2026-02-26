@@ -67,11 +67,14 @@ fn main() {
                             println!("{value_str} {}", result.unit());
                         }
                     }
-                    Err(e) => {
-                        let msg = snaq_lite_lang::format_run_error_with_source(&e, Some(&expression));
-                        eprintln!("error: {msg}");
-                        let _ = std::io::stderr().flush();
-                        std::process::exit(1);
+                    Err(_) => {
+                        // Not a quantity (e.g. date, boolean, map): still present the result in display form
+                        if let Ok(formatted) = snaq_lite_lang::run_format(&expression) {
+                            println!("{formatted}");
+                        } else {
+                            eprintln!("error: failed to format result");
+                            std::process::exit(1);
+                        }
                     }
                 }
             }

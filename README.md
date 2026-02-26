@@ -46,7 +46,7 @@ Use `run_with_registry(input, &UnitRegistry)` (and optional symbol registry) for
 | `[1, 2, 3]` | vector `[1, 2, 3]` |
 | `fn mysum(a, b) => (a + b)` then `mysum(1, 2)` | `3` |
 
-**CLI:** `snaq-lite "1 + pi"` (symbolic); `snaq-lite --numeric "1 + pi"` (numeric).
+**CLI:** `snaq-lite "1 + pi"` (symbolic); `snaq-lite --numeric "1 + pi"` (numeric). With `--numeric` (or `-n`), if the result is not a single quantity (e.g. a date, a comparison, a map), the CLI still prints the result in display form instead of erroring.
 
 ---
 

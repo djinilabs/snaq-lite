@@ -1,4 +1,5 @@
 mod stream_feeder;
+mod stream_feed_dispatch;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -188,7 +189,7 @@ fn run_stream_mode(expression: &str, numeric: bool, streams: &[(String, String)]
             let mut join_handles = Vec::with_capacity(feeders.len());
             for (path, sender) in feeders {
                 let handle = std::thread::spawn(move || {
-                    if let Err(e) = stream_feeder::feed_file_to_sender(&path, sender) {
+                    if let Err(e) = stream_feed_dispatch::feed_stream_file_to_sender(&path, sender) {
                         eprintln!("error: reading {}: {}", path.display(), e);
                     }
                 });

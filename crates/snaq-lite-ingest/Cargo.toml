@@ -1,0 +1,15 @@
+[package]
+name = "snaq-lite-ingest"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+snaq-lite-lang = { path = "../snaq-lite-lang" }
+csv = "1.3"
+
+[features]
+default = []
+# parquet = ["dep:arrow", "dep:parquet"]  # future: for .parquet/.arrow files

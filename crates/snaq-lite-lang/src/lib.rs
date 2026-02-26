@@ -38,6 +38,9 @@ pub use symbolic::{SymbolicQuantity, SymbolicExpr, Value};
 pub use vector::{LazyVector, VectorOrientation, VectorValue};
 pub use unit_registry::{default_si_registry, UnitRegistry};
 pub use stream_handle::{Chunk, StreamHandleId, create_stream_input, register, take_receiver};
+pub use map_registry::{
+    MapId, Record, record_to_chunk_element, record_to_value,
+};
 
 /// Parse and evaluate the expression, returning a Value (symbolic by default, e.g. "6 + π").
 ///

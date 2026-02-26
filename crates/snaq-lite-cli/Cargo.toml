@@ -12,4 +12,5 @@ workspace = true
 
 [dependencies]
 futures = "0.3"
+snaq-lite-ingest = { path = "../snaq-lite-ingest" }
 snaq-lite-lang = { path = "../snaq-lite-lang" }

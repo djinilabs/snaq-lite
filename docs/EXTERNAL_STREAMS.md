@@ -75,11 +75,17 @@ snaq-lite [--numeric] [--stream name=path ...] <expression>
 - **--numeric** / **-n**: Same as without streams; for vector results, each element is printed on its own line.
 - Each `$name` in the expression must have a corresponding `--stream name=path`; otherwise the runtime returns **unbound stream input: name**.
 
-### File format
+### File formats
 
-Input files are **newline-delimited numbers**: one numeric value per line. Empty lines are skipped. Invalid lines (non-numeric) yield a stream error and the run fails.
+Format is detected from the file path (extension):
 
-### Example
+- **CSV** (`.csv`): First row = column headers; each following row becomes one stream element as a **map** (e.g. `{ x: 1, y: 2 }`). Cells are parsed as numbers; empty cells → undefined. Use e.g. `$data.map(fn r => (r.column_name))` to extract a column.
+- **Parquet / Arrow** (`.parquet`, `.arrow`): Intended for future support; same row-as-map semantics. Not yet implemented in the CLI.
+- **Other** (e.g. no extension, `.txt`): Treated as **newline-delimited numbers**: one numeric value per line. Empty lines are skipped. Invalid lines (non-numeric) yield a stream error.
+
+Tabular files (CSV) yield a stream of maps; the language can index by column with `row.col` or `row["col"]`.
+
+### Example (numeric lines)
 
 With a file `numbers.txt` containing:
 
@@ -105,6 +111,24 @@ With `--numeric`, the same command prints one value per line:
 6
 ```
 
+### Example (CSV tabular)
+
+With a file `data.csv` containing:
+
+```text
+x,y
+1,2
+3,4
+```
+
+running:
+
+```text
+snaq-lite --stream d=data.csv '$d.map(fn r => (r.x))'
+```
+
+prints `[1, 3]` (column `x` from each row).
+
 ### Output
 
 When the result is a vector (e.g. `$data * 2`), the CLI consumes the stream and prints it as `[e1, e2, ...]` (or, with `--numeric`, one element per line). When the result is not a vector (e.g. a scalar expression that does not use streams), the single value is formatted and printed.
@@ -113,7 +137,8 @@ When the result is a vector (e.g. `$data * 2`), the CLI consumes the stream and 
 
 - **Duplicate stream name:** If you pass the same name twice (e.g. `--stream x=a.txt --stream x=b.txt`), the CLI exits with **duplicate stream name: x**.
 - **File not found:** If a file at `path` cannot be opened, the feeder thread logs to stderr and closes the sender; that stream yields no data, so the pipeline may produce an empty or partial result. The run does not fail; check stderr for I/O errors.
-- **Invalid line:** A non-numeric line in the file yields a stream error; the run fails and the CLI prints the error.
+- **Invalid line (numeric files):** A non-numeric line in a newline-delimited numeric file yields a stream error; the run fails and the CLI prints the error.
+- **Invalid cell (CSV):** A non-numeric cell in a CSV row yields a stream error (one `Err` element in the stream); the run fails and the CLI prints the error.
 - **Feeder thread panic:** If a feeder thread panics (e.g. bug in the feeder), the main thread reports **stream feeder thread panicked** and exits with code 1 after consumption finishes.
 
 ## Summary
@@ -122,3 +147,4 @@ When the result is a vector (e.g. `$data * 2`), the CLI consumes the stream and 
 - **Chunks** — batches of elements (Ok(Some(value)), Ok(None), or Err) pushed by the Host.
 - **Registry** — maps names to stream handle ids; the actual receiver is registered separately and consumed when the stream is driven.
 - **Host** — creates channel, registers receiver, sets stream input map, runs with **run_with_stream_inputs**, then consumes the vector stream while pushing chunks and closing the sender for EOF.
+- **Tabular (CLI):** CSV files (by extension) are parsed as rows; each row is one stream element as a map. Parquet/Arrow are planned; in WASM, the host can parse in JS and push row-shaped chunks via a future API (e.g. `pushChunkRows`).

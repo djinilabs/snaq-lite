@@ -83,6 +83,7 @@ FnName: String = {
 };
 
 // Block item: named function, binding, or expression.
+// Standalone expression uses ExprReset so top-level and RHS accept full expressions (LALRPOP #596 workaround).
 BlockItem: SpannedExprDef = {
     <lo:@L> "fn" <name:FnName> "(" <params:ParamList> ")" "=>" <content:BlockBracedContent> <hi:@R> => {
         let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
@@ -114,7 +115,7 @@ BlockItem: SpannedExprDef = {
         span: Span { start: lo, end: hi },
         value: SpannedExprDefKind::Binding(name, Box::new(rhs))
     },
-    <e:Expr> => e,
+    <e:ExprReset> => e,
 };
 
 // One parameter: (name) or (name = default_expr).
@@ -325,7 +326,7 @@ ImplicitMulRight: SpannedExprDef = {
         span: Span { start: lo, end: hi },
         value: SpannedExprDefKind::LitScalar(n)
     },
-    <lo:@L> "(" <e:Expr> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: e.value },
+    <lo:@L> "(" <e:ExprReset> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: e.value },
 };
 
 // Number followed by one or more idents: "1 s" or "2 pi rad" as a single factor.
@@ -504,7 +505,7 @@ Factor: SpannedExprDef = {
     <lo:@L> <id:FuncIdent> "(" <args:ArgList> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Call(id, args) },
     <lo:@L> <name:DollarIdent> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::ExternalStream(name) },
     <ii:IdentIdents> => ii,
-    <lo:@L> "(" <e:Expr> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: e.value },
+    <lo:@L> "(" <e:ExprReset> ")" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: e.value },
     <lo:@L> "[" <elems:VecExprList> "]" <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::VecLiteral(elems) },
     <lo:@L> "{" <k:Ident> ":" <v:Expr> <rest:MapEntryListRest> "}" <hi:@R> => SpannedExprDef {
         span: Span { start: lo, end: hi },
@@ -528,10 +529,11 @@ MapEntryListRest: Vec<(String, SpannedExprDef)> = {
 };
 
 // Comma-separated list of expressions for vector literal: [ expr, expr, ... ] or [].
+// Uses ExprReset so each element accepts full expressions (LALRPOP #596 workaround).
 VecExprList: Vec<SpannedExprDef> = {
     => vec![],
-    <single:Expr> => vec![single],
-    <rest:VecExprList> "," <last:Expr> => {
+    <single:ExprReset> => vec![single],
+    <rest:VecExprList> "," <last:ExprReset> => {
         let mut rest = rest;
         rest.push(last);
         rest

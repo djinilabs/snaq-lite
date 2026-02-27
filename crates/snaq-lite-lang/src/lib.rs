@@ -721,7 +721,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in comparison/top-level context"]
     fn parse_comparison() {
         let parsed = parse("1 == 2").unwrap().to_expr_def();
         assert!(matches!(parsed, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::Eq(_, _))));
@@ -806,7 +805,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in comparison/top-level context"]
     fn run_comparison_scalar_numeric() {
         // Result is Value::FuzzyBool (crisp when literals have low variance, e.g. decimals)
         let v = run_with_registry("1.0 == 2.0", &default_si_registry()).unwrap();
@@ -826,7 +824,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in comparison/top-level context"]
     fn run_comparison_precedence() {
         // 1 + 2 < 3 + 4 => (1+2) < (3+4) => 3 < 7 => true
         let v = run_with_registry("1 + 2 < 3 + 4", &default_si_registry()).unwrap();
@@ -834,14 +831,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in comparison/top-level context"]
     fn run_comparison_dimension_mismatch() {
         let e = run_with_registry("1 m < 1 s", &default_si_registry()).unwrap_err();
         assert!(matches!(e.kind, RunErrorKind::DimensionMismatch { .. }));
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in comparison/top-level context"]
     fn run_comparison_vector_scalar() {
         use crate::queries::{program, set_eval_registry, value, vector_into_stream};
         use crate::resolve;
@@ -871,7 +866,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in comparison/top-level context"]
     fn run_comparison_vector_vector_element_wise() {
         use crate::queries::{program, set_eval_registry, value, vector_into_stream};
         use crate::resolve;
@@ -902,7 +896,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in comparison/top-level context"]
     fn run_comparison_cas_fold() {
         // 1 < 2 constant-folds to LitFuzzyBool(True); run_numeric returns BooleanResult
         let e = run_numeric("1 < 2").unwrap_err();
@@ -910,7 +903,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in comparison/top-level context"]
     fn run_comparison_format() {
         // Comparison results display as "true" or "false" (use decimal literals for crisp)
         assert_eq!(run_format("1.0 < 2.0").unwrap(), "true");
@@ -919,7 +911,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in comparison/top-level context"]
     fn run_comparison_symbolic_display() {
         // Symbolic comparison displays as (expr) op (expr)
         let s = run_format("1 + pi < 3").unwrap();
@@ -928,7 +919,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in comparison/top-level context"]
     fn run_comparison_row_column_reduce() {
         // row×column: compare(sum(left), sum(right)) → one Value::FuzzyBool
         // [1 m, 2 m]' < [2 m, 1 m] => sum 3 m < 3 m. With variance, can be False or Uncertain (not True).
@@ -943,7 +933,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in vector literal context"]
     fn run_format_vector_of_booleans() {
         // Vector of comparison results displays as [true, false, ...] (decimal literals for crisp)
         assert_eq!(run_format("[1.0 < 2.0, 1.0 == 2.0]").unwrap(), "[true, false]");
@@ -1269,7 +1258,6 @@ mod tests {
 
     /// Runtime errors that have a span include source location and snippet when formatted with source.
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in this context"]
     fn run_runtime_error_shows_location_and_snippet() {
         // Use Div so the error is built with expr.span(db) and gets a span.
         let source = "(1 < 2) / (2 < 1)";
@@ -1349,7 +1337,6 @@ mod tests {
 
     /// Multi-line source: error with span is reported with location and message.
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in this context"]
     fn run_runtime_error_multiline_includes_location_and_message() {
         let source = "1 + 1\n(1 < 2) / (2 < 1)";
         let e = run(source).unwrap_err();
@@ -2926,7 +2913,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in vector literal context"]
     fn run_vector_all_any() {
         // With variance, comparisons can be Uncertain; all()/any() combine FuzzyBools
         let all_true = run_format("[1 < 2, 2 < 3, 3 < 4].all()").unwrap();

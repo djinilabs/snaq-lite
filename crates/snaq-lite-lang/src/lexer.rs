@@ -375,28 +375,32 @@ impl<'input> Iterator for Lexer<'input> {
             self.pos += "π".len();
             return Some(Ok((start, Tok::Pi, self.pos)));
         }
-        // Two-char comparison tokens before single '<' or '>'
+        // Two-char comparison tokens before single '<' or '>'. Next token may start an expression (e.g. RHS vector literal).
         if rest.starts_with("==") {
             self.last_was_number = false;
             self.any_token_emitted = true;
+            self.after_postfix_factor = false;
             self.pos += 2;
             return Some(Ok((start, Tok::Eq, self.pos)));
         }
         if rest.starts_with("!=") {
             self.last_was_number = false;
             self.any_token_emitted = true;
+            self.after_postfix_factor = false;
             self.pos += 2;
             return Some(Ok((start, Tok::Ne, self.pos)));
         }
         if rest.starts_with("<=") {
             self.last_was_number = false;
             self.any_token_emitted = true;
+            self.after_postfix_factor = false;
             self.pos += 2;
             return Some(Ok((start, Tok::Le, self.pos)));
         }
         if rest.starts_with(">=") {
             self.last_was_number = false;
             self.any_token_emitted = true;
+            self.after_postfix_factor = false;
             self.pos += 2;
             return Some(Ok((start, Tok::Ge, self.pos)));
         }

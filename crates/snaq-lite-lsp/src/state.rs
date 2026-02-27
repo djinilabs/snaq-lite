@@ -96,6 +96,21 @@ impl LspState {
         self.version
     }
 
+    /// Current document URI (for pub-sub subscription validation).
+    pub fn uri(&self) -> Option<&Url> {
+        self.uri.as_ref()
+    }
+
+    /// Current source text (for run_with_stream_inputs in subscribe).
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Unit registry (for run_with_stream_inputs in subscribe).
+    pub fn unit_registry(&self) -> &UnitRegistry {
+        &self.unit_registry
+    }
+
     /// Return current diagnostics (after last update_document).
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
         self.diagnostics.clone()

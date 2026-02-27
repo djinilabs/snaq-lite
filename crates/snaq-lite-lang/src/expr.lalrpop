@@ -237,8 +237,9 @@ Expr: SpannedExprDef = {
 };
 
 // Conditional: if condition then expression else expression.
+// Uses ExprReset (not Expr) so condition and branches accept full expressions (LALRPOP #596 workaround).
 IfExpr: SpannedExprDef = {
-    <lo:@L> "if" <cond:Expr> "then" <then_b:Expr> "else" <else_b:Expr> <hi:@R> => SpannedExprDef {
+    <lo:@L> "if" <cond:ExprReset> "then" <then_b:ExprReset> "else" <else_b:ExprReset> <hi:@R> => SpannedExprDef {
         span: Span { start: lo, end: hi },
         value: SpannedExprDefKind::If(Box::new(cond), Box::new(then_b), Box::new(else_b))
     }
@@ -249,6 +250,66 @@ AddExpr: SpannedExprDef = {
     <lo:@L> <l:AddExpr> "-" <r:Term> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Sub(Box::new(l), Box::new(r)) },
     <lo:@L> <e:AddExpr> "as" <u:UnitTerm> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::As(Box::new(e), Box::new(u)) },
     Term,
+};
+
+// Full expression without precedence (LALRPOP #596 workaround). Used in IfExpr so condition and branches accept full expressions.
+ExprReset: SpannedExprDef = {
+    <if_expr:IfExpr> => if_expr,
+    <lo:@L> <a:AddExpr> "<" <b:AddExpr> "<" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Lt(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Lt(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    <lo:@L> <a:AddExpr> "<" <b:AddExpr> "<=" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Lt(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Le(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    <lo:@L> <a:AddExpr> "<=" <b:AddExpr> "<" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Le(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Lt(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    <lo:@L> <a:AddExpr> "<=" <b:AddExpr> "<=" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Le(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Le(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    <lo:@L> <a:AddExpr> ">" <b:AddExpr> ">" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Gt(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Gt(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    <lo:@L> <a:AddExpr> ">" <b:AddExpr> ">=" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Gt(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Ge(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    <lo:@L> <a:AddExpr> ">=" <b:AddExpr> ">" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Ge(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Gt(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    <lo:@L> <a:AddExpr> ">=" <b:AddExpr> ">=" <c:AddExpr> <hi:@R> => {
+        let span = Span { start: lo, end: hi };
+        let c1 = SpannedExprDef { span, value: SpannedExprDefKind::Ge(Box::new(a.clone()), Box::new(b.clone())) };
+        let c2 = SpannedExprDef { span, value: SpannedExprDefKind::Ge(Box::new(b), Box::new(c)) };
+        SpannedExprDef { span, value: SpannedExprDefKind::And(Box::new(c1), Box::new(c2)) }
+    },
+    <lo:@L> <l:AddExpr> "==" <r:AddExpr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Eq(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> "!=" <r:AddExpr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Ne(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> "<" <r:AddExpr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Lt(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> "<=" <r:AddExpr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Le(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> ">" <r:AddExpr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Gt(Box::new(l), Box::new(r)) },
+    <lo:@L> <l:AddExpr> ">=" <r:AddExpr> <hi:@R> => SpannedExprDef { span: Span { start: lo, end: hi }, value: SpannedExprDefKind::Ge(Box::new(l), Box::new(r)) },
+    AddExpr,
 };
 
 // Unit-only expression (idents, *, /, per).

@@ -345,18 +345,21 @@ impl<'input> Iterator for Lexer<'input> {
         if rest.starts_with("if") && !rest[2..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
             self.last_was_number = false;
             self.any_token_emitted = true;
+            self.after_postfix_factor = false; // next token may start an expression (e.g. condition)
             self.pos += 2;
             return Some(Ok((start, Tok::If, self.pos)));
         }
         if rest.starts_with("then") && !rest[4..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
             self.last_was_number = false;
             self.any_token_emitted = true;
+            self.after_postfix_factor = false; // next token may start an expression (then branch)
             self.pos += 4;
             return Some(Ok((start, Tok::Then, self.pos)));
         }
         if rest.starts_with("else") && !rest[4..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
             self.last_was_number = false;
             self.any_token_emitted = true;
+            self.after_postfix_factor = false; // next token may start an expression (else branch, e.g. [1, 2])
             self.pos += 4;
             return Some(Ok((start, Tok::Else, self.pos)));
         }

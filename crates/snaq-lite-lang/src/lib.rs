@@ -639,7 +639,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in if/then/else context"]
     fn parse_if_then_else() {
         let parsed = parse("if 1 then 2 else 3").unwrap().to_expr_def();
         assert!(matches!(parsed, ExprDef::Block(ref v) if v.len() == 1 && matches!(&v[0], ExprDef::If(_, _, _))));
@@ -655,7 +654,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in if/then/else context"]
     fn run_if_crisp_then() {
         // Condition 1.0 < 2.0 constant-folds to True (decimal literals => low variance => crisp).
         let v = run_with_registry("if 1.0 < 2.0 then 10 else 20", &default_si_registry()).unwrap();
@@ -664,7 +662,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in if/then/else context"]
     fn run_if_crisp_else() {
         // Condition 1.0 > 2.0 constant-folds to False (decimal literals => low variance => crisp).
         let v = run_with_registry("if 1.0 > 2.0 then 10 else 20", &default_si_registry()).unwrap();
@@ -673,7 +670,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in if/then/else context"]
     fn run_if_superposition_numeric() {
         // 1 > 1 gives Uncertain(0.5); both branches numeric => blended mean 0.5*10 + 0.5*20 = 15.
         let v = run_with_registry("if 1 > 1 then 10 else 20", &default_si_registry()).unwrap();
@@ -682,7 +678,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in if/then/else context"]
     fn run_if_superposition_symbolic() {
         // Uncertain condition with symbolic branches yields symbolic weighted sum (simplified).
         let v = run_with_registry("if 1 > 1 then pi else 2 * pi", &default_si_registry()).unwrap();
@@ -692,7 +687,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in if/then/else context"]
     fn run_if_branch_type_mismatch() {
         // Uncertain condition forces both branches evaluated; one numeric, one vector => IfBranchTypeMismatch.
         let e = run_with_registry("if 1 > 1 then 10 else [1, 2]", &default_si_registry()).unwrap_err();
@@ -700,7 +694,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in if/then/else context"]
     fn run_if_expected_condition() {
         // Condition must be boolean; a number is not valid.
         let e = run_with_registry("if 1 then 10 else 20", &default_si_registry()).unwrap_err();
@@ -708,7 +701,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in if/then/else context"]
     fn run_if_superposition_numeric_different_units() {
         // Same dimension, different units: blend after converting to common unit.
         let v = run_with_registry("if 1 > 1 then 10 m else 20 m", &default_si_registry()).unwrap();
@@ -722,7 +714,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in if/then/else context"]
     fn run_if_superposition_dimension_mismatch() {
         // Uncertain condition but branches have different dimensions => DimensionMismatch.
         let e = run_with_registry("if 1 > 1 then 10 m else 10 s", &default_si_registry()).unwrap_err();
@@ -1343,7 +1334,6 @@ mod tests {
 
     /// If condition error (e.g. numeric instead of FuzzyBool) includes source location when formatted with source.
     #[test]
-    #[ignore = "parser limitation (LALRPOP #596): full expression not accepted in if/then/else context"]
     fn run_if_expected_condition_includes_location_when_source_provided() {
         let source = "if 1 then 2 else 3";
         let e = run_with_registry(source, &default_si_registry()).unwrap_err();

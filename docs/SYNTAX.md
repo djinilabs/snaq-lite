@@ -108,7 +108,9 @@ The right-hand side of `as` must be a **unit-only expression**: identifiers comb
 
 ## Known parser limitation
 
-In the current parser, **some positions** that expect a full expression (e.g. the condition or branches of `if ... then ... else ...`, the right-hand side of a comparison like `a == b`, or elements of a vector literal `[a, b]`) may **not** accept the full expression grammar. In those cases you can get a parse error such as “expected one of …, before end of input” (or “before: Then”, “before: Comma”) even for valid-looking expressions like `1 == 2` or `if 1 then 2 else 3`. This is a known limitation of the parser (LALRPOP #596). Chained comparisons (e.g. `1 < 2 < 3`) and absolute value `|x|` work in contexts where they parse; fixing the remaining contexts may require a parser change.
+The **if/then/else** condition and branches accept full expressions (fixed via an ExprReset workaround for LALRPOP #596).
+
+**Some other positions** that expect a full expression (e.g. the right-hand side of a top-level comparison like `a == b`, or elements of a vector literal `[a, b]`) may **not** accept the full expression grammar. In those cases you can get a parse error such as “expected one of …, before end of input” (or “before: Then”, “before: Comma”) even for valid-looking expressions like `1 == 2` or `[1.0 < 2.0, 1.0 == 2.0]`. This is a known limitation of the parser (LALRPOP #596). Chained comparisons (e.g. `1 < 2 < 3`) and absolute value `|x|` work in contexts where they parse; fixing the remaining contexts may require a parser change.
 
 ## See also
 

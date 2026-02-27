@@ -37,6 +37,7 @@ After completing a task (or significant step), you must:
 ## Unit tests
 
 2. For every new feature or fix, create or update unit tests that test for common and edge cases. Extract important functions and create dedicated unit tests for them.
+2.1. Make sure that if tests fail and the tests reflect the exected behavior (from the language, implementation and from what a user would normally expect), that instead of fixing the test you fix the implementation
 
 ## Pull Request review
 

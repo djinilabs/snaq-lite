@@ -1,8 +1,6 @@
 //! Parquet tabular parser: streams row-by-row from RecordBatches.
 //! Requires the full input in memory (Parquet metadata is at end of file); rows are streamed.
 
-#![cfg(feature = "parquet")]
-
 use super::ParseError;
 use super::ReadSeek;
 use super::TabularParser;

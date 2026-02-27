@@ -2095,7 +2095,10 @@ checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
 name = "snaq-lite-cli"
 version = "0.1.0"
 dependencies = [
+ "arrow",
+ "arrow-ipc",
  "futures",
+ "parquet",
  "snaq-lite-ingest",
  "snaq-lite-lang",
 ]

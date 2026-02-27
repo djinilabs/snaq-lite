@@ -16,6 +16,12 @@ snaq-lite-ingest = { path = "../snaq-lite-ingest", default-features = false }
 snaq-lite-lang = { path = "../snaq-lite-lang" }
 
 [features]
-default = []
+default = ["parquet"]
 # Enable Parquet and Arrow IPC file support for --stream name=path (adds arrow/parquet deps).
+# When enabled, CLI integration tests for Parquet/Arrow run (locally and in CI).
 parquet = ["snaq-lite-ingest/parquet"]
+
+[dev-dependencies]
+arrow = "53"
+arrow-ipc = "53"
+parquet = "53"

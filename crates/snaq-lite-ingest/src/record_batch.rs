@@ -1,8 +1,6 @@
 //! Convert Arrow [RecordBatch] to snaq [Record]s (one row at a time).
 //! Used by Parquet and Arrow IPC parsers. Feature-gated.
 
-#![cfg(feature = "parquet")]
-
 use super::ParseError;
 use arrow::array::Array;
 use arrow::array::*;

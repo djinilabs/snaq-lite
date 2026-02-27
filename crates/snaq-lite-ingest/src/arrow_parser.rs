@@ -2,8 +2,6 @@
 //! Supports both IPC file format (with footer) and IPC stream format (sequential).
 //! Reads the input into memory so we can try both formats; rows are then streamed out.
 
-#![cfg(feature = "parquet")]
-
 use super::ParseError;
 use super::ReadSeek;
 use super::TabularParser;

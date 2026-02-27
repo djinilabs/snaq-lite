@@ -226,6 +226,7 @@ fn run_stream_mode(
                         stream_feed_dispatch::feed_stream_file_to_sender(&path, sender, mode)
                     {
                         eprintln!("error: reading {}: {}", path.display(), e);
+                        std::process::exit(1);
                     }
                 });
                 join_handles.push(handle);

@@ -1248,10 +1248,10 @@ mod tests {
 
     #[test]
     fn run_unknown_identifier_treated_as_symbol() {
-        // Identifiers that are not units are treated as symbols (e.g. "foo", "bar").
+        // Identifiers that are not units are treated as symbols (e.g. "foo", "baz" — avoid "bar", it's a pressure unit).
         let v = run("1 foo").unwrap();
         assert!(matches!(v, Value::Symbolic(_)));
-        let v = run("bar").unwrap();
+        let v = run("baz").unwrap();
         assert!(matches!(v, Value::Symbolic(_)));
     }
 
@@ -1563,6 +1563,25 @@ mod tests {
         let q = run_numeric("1 + pi").unwrap();
         assert!((q.value() - (1.0 + std::f64::consts::PI)).abs() < 1e-10);
         assert!(q.unit().is_scalar());
+    }
+
+    /// Physical constants c, h, hbar, R evaluate numerically; c*m/s gives speed of light value.
+    #[test]
+    fn run_numeric_physical_constants_c_h_r() {
+        let q_c = run_numeric("c").unwrap();
+        assert!((q_c.value() - 299_792_458.0).abs() < 1e-6, "c = speed of light in m/s");
+        assert!(q_c.unit().is_scalar());
+        let q_r = run_numeric("R").unwrap();
+        assert!((q_r.value() - 8.314_462_618).abs() < 1e-9, "R = gas constant");
+        let q_expr = run_numeric("c * m / s").unwrap();
+        assert!((q_expr.value() - 299_792_458.0).abs() < 1e-6, "c m/s gives speed of light value");
+        let q_h = run_numeric("h").unwrap();
+        assert!((q_h.value() - 6.626_070_15e-34).abs() < 1e-42, "h = Planck constant");
+        assert!(q_h.unit().is_scalar());
+        let q_hbar = run_numeric("hbar").unwrap();
+        let expected_hbar = 6.626_070_15e-34 / (2.0 * std::f64::consts::PI);
+        assert!((q_hbar.value() - expected_hbar).abs() < 1e-42, "hbar = h/(2π)");
+        assert!(q_hbar.unit().is_scalar());
     }
 
     #[test]

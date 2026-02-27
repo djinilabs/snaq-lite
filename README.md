@@ -10,7 +10,7 @@ The language combines **numeric quantities with units** (SI and common derivativ
 
 ## Language at a glance
 
-- **Quantities and units** — Literals like `100 m`, `1 km/hour`, `2 pi rad`; unit conversion with `as` (e.g. `10 km as m`). SI base and derived units, time, angle, area, and Numbat-style units (mile, parsec, eV, etc.); plural names accepted (e.g. meters → meter).
+- **Quantities and units** — Literals like `100 m`, `1 km/hour`, `2 pi rad`; unit conversion with `as` (e.g. `10 km as m`). SI base and derived units, time, angle, area, volume, and Numbat-style units (mile, parsec, eV, etc.); plural names accepted (e.g. meters → meter). STEM-friendly: volume (L, mL), pressure (bar, atm, psi), imperial mass (lb, oz), Fahrenheit, calories/Wh/kWh, concentration (molar, M), percent/ppm/ppb, arcmin/arcsec, knot, and physical constants (c, h, R) — see [docs/UNITS_AND_QUANTITIES.md](docs/UNITS_AND_QUANTITIES.md).
 - **Numbers and precision** — Values carry mean and variance. Implicit variance from decimal places (e.g. `10.5`); explicit error with `value ~ error` (e.g. `10 ~ 2`).
 - **Symbols** — Unknown identifiers are symbols (`pi`, `π`, `e` or custom). Default evaluation keeps them symbolic; substitute via `run_numeric()` or a symbol registry.
 - **Comparisons** — `==`, `!=`, `<`, `<=`, `>`, `>=` (same dimension). Result is a **FuzzyBool**: `true`, `false`, or `uncertain(prob)` when variance matters. Vectors: element-wise, outer, or row×column reduction.

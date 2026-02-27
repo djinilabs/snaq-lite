@@ -82,8 +82,13 @@ impl UnitRegistry {
     /// resolve to (prefix × base length)² so that e.g. km2 → (k·m)² = 10⁶ m².
     const SQUARED_LENGTH_REST: &[&str] = &["m2", "m²"];
 
+    /// Cubed-length rest names: when prefix + rest is parsed and rest is one of these,
+    /// resolve to (prefix × base length)³ so that e.g. km3 → (k·m)³ = 10⁹ m³.
+    const CUBED_LENGTH_REST: &[&str] = &["m3", "m³"];
+
     /// Try to resolve an identifier to a Unit: exact match first, then prefix + base (e.g. "km" → kilo×m).
     /// When rest is a squared-length form (e.g. "m2", "m²"), returns (prefix × base length)² so conversion is correct.
+    /// When rest is a cubed-length form (e.g. "m3", "m³"), returns (prefix × base length)³ for volume.
     /// Prefix list must be sorted longest-first (so "Mm" → mega×m, not milli×"m").
     fn try_lookup(
         &self,
@@ -100,6 +105,11 @@ impl UnitRegistry {
                 if Self::SQUARED_LENGTH_REST.contains(&rest) && self.units.contains_key("m") {
                     let u = self.get_unit("m").unwrap();
                     return Some(u.with_prefix(*p).powi(2));
+                }
+                // Cubed-length: rest "m3" or "m³" → (prefix·m)³ so km3, cm3, mm3 convert correctly
+                if Self::CUBED_LENGTH_REST.contains(&rest) && self.units.contains_key("m") {
+                    let u = self.get_unit("m").unwrap();
+                    return Some(u.with_prefix(*p).powi(3));
                 }
                 if self.units.contains_key(rest) {
                     let u = self.get_unit(rest).unwrap();
@@ -239,13 +249,27 @@ pub fn default_si_registry() -> UnitRegistry {
     add_derived_alias(&mut reg, "mole", "AmountOfSubstance", Unit::from_base_unit("mol"));
     add_derived_alias(&mut reg, "candela", "LuminousIntensity", Unit::from_base_unit("cd"));
 
-    // Angle: rad (base), degree = π/180 rad
+    // Angle: rad (base), degree = π/180 rad, arcmin = 1/60 degree, arcsec = 1/3600 degree
     reg.add_derived_unit(
         "degree",
         BaseRepresentation::from_base("Angle"),
         std::f64::consts::PI / 180.0,
         Unit::from_base_unit("rad"),
     );
+    reg.add_derived_unit(
+        "arcmin",
+        BaseRepresentation::from_base("Angle"),
+        1.0 / 60.0,
+        Unit::from_base_unit("degree"),
+    );
+    add_derived_alias(&mut reg, "arcminute", "Angle", Unit::from_base_unit("arcmin"));
+    reg.add_derived_unit(
+        "arcsec",
+        BaseRepresentation::from_base("Angle"),
+        1.0 / 3600.0,
+        Unit::from_base_unit("degree"),
+    );
+    add_derived_alias(&mut reg, "arcsecond", "Angle", Unit::from_base_unit("arcsec"));
     // Length: SI derived + Numbat parity (with long-form aliases)
     reg.add_derived_unit(
         "meter",
@@ -289,6 +313,13 @@ pub fn default_si_registry() -> UnitRegistry {
         9.460_730_472_580_8e15,
         Unit::from_base_unit("m"),
     );
+    reg.add_derived_unit(
+        "nautical_mile",
+        BaseRepresentation::from_base("Length"),
+        1852.0,
+        Unit::from_base_unit("m"),
+    );
+    add_derived_alias(&mut reg, "nmi", "Length", Unit::from_base_unit("nautical_mile"));
 
     // Area: m² (canonical), are = 100 m², hectare = 100 are. km2/cm2/mm2 resolved via prefix + m2 → (prefix·m)².
     reg.dimensions.add_base_dimension("Area");
@@ -359,6 +390,40 @@ pub fn default_si_registry() -> UnitRegistry {
     add_derived_alias(&mut reg, "sqft", "Area", Unit::from_base_unit("ft2"));
     add_derived_alias(&mut reg, "squarefoot", "Area", Unit::from_base_unit("ft2"));
     add_derived_alias(&mut reg, "square_foot", "Area", Unit::from_base_unit("ft2"));
+
+    // Volume: m³ (canonical), liter = 10⁻³ m³, milliliter = 10⁻⁶ m³. km3/cm3/mm3 resolved via prefix + m3 → (prefix·m)³.
+    reg.dimensions.add_base_dimension("Volume");
+    reg.add_derived_unit(
+        "m3",
+        BaseRepresentation::from_base("Volume"),
+        1.0,
+        Unit::from_base_unit("m").powi(3),
+    );
+    add_derived_alias(&mut reg, "m³", "Volume", Unit::from_base_unit("m3"));
+    add_derived_alias(&mut reg, "cubicmeter", "Volume", Unit::from_base_unit("m3"));
+    add_derived_alias(&mut reg, "cubic_meter", "Volume", Unit::from_base_unit("m3"));
+    add_derived_alias(&mut reg, "cubickilometer", "Volume", Unit::from_base_unit("m").with_prefix(Prefix::Metric(3)).powi(3));
+    add_derived_alias(&mut reg, "cubic_kilometer", "Volume", Unit::from_base_unit("m").with_prefix(Prefix::Metric(3)).powi(3));
+    add_derived_alias(&mut reg, "cubiccentimeter", "Volume", Unit::from_base_unit("m").with_prefix(Prefix::Metric(-2)).powi(3));
+    add_derived_alias(&mut reg, "cubic_centimeter", "Volume", Unit::from_base_unit("m").with_prefix(Prefix::Metric(-2)).powi(3));
+    add_derived_alias(&mut reg, "cubicmillimeter", "Volume", Unit::from_base_unit("m").with_prefix(Prefix::Metric(-3)).powi(3));
+    add_derived_alias(&mut reg, "cubic_millimeter", "Volume", Unit::from_base_unit("m").with_prefix(Prefix::Metric(-3)).powi(3));
+    reg.add_derived_unit(
+        "liter",
+        BaseRepresentation::from_base("Volume"),
+        0.001,
+        Unit::from_base_unit("m3"),
+    );
+    add_derived_alias(&mut reg, "litre", "Volume", Unit::from_base_unit("liter"));
+    add_derived_alias(&mut reg, "L", "Volume", Unit::from_base_unit("liter"));
+    reg.add_derived_unit(
+        "milliliter",
+        BaseRepresentation::from_base("Volume"),
+        0.001,
+        Unit::from_base_unit("liter"),
+    );
+    add_derived_alias(&mut reg, "ml", "Volume", Unit::from_base_unit("milliliter"));
+    add_derived_alias(&mut reg, "mL", "Volume", Unit::from_base_unit("milliliter"));
 
     // Time: SI derived. Calendar-style durations use Julian year (365.25 days) for a fixed definition.
     const HOURS_PER_DAY: f64 = 24.0;
@@ -438,6 +503,15 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("s").powi(-1),
     );
 
+    // Velocity: knot = 1 nautical mile per hour = 1852/3600 m/s
+    reg.dimensions.add_base_dimension("Velocity");
+    reg.add_derived_unit(
+        "knot",
+        BaseRepresentation::from_base("Velocity"),
+        1852.0 / 3600.0,
+        Unit::from_base_unit("m").div(&Unit::from_base_unit("s")),
+    );
+
     // Mass: SI derived (gram)
     reg.add_derived_unit(
         "g",
@@ -446,6 +520,22 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("kg"),
     );
     add_derived_alias(&mut reg, "gram", "Mass", Unit::from_base_unit("g"));
+    // Mass (imperial/US): pound = 0.45359237 kg, ounce = 1/16 lb
+    const LB_TO_KG: f64 = 0.45359237;
+    reg.add_derived_unit(
+        "pound",
+        BaseRepresentation::from_base("Mass"),
+        LB_TO_KG,
+        Unit::from_base_unit("kg"),
+    );
+    add_derived_alias(&mut reg, "lb", "Mass", Unit::from_base_unit("pound"));
+    reg.add_derived_unit(
+        "ounce",
+        BaseRepresentation::from_base("Mass"),
+        LB_TO_KG / 16.0,
+        Unit::from_base_unit("kg"),
+    );
+    add_derived_alias(&mut reg, "oz", "Mass", Unit::from_base_unit("ounce"));
 
     // Energy: joule = kg·m²/s², eV = 1.602176634e-19 J
     let joule_unit = Unit::from_base_unit("kg")
@@ -461,6 +551,37 @@ pub fn default_si_registry() -> UnitRegistry {
         "eV",
         BaseRepresentation::from_base("Energy"),
         1.602_176_634e-19,
+        Unit::from_base_unit("joule"),
+    );
+    // Energy (non-SI): calorie = 4.184 J, kcal, BTU, Wh, kWh
+    reg.add_derived_unit(
+        "calorie",
+        BaseRepresentation::from_base("Energy"),
+        4.184,
+        Unit::from_base_unit("joule"),
+    );
+    reg.add_derived_unit(
+        "kcal",
+        BaseRepresentation::from_base("Energy"),
+        4184.0,
+        Unit::from_base_unit("joule"),
+    );
+    reg.add_derived_unit(
+        "BTU",
+        BaseRepresentation::from_base("Energy"),
+        1055.06,
+        Unit::from_base_unit("joule"),
+    );
+    reg.add_derived_unit(
+        "Wh",
+        BaseRepresentation::from_base("Energy"),
+        3600.0,
+        Unit::from_base_unit("joule"),
+    );
+    reg.add_derived_unit(
+        "kWh",
+        BaseRepresentation::from_base("Energy"),
+        3_600_000.0,
         Unit::from_base_unit("joule"),
     );
 
@@ -486,6 +607,32 @@ pub fn default_si_registry() -> UnitRegistry {
         Unit::from_base_unit("N").div(&Unit::from_base_unit("m").powi(2)),
     );
     add_derived_alias(&mut reg, "pascal", "Pressure", Unit::from_base_unit("Pa"));
+    // Pressure (non-SI): bar = 10⁵ Pa, atm ≈ 101325 Pa, psi, mmHg, torr
+    reg.add_derived_unit(
+        "bar",
+        BaseRepresentation::from_base("Pressure"),
+        100_000.0,
+        Unit::from_base_unit("Pa"),
+    );
+    reg.add_derived_unit(
+        "atm",
+        BaseRepresentation::from_base("Pressure"),
+        101_325.0,
+        Unit::from_base_unit("Pa"),
+    );
+    reg.add_derived_unit(
+        "psi",
+        BaseRepresentation::from_base("Pressure"),
+        6894.757293168,
+        Unit::from_base_unit("Pa"),
+    );
+    reg.add_derived_unit(
+        "mmHg",
+        BaseRepresentation::from_base("Pressure"),
+        133.322387415,
+        Unit::from_base_unit("Pa"),
+    );
+    add_derived_alias(&mut reg, "torr", "Pressure", Unit::from_base_unit("mmHg"));
 
     // Power: W = J/s
     reg.dimensions.add_base_dimension("Power");
@@ -495,6 +642,13 @@ pub fn default_si_registry() -> UnitRegistry {
         1.0,
         Unit::from_base_unit("joule").div(&Unit::from_base_unit("s")),
     );
+    reg.add_derived_unit(
+        "horsepower",
+        BaseRepresentation::from_base("Power"),
+        745.7,
+        Unit::from_base_unit("W"),
+    );
+    add_derived_alias(&mut reg, "hp", "Power", Unit::from_base_unit("horsepower"));
     reg.add_derived_unit(
         "J",
         BaseRepresentation::from_base("Energy"),
@@ -643,6 +797,58 @@ pub fn default_si_registry() -> UnitRegistry {
 
     // Degree Celsius: same dimension as K, factor 1 (offset 273.15 not modeled)
     add_derived_alias(&mut reg, "celsius", "Temperature", Unit::from_base_unit("K"));
+    // Fahrenheit: scale factor 5/9 for temperature differences (absolute zero-point 32°F = 0°C not modeled)
+    reg.add_derived_unit(
+        "fahrenheit",
+        BaseRepresentation::from_base("Temperature"),
+        5.0 / 9.0,
+        Unit::from_base_unit("K"),
+    );
+
+    // Concentration: molar = 1 mol/L (AmountOfSubstance/Volume)
+    reg.dimensions.add_base_dimension("Concentration");
+    let mol_per_liter = Unit::from_base_unit("mol").div(&Unit::from_base_unit("liter"));
+    reg.add_derived_unit(
+        "molar",
+        BaseRepresentation::from_base("Concentration"),
+        1.0,
+        mol_per_liter,
+    );
+    add_derived_alias(&mut reg, "M", "Concentration", Unit::from_base_unit("molar"));
+
+    // Dimensionless ratios: percent = 0.01, ppm = 1e-6, ppb = 1e-9 (note: % is the modulo operator, use "percent")
+    reg.add_derived_unit(
+        "percent",
+        BaseRepresentation::unity(),
+        0.01,
+        Unit::scalar(),
+    );
+    reg.add_derived_unit(
+        "ppm",
+        BaseRepresentation::unity(),
+        1e-6,
+        Unit::scalar(),
+    );
+    reg.add_derived_unit(
+        "ppb",
+        BaseRepresentation::unity(),
+        1e-9,
+        Unit::scalar(),
+    );
+
+    // Solid angle: steradian (sr) — dimensionless in SI, factor 1
+    reg.add_derived_unit(
+        "steradian",
+        BaseRepresentation::unity(),
+        1.0,
+        Unit::scalar(),
+    );
+    reg.add_derived_unit(
+        "sr",
+        BaseRepresentation::unity(),
+        1.0,
+        Unit::scalar(),
+    );
 
     reg
 }
@@ -819,6 +1025,209 @@ mod tests {
             let q = crate::run_numeric(expr).unwrap_or_else(|e| panic!("{expr}: {e}"));
             assert!((q.value() - 1.0).abs() < 1e-12, "{}", expr);
         }
+    }
+
+    // --- STEM units and constants: volume, pressure, mass, temperature, energy, power,
+    //     concentration, percent/ppm/ppb, angles, knot/nmi, steradian ---
+
+    // --- Volume dimension and units ---
+
+    #[test]
+    fn volume_same_dimension_m3_and_m_cubed() {
+        let reg = default_si_registry();
+        let m3 = Unit::from_base_unit("m3");
+        let m_cubed = Unit::from_base_unit("m").powi(3);
+        assert!(reg.same_dimension(&m3, &m_cubed).unwrap());
+    }
+
+    #[test]
+    fn volume_liter_equals_0_001_m3() {
+        let reg = default_si_registry();
+        let liter = Unit::from_base_unit("liter");
+        let m3 = Unit::from_base_unit("m3");
+        let q_l = Quantity::new(1.0, liter);
+        let as_m3 = q_l.convert_to(&reg, &m3).unwrap();
+        assert!((as_m3.value() - 0.001).abs() < 1e-10, "1 L = 10⁻³ m³");
+    }
+
+    #[test]
+    fn volume_km3_as_m3_is_1e9() {
+        let q = crate::run_numeric("1 km3 as m3").unwrap();
+        assert!((q.value() - 1e9).abs() < 1.0, "1 km³ = 10⁹ m³");
+    }
+
+    #[test]
+    fn volume_parsing_m3_liter_ml() {
+        let cases = [
+            "1 m3", "1 m³", "1 cubicmeter", "1 liter", "1 litre", "1 L", "1 milliliter", "1 ml", "1 mL",
+        ];
+        for expr in cases {
+            let q = crate::run_numeric(expr).unwrap_or_else(|e| panic!("{expr}: {e}"));
+            assert!((q.value() - 1.0).abs() < 1e-12, "{}", expr);
+        }
+    }
+
+    /// Cubed-length prefix resolution: 1 cm³ and 1 mm³ convert correctly to m³.
+    #[test]
+    fn volume_cm3_mm3_prefix_resolution() {
+        let q_cm3 = crate::run_numeric("1 cm3 as m3").unwrap();
+        assert!((q_cm3.value() - 1e-6).abs() < 1e-12, "1 cm³ = 10⁻⁶ m³");
+        let q_mm3 = crate::run_numeric("1 mm3 as m3").unwrap();
+        assert!((q_mm3.value() - 1e-9).abs() < 1e-15, "1 mm³ = 10⁻⁹ m³");
+    }
+
+    // --- Phase 2: pressure, mass, temperature F, energy, power ---
+
+    #[test]
+    fn stem_pressure_units_convert() {
+        let q_bar = crate::run_numeric("1 bar as Pa").unwrap();
+        assert!((q_bar.value() - 100_000.0).abs() < 1.0, "1 bar = 10⁵ Pa");
+        let q_atm = crate::run_numeric("1 atm as Pa").unwrap();
+        assert!((q_atm.value() - 101_325.0).abs() < 1.0, "1 atm ≈ 101325 Pa");
+        let q_psi = crate::run_numeric("1 psi as Pa").unwrap();
+        assert!((q_psi.value() - 6894.757).abs() < 0.01, "1 psi ≈ 6894.76 Pa");
+        let q_mmhg = crate::run_numeric("1 mmHg as Pa").unwrap();
+        assert!((q_mmhg.value() - 133.322).abs() < 0.001, "1 mmHg ≈ 133.32 Pa");
+        let q_torr = crate::run_numeric("1 torr as mmHg").unwrap();
+        assert!((q_torr.value() - 1.0).abs() < 1e-10, "1 torr = 1 mmHg");
+    }
+
+    #[test]
+    fn stem_pound_and_ounce_convert() {
+        let q = crate::run_numeric("1 pound as kg").unwrap();
+        assert!((q.value() - 0.45359237).abs() < 1e-8, "1 lb = 0.45359237 kg");
+        let q_oz = crate::run_numeric("16 ounce as pound").unwrap();
+        assert!((q_oz.value() - 1.0).abs() < 1e-10, "16 oz = 1 lb");
+    }
+
+    #[test]
+    fn stem_fahrenheit_scale_factor() {
+        // Temperature difference: 9 fahrenheit = 5 K (so 1 fahrenheit = 5/9 K)
+        let q = crate::run_numeric("9 fahrenheit as K").unwrap();
+        assert!((q.value() - 5.0).abs() < 1e-10, "9 °F difference = 5 K difference");
+    }
+
+    #[test]
+    fn stem_calorie_and_btu_convert() {
+        let q = crate::run_numeric("1 calorie as joule").unwrap();
+        assert!((q.value() - 4.184).abs() < 1e-10, "1 cal = 4.184 J");
+        let q_wh = crate::run_numeric("1 Wh as joule").unwrap();
+        assert!((q_wh.value() - 3600.0).abs() < 1e-6, "1 Wh = 3600 J");
+        let q_kcal = crate::run_numeric("1 kcal as joule").unwrap();
+        assert!((q_kcal.value() - 4184.0).abs() < 1e-6, "1 kcal = 4184 J");
+        let q_btu = crate::run_numeric("1 BTU as joule").unwrap();
+        assert!((q_btu.value() - 1055.06).abs() < 0.1, "1 BTU ≈ 1055 J");
+        let q_kwh = crate::run_numeric("1 kWh as joule").unwrap();
+        assert!((q_kwh.value() - 3_600_000.0).abs() < 1.0, "1 kWh = 3.6e6 J");
+    }
+
+    #[test]
+    fn stem_horsepower_convert() {
+        let q = crate::run_numeric("1 hp as W").unwrap();
+        assert!((q.value() - 745.7).abs() < 0.1, "1 hp ≈ 745.7 W");
+    }
+
+    // --- Phase 3: concentration, percent, ppm, ppb ---
+
+    #[test]
+    fn stem_molar_parses_and_same_dimension_as_mol_per_liter() {
+        let reg = default_si_registry();
+        let molar = Unit::from_base_unit("molar");
+        let mol_per_l = Unit::from_base_unit("mol").div(&Unit::from_base_unit("liter"));
+        assert!(reg.same_dimension(&molar, &mol_per_l).unwrap(), "molar = mol/L");
+        let q = crate::run_numeric("1 molar").unwrap();
+        assert!((q.value() - 1.0).abs() < 1e-12);
+    }
+
+    /// Molar alias "M" parses and has same dimension as molar (mol/L).
+    #[test]
+    fn stem_molar_m_alias_parses_and_equals_molar() {
+        let reg = default_si_registry();
+        let q_m = crate::run_numeric("1 M").unwrap();
+        assert!((q_m.value() - 1.0).abs() < 1e-12, "1 M = 1 molar");
+        assert!(reg.same_dimension(q_m.unit(), &Unit::from_base_unit("molar")).unwrap());
+    }
+
+    #[test]
+    fn stem_percent_ppm_ppb_dimensionless() {
+        let reg = default_si_registry();
+        let scalar = Unit::scalar();
+        let q_100_percent = Quantity::new(100.0, Unit::from_base_unit("percent"));
+        let as_scalar = q_100_percent.convert_to(&reg, &scalar).unwrap();
+        assert!((as_scalar.value() - 1.0).abs() < 1e-10, "100 percent = 1 (scalar)");
+        let q_1_ppm = Quantity::new(1.0, Unit::from_base_unit("ppm"));
+        let as_s = q_1_ppm.convert_to(&reg, &scalar).unwrap();
+        assert!((as_s.value() - 1e-6).abs() < 1e-15, "1 ppm = 1e-6 (scalar)");
+        let q_1_ppb = Quantity::new(1.0, Unit::from_base_unit("ppb"));
+        let as_s_ppb = q_1_ppb.convert_to(&reg, &scalar).unwrap();
+        assert!((as_s_ppb.value() - 1e-9).abs() < 1e-18, "1 ppb = 1e-9 (scalar)");
+    }
+
+    /// run_numeric parses percent/ppm/ppb and conversion to scalar yields correct factor.
+    #[test]
+    fn stem_percent_ppm_ppb_run_numeric() {
+        let reg = default_si_registry();
+        let scalar = Unit::scalar();
+        let q_100 = crate::run_numeric("100 percent").unwrap();
+        assert!((q_100.value() - 100.0).abs() < 1e-10);
+        let as_one = q_100.convert_to(&reg, &scalar).unwrap();
+        assert!((as_one.value() - 1.0).abs() < 1e-10, "100 percent as scalar = 1");
+        let q_50 = crate::run_numeric("50 percent").unwrap();
+        let as_half = q_50.convert_to(&reg, &scalar).unwrap();
+        assert!((as_half.value() - 0.5).abs() < 1e-10, "50 percent as scalar = 0.5");
+        let q_ppm = crate::run_numeric("1 ppm").unwrap();
+        assert!((q_ppm.value() - 1.0).abs() < 1e-12);
+        let q_ppb = crate::run_numeric("1 ppb").unwrap();
+        assert!((q_ppb.value() - 1.0).abs() < 1e-12);
+    }
+
+    // --- Phase 4: arcmin, arcsec, knot, steradian ---
+
+    #[test]
+    fn stem_arcmin_arcsec_convert() {
+        let reg = default_si_registry();
+        let degree = Unit::from_base_unit("degree");
+        let q_60_arcmin = Quantity::new(60.0, Unit::from_base_unit("arcmin"));
+        let as_deg = q_60_arcmin.convert_to(&reg, &degree).unwrap();
+        assert!((as_deg.value() - 1.0).abs() < 1e-10, "60 arcmin = 1 degree");
+        let q_3600_arcsec = Quantity::new(3600.0, Unit::from_base_unit("arcsec"));
+        let as_deg_sec = q_3600_arcsec.convert_to(&reg, &degree).unwrap();
+        assert!((as_deg_sec.value() - 1.0).abs() < 1e-10, "3600 arcsec = 1 degree");
+    }
+
+    #[test]
+    fn stem_knot_convert_to_m_per_s() {
+        let q = crate::run_numeric("1 knot as m / s").unwrap();
+        let expected = 1852.0 / 3600.0;
+        assert!((q.value() - expected).abs() < 1e-6, "1 knot = {} m/s", expected);
+    }
+
+    /// Nautical mile and nmi alias convert to 1852 m.
+    #[test]
+    fn stem_nautical_mile_convert() {
+        let q = crate::run_numeric("1 nautical_mile as m").unwrap();
+        assert!((q.value() - 1852.0).abs() < 1e-6, "1 nmi = 1852 m");
+        let q_nmi = crate::run_numeric("1 nmi as m").unwrap();
+        assert!((q_nmi.value() - 1852.0).abs() < 1e-6, "1 nmi alias = 1852 m");
+    }
+
+    #[test]
+    fn stem_steradian_dimensionless() {
+        let reg = default_si_registry();
+        let q = Quantity::new(1.0, Unit::from_base_unit("steradian"));
+        let scalar = Unit::scalar();
+        let as_s = q.convert_to(&reg, &scalar).unwrap();
+        assert!((as_s.value() - 1.0).abs() < 1e-12, "1 sr = 1 (scalar)");
+    }
+
+    /// Steradian alias "sr" parses via run_numeric and converts to scalar (complements stem_steradian_dimensionless).
+    #[test]
+    fn stem_sr_alias_parses() {
+        let q = crate::run_numeric("1 sr").unwrap();
+        assert!((q.value() - 1.0).abs() < 1e-12, "1 sr parses");
+        let reg = default_si_registry();
+        let as_scalar = q.convert_to(&reg, &Unit::scalar()).unwrap();
+        assert!((as_scalar.value() - 1.0).abs() < 1e-12);
     }
 }
 
@@ -1116,7 +1525,7 @@ mod all_units_tests {
     #[test]
     fn numbat_units_we_do_not_support_treated_as_symbols() {
         use crate::Value;
-        let unsupported = ["pound"];
+        let unsupported = ["stone"];
         for name in unsupported {
             let expr = format!("1 {name}");
             let res = crate::run(&expr);

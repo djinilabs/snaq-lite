@@ -59,12 +59,24 @@ The default environment provides units in these categories (non-exhaustive list)
 - **SI base:** m, kg, s, A, K, mol, cd (and long forms: meter, kilogram, second, ampere, kelvin, mole, candela).
 - **SI derived with special names:** J, C, V, F, ohm, S, Wb, T, H, Hz, N, Pa, W, lm, lx, Bq, Gy, Sv, kat (and long forms: joule, coulomb, volt, farad, etc.).
 - **Time:** second, minute, hour, day, week, month, quarter, year, decade, century, millennium (and plurals).
-- **Length:** meter, km, g (gram), mile, au, parsec, light_year, inch (in), foot (ft).
-- **Angle:** rad (radian), degree (and degrees).
+- **Length:** meter, km, mile, au, parsec, light_year, nautical_mile (nmi), inch (in), foot (ft).
+- **Angle:** rad (radian), degree (degrees), arcmin (arcminute), arcsec (arcsecond).
 - **Area:** m² (m2, sqm, squaremeter, etc.), km², cm², mm², are, hectare (ha), in², ft², squareinch, squarefoot, etc.
-- **Energy:** joule, eV.
-- **Temperature:** kelvin, celsius.
+- **Volume:** m³ (m3, cubicmeter), km³, cm³, mm³, liter (litre, L), milliliter (ml, mL).
+- **Energy:** joule, eV, calorie, kcal, BTU, Wh, kWh.
+- **Power:** W, horsepower (hp).
+- **Pressure:** Pa (pascal), bar, atm, psi, mmHg, torr.
+- **Mass:** kg, g (gram), pound (lb), ounce (oz).
+- **Temperature:** kelvin, celsius, fahrenheit.
+- **Concentration:** molar (M), mol/L.
+- **Dimensionless ratios:** percent, ppm, ppb (use `percent`; `%` is the modulo operator).
+- **Velocity:** knot (nautical mile per hour); also compound units like m/s, km/hour.
+- **Solid angle:** steradian, sr (dimensionless, factor 1).
 - **Other:** Various other SI-derived and common units.
+
+### Temperature (Fahrenheit)
+
+Fahrenheit uses a scale factor of 5/9 relative to kelvin so that **temperature differences** convert correctly (e.g. 9 fahrenheit as K → 5). The absolute zero-point (32°F = 0°C) is not modeled; for absolute temperature conversion between °F and °C or K you need to apply the offset yourself (e.g. in formulas) or use a future affine-unit feature.
 
 If you use an identifier that is not registered as a unit and not bound as a variable or symbol, the behaviour depends on context (e.g. it may be treated as a symbol or produce an unknown-unit error when used in a unit position). See [SYMBOLS.md](SYMBOLS.md) and [ERRORS_AND_EDGE_CASES.md](ERRORS_AND_EDGE_CASES.md).
 

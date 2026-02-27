@@ -8,6 +8,8 @@ The language provides these **symbolic constants** by name:
 
 - **`pi`** and **`π`** (Unicode) — the mathematical constant π.
 - **`e`** — the base of the natural logarithm.
+- **`phi`** — the golden ratio φ.
+- **Physical constants** (dimensionless numeric values; combine with units for dimensional expressions): **`c`** (speed of light, 299792458 m/s in SI), **`h`** (Planck constant), **`hbar`** (ℏ = h/(2π)), **`R`** (gas constant, J/(mol·K)). Example: `c * m / s` gives the speed of light in m/s.
 
 These have numeric values when you request a numeric result (e.g. via `run_numeric`). When you do not substitute, expressions keep them in symbolic form (e.g. `1 + π`, `2 * pi * rad`).
 

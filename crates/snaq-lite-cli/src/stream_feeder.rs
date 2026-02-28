@@ -13,13 +13,18 @@ const CHUNK_SIZE: usize = 8192;
 
 /// Read the file at `path`, parse newline-delimited numbers, push chunks to `sender`, then drop the sender (EOF).
 /// Empty lines are skipped. Invalid lines (non-numeric) yield a stream error: `Err(InvalidArgument(...))`.
+/// If `on_ready` is provided, it is called once after the file is successfully opened.
 /// Returns `Ok(())` on success, or `Err(std::io::Error)` if the file could not be opened or read.
 pub fn feed_file_to_sender(
     path: &Path,
     sender: futures::channel::mpsc::UnboundedSender<Chunk>,
     variance_mode: StreamVarianceMode,
+    on_ready: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<(), std::io::Error> {
     let file = std::fs::File::open(path)?;
+    if let Some(f) = on_ready {
+        f();
+    }
     let reader = BufReader::new(file);
     feed_read_to_sender(reader, sender, variance_mode);
     Ok(())

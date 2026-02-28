@@ -201,6 +201,35 @@ fn run_stream_mode(
         feeders.push((PathBuf::from(path), sender));
     }
 
+    // Spawn feeders before run_with_stream_inputs so that when value() calls
+    // collect_vector_stream (e.g. for $d.map(...)), data is already being sent.
+    let n = feeders.len();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let mut join_handles = Vec::with_capacity(n);
+    for (path, sender) in feeders {
+        let mode = variance_mode;
+        let ready_tx = ready_tx.clone();
+        let handle = std::thread::spawn(move || {
+            let on_ready = Some(Box::new(move || {
+                let _ = ready_tx.send(());
+            }) as Box<dyn FnOnce() + Send>);
+            if let Err(e) = stream_feed_dispatch::feed_stream_file_to_sender(
+                &path,
+                sender,
+                mode,
+                on_ready,
+            ) {
+                eprintln!("error: reading {}: {}", path.display(), e);
+                std::process::exit(1);
+            }
+        });
+        join_handles.push(handle);
+    }
+
+    for _ in 0..n {
+        let _ = ready_rx.recv();
+    }
+
     let (value, db) = match snaq_lite_lang::run_with_stream_inputs(
         expression,
         &registry,
@@ -208,6 +237,7 @@ fn run_stream_mode(
     ) {
         Ok(x) => x,
         Err(e) => {
+            let _ = join_handles.into_iter().map(std::thread::JoinHandle::join);
             let msg = snaq_lite_lang::format_run_error_with_source(&e, Some(expression));
             eprintln!("error: {msg}");
             let _ = std::io::stderr().flush();
@@ -215,45 +245,38 @@ fn run_stream_mode(
         }
     };
 
+    for h in join_handles {
+        if h.join().is_err() {
+            eprintln!("error: stream feeder thread panicked");
+            std::process::exit(1);
+        }
+    }
+
     match &value {
         snaq_lite_lang::Value::Vector(v) => {
-            let inner = v.inner.clone();
-            let mut join_handles = Vec::with_capacity(feeders.len());
-            for (path, sender) in feeders {
-                let mode = variance_mode;
-                let handle = std::thread::spawn(move || {
-                    if let Err(e) =
-                        stream_feed_dispatch::feed_stream_file_to_sender(&path, sender, mode)
-                    {
-                        eprintln!("error: reading {}: {}", path.display(), e);
-                        std::process::exit(1);
-                    }
-                });
-                join_handles.push(handle);
-            }
-
-            let stream = snaq_lite_lang::vector_into_stream(&db, inner);
-            let results: Vec<_> =
-                futures::executor::block_on(async move { stream.collect().await });
-
-            for h in join_handles {
-                if h.join().is_err() {
-                    eprintln!("error: stream feeder thread panicked");
-                    std::process::exit(1);
-                }
-            }
+            let results: Vec<_> = if let Some(evaluated) = v.inner.clone().take_evaluated_results()
+            {
+                evaluated
+            } else {
+                let stream = snaq_lite_lang::vector_into_stream(&db, v.inner.clone());
+                futures::executor::block_on(async move { stream.collect().await })
+            };
 
             let mut parts = Vec::with_capacity(results.len());
             for r in results {
                 match r {
                     Ok(Some(val)) => {
-                        match snaq_lite_lang::format_value_for_display(&db, &val) {
-                            Ok(s) => parts.push(s),
-                            Err(e) => {
-                                eprintln!("error: {e}");
-                                std::process::exit(1);
-                            }
-                        }
+                        let s = match &val {
+                            snaq_lite_lang::Value::Undefined => "?".to_string(),
+                            _ => match snaq_lite_lang::format_value_for_display(&db, &val) {
+                                Ok(ss) => ss,
+                                Err(e) => {
+                                    eprintln!("error: {e}");
+                                    std::process::exit(1);
+                                }
+                            },
+                        };
+                        parts.push(s);
                     }
                     Ok(None) => parts.push("?".to_string()),
                     Err(e) => {

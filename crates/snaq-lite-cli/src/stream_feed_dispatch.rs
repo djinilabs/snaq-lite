@@ -13,18 +13,20 @@ const CHUNK_SIZE: usize = 8192;
 
 /// Feed the file at `path` into the stream sender. Format is detected from the path (extension).
 /// Tabular formats (e.g. CSV) yield one map (row) per record; otherwise newline-delimited numbers.
+/// If `on_ready` is provided, it is called once after the file is successfully opened (so the consumer can start).
 /// Returns `Ok(())` on success, or `Err(std::io::Error)` if the file could not be opened.
 pub fn feed_stream_file_to_sender(
     path: &Path,
     sender: futures::channel::mpsc::UnboundedSender<Chunk>,
     variance_mode: StreamVarianceMode,
+    on_ready: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<(), std::io::Error> {
     let format = detect_format(path, None);
 
     if format.is_tabular() && format.is_supported() {
-        feed_tabular_to_sender(path, sender, variance_mode)
+        feed_tabular_to_sender(path, sender, variance_mode, on_ready)
     } else {
-        stream_feeder::feed_file_to_sender(path, sender, variance_mode)
+        stream_feeder::feed_file_to_sender(path, sender, variance_mode, on_ready)
     }
 }
 
@@ -33,8 +35,12 @@ fn feed_tabular_to_sender(
     path: &Path,
     sender: futures::channel::mpsc::UnboundedSender<Chunk>,
     variance_mode: StreamVarianceMode,
+    on_ready: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<(), std::io::Error> {
     let file = std::fs::File::open(path)?;
+    if let Some(f) = on_ready {
+        f();
+    }
     let format = detect_format(path, None);
     let reader: Box<dyn ReadSeek> = Box::new(file);
 
@@ -107,7 +113,7 @@ mod tests {
         ));
         std::fs::write(&tmp, contents).expect("write");
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        feed_stream_file_to_sender(&tmp, tx, variance_mode).expect("feed");
+        feed_stream_file_to_sender(&tmp, tx, variance_mode, None).expect("feed");
         let _ = std::fs::remove_file(&tmp);
         let mut chunks = Vec::new();
         while let Some(chunk) = futures::executor::block_on(rx.next()) {

@@ -34,7 +34,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "lts/*"
-          cache: "pnpm"
+          # No cache: "pnpm" — lockfile lives in apps/frontend, not root
 
       - name: Install frontend dependencies
         run: pnpm run install:frontend

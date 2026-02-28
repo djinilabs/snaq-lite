@@ -32,10 +32,11 @@ function ensureHandlers(): void {
 /**
  * Initialize the LSP worker and client. Call once at app startup.
  * Pass the worker script URL, e.g. new URL('./worker/lsp.worker.ts', import.meta.url) from a file in src.
+ * When wasmUrl is provided, the worker loads the LSP WASM from that URL; omit for stub/test mode.
  */
-export function initLspClient(workerUrl: URL): void {
+export function initLspClient(workerUrl: URL, wasmUrl?: string): void {
   ensureHandlers()
-  initMessageRouter(workerUrl)
+  initMessageRouter(workerUrl, wasmUrl)
 }
 
 /**

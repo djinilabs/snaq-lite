@@ -11,7 +11,10 @@ import { useWidgetStore } from '~/store'
 export function LspProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const workerUrl = new URL('../worker/lsp.worker.ts', import.meta.url)
-    initLspClient(workerUrl)
+    // wasmUrl is only used in the browser (SPA); window is always defined when this runs.
+    const base = (import.meta.env.BASE_URL ?? '/').replace(/\/?$/, '/')
+    const wasmUrl = `${window.location.origin}${base}lsp-wasm/snaq_lite_lsp.js`
+    initLspClient(workerUrl, wasmUrl)
     setMessageRouterHandlers({
       onNodeSignatureUpdated: (params) => {
         useGraphStore.getState().applyNodeSignature(

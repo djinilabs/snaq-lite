@@ -96,23 +96,38 @@ The server uses the Language Server Protocol over standard input/output. No extr
 
 The server can run inside a Web Worker so the IDE (e.g. in the browser) does not block the main thread.
 
-1. **Build the WASM module** (library only):
+1. **Build the WASM module** (library only). From the repo root:
+
+   ```bash
+   pnpm run build:lsp-wasm
+   ```
+
+   Or manually (from repo root; wasm-pack resolves `--out-dir` relative to the crate):
 
    ```bash
    cargo build -p snaq-lite-lsp --target wasm32-unknown-unknown --lib
-   wasm-pack build crates/snaq-lite-lsp --target web --out-dir dist-lsp
+   wasm-pack build crates/snaq-lite-lsp --target web --out-dir ../../apps/frontend/public/lsp-wasm
    ```
 
-   (Or use your preferred way to produce a WASM module that exports the LSP entry.)
+   Output is under `apps/frontend/public/lsp-wasm/` (e.g. `snaq_lite_lsp.js`, `snaq_lite_lsp_bg.wasm`). The frontend loads the script at `{origin}{BASE_URL}lsp-wasm/snaq_lite_lsp.js`.
 
-2. **Load the module in a Worker** and call the exported start function:
+2. **Worker init protocol.** The main thread must send a **control message** first (not LSP):
 
-   - **`startSnaqLiteLsp(postMessageCallback)`** — Starts the LSP server. Pass a JS function that will be called with each response string; the host should send that string to the IDE (e.g. `self.postMessage(result)`).
-   - **`pushLspMessage(str)`** — Call this from the Worker’s `onmessage` with the raw LSP request string (e.g. the JSON-RPC message from the IDE). Each time the IDE sends a message, the host pushes it with `pushLspMessage(event.data)`.
+   - **Main → Worker:** `{ type: 'init', wasmUrl: string }` — the URL of the wasm-pack JS entry (e.g. the `snaq_lite_lsp.js` script). The worker then dynamically imports that URL, calls the default init, then `start_snaq_lite_lsp(postMessageCallback)`.
+   - **Worker → Main (success):** `{ type: 'snaqlite-worker-ready' }` — the LSP is running; the main thread can set “worker ready” and forward LSP traffic.
+   - **Worker → Main (failure):** `{ type: 'snaqlite-worker-error', error: string }` — load or init failed; the main thread should set worker not ready and surface the error.
 
-3. **Message format** — Messages are JSON-RPC (LSP over JSON-RPC). The host is responsible for forwarding:
-   - IDE → Worker: pass the received string to `pushLspMessage(s)`.
-   - Worker → IDE: for each string passed to `postMessageCallback`, call `self.postMessage(s)` (or equivalent) so the IDE receives the response.
+   All other messages are raw LSP JSON-RPC strings (main → worker: request/notification; worker → main: response/notification).
+
+3. **WASM exports** (from the wasm-pack module):
+
+   - **`default`** — Async init function (loads the `.wasm`). Call once before `start_snaq_lite_lsp`.
+   - **`start_snaq_lite_lsp(postMessageCallback)`** — Starts the LSP server. Pass a JS function that will be called with each response string; the host should send that string to the main thread (e.g. `self.postMessage(result)`).
+   - **`push_lsp_message(str)`** — Call this from the Worker’s `onmessage` with the raw LSP request string. Each time the main thread sends a message, the worker pushes it with `push_lsp_message(event.data)`.
+
+4. **Message format** — After ready, messages are JSON-RPC (LSP over JSON-RPC):
+   - Main → Worker: pass the received string to `worker.postMessage(string)`; the worker forwards it to `push_lsp_message(s)`.
+   - Worker → Main: for each string passed to `postMessageCallback`, the worker does `self.postMessage(s)` so the main thread receives the response and routes it (e.g. to the LSP client or to the graph/widget stores).
 
 ## Verification
 

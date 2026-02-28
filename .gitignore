@@ -5,6 +5,7 @@
 
 # WASM (wasm-pack)
 pkg/
+apps/frontend/public/lsp-wasm/
 
 # Build / output
 dist/

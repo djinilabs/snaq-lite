@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import {
   VIRTUAL_URI_PREFIX,
+  WORKER_MSG_INIT,
+  WORKER_MSG_READY,
+  WORKER_MSG_ERROR,
   LSP_METHOD_GRAPH_CONNECT,
   LSP_METHOD_GRAPH_DISCONNECT,
   LSP_METHOD_SUBSCRIBE_WIDGET,
@@ -8,6 +11,12 @@ import {
 } from './constants'
 
 describe('constants', () => {
+  it('worker control message types match protocol', () => {
+    expect(WORKER_MSG_INIT).toBe('init')
+    expect(WORKER_MSG_READY).toBe('snaqlite-worker-ready')
+    expect(WORKER_MSG_ERROR).toBe('snaqlite-worker-error')
+  })
+
   it('VIRTUAL_URI_PREFIX is non-empty and ends with slash', () => {
     expect(VIRTUAL_URI_PREFIX).toBe('snaq://graph/')
     expect(VIRTUAL_URI_PREFIX.length).toBeGreaterThan(0)

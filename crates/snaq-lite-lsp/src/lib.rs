@@ -485,7 +485,7 @@ impl SnaqLiteBackend {
                         let inner = v.inner.clone();
                         let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
                         self.widgets.lock().await.insert(
-                            params.widget_id,
+                            params.widget_id.clone(),
                             source_uri,
                             cancel_tx,
                         );

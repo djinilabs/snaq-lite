@@ -2,7 +2,7 @@
  * Logic to send snaqlite/graph/connect and disconnect via LSP client and update graph store.
  */
 
-import { request } from '~/lsp'
+import { getLanguageClient } from '~/lsp/language-client-singleton'
 import { LSP_METHOD_GRAPH_CONNECT, LSP_METHOD_GRAPH_DISCONNECT } from '~/lib/constants'
 import { useGraphStore } from '~/store'
 import { useUIStore } from '~/store'
@@ -26,7 +26,7 @@ export async function connectEdge(
 
   useGraphStore.getState().addEdge({ sourceId, targetId, targetInputName })
   try {
-    await request(LSP_METHOD_GRAPH_CONNECT, {
+    await getLanguageClient().sendRequest(LSP_METHOD_GRAPH_CONNECT, {
       sourceUri,
       targetUri,
       targetInputName,
@@ -59,7 +59,7 @@ export async function disconnectEdge(
 
   state.removeEdge(targetId, targetInputName)
   try {
-    await request(LSP_METHOD_GRAPH_DISCONNECT, {
+    await getLanguageClient().sendRequest(LSP_METHOD_GRAPH_DISCONNECT, {
       targetUri,
       targetInputName,
     })

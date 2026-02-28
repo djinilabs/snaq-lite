@@ -2,16 +2,19 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { connectEdge, disconnectEdge } from './edge-handlers'
 import { useGraphStore } from '~/store'
 import { useUIStore } from '~/store'
-import { request } from '~/lsp'
 import { LSP_METHOD_GRAPH_CONNECT, LSP_METHOD_GRAPH_DISCONNECT } from '~/lib/constants'
 
-vi.mock('~/lsp', () => ({
-  request: vi.fn(),
+const mockSendRequest = vi.fn()
+vi.mock('~/lsp/language-client-singleton', () => ({
+  getLanguageClient: () => ({
+    sendRequest: mockSendRequest,
+    sendNotification: vi.fn(),
+  }),
 }))
 
 describe('edge-handlers', () => {
   beforeEach(() => {
-    vi.mocked(request).mockReset()
+    mockSendRequest.mockReset()
     useGraphStore.setState({ nodes: [], edges: [], pendingEdge: null })
   })
 
@@ -29,13 +32,13 @@ describe('edge-handlers', () => {
         type: 'computation',
         uri: 'snaq://graph/n2.sl',
       })
-      vi.mocked(request).mockResolvedValue(undefined)
+      mockSendRequest.mockResolvedValue(undefined)
 
       const result = await connectEdge('snaq://graph/n1.sl', 'snaq://graph/n2.sl', 'x')
 
       expect(result).toBe(true)
-      expect(request).toHaveBeenCalledTimes(1)
-      expect(request).toHaveBeenCalledWith(LSP_METHOD_GRAPH_CONNECT, {
+      expect(mockSendRequest).toHaveBeenCalledTimes(1)
+      expect(mockSendRequest).toHaveBeenCalledWith(LSP_METHOD_GRAPH_CONNECT, {
         sourceUri: 'snaq://graph/n1.sl',
         targetUri: 'snaq://graph/n2.sl',
         targetInputName: 'x',
@@ -61,7 +64,7 @@ describe('edge-handlers', () => {
         type: 'computation',
         uri: 'snaq://graph/n2.sl',
       })
-      vi.mocked(request).mockRejectedValue(new Error('Type mismatch'))
+      mockSendRequest.mockRejectedValue(new Error('Type mismatch'))
       const addToast = vi.fn()
       useUIStore.setState({ addToast })
       useGraphStore.getState().setPendingEdge({
@@ -88,7 +91,7 @@ describe('edge-handlers', () => {
 
       expect(await connectEdge('snaq://graph/n1.sl', 'snaq://graph/missing.sl', 'x')).toBe(false)
       expect(await connectEdge('snaq://graph/missing.sl', 'snaq://graph/n1.sl', 'x')).toBe(false)
-      expect(request).not.toHaveBeenCalled()
+      expect(mockSendRequest).not.toHaveBeenCalled()
     })
 
     it('on non-Error throw still removes edge and toasts string representation', async () => {
@@ -104,7 +107,7 @@ describe('edge-handlers', () => {
         type: 'computation',
         uri: 'snaq://graph/n2.sl',
       })
-      vi.mocked(request).mockRejectedValue('Server unavailable')
+      mockSendRequest.mockRejectedValue('Server unavailable')
       const addToast = vi.fn()
       useUIStore.setState({ addToast })
 
@@ -135,12 +138,12 @@ describe('edge-handlers', () => {
         targetId: 'n2',
         targetInputName: 'x',
       })
-      vi.mocked(request).mockResolvedValue(undefined)
+      mockSendRequest.mockResolvedValue(undefined)
 
       await disconnectEdge('snaq://graph/n2.sl', 'x')
 
-      expect(request).toHaveBeenCalledTimes(1)
-      expect(request).toHaveBeenCalledWith(LSP_METHOD_GRAPH_DISCONNECT, {
+      expect(mockSendRequest).toHaveBeenCalledTimes(1)
+      expect(mockSendRequest).toHaveBeenCalledWith(LSP_METHOD_GRAPH_DISCONNECT, {
         targetUri: 'snaq://graph/n2.sl',
         targetInputName: 'x',
       })
@@ -165,7 +168,7 @@ describe('edge-handlers', () => {
         targetId: 'n2',
         targetInputName: 'x',
       })
-      vi.mocked(request).mockRejectedValue(new Error('LSP disconnect failed'))
+      mockSendRequest.mockRejectedValue(new Error('LSP disconnect failed'))
       const addToast = vi.fn()
       useUIStore.setState({ addToast })
 
@@ -182,7 +185,7 @@ describe('edge-handlers', () => {
 
     it('does nothing when target node not in store', async () => {
       await disconnectEdge('snaq://graph/missing.sl', 'x')
-      expect(request).not.toHaveBeenCalled()
+      expect(mockSendRequest).not.toHaveBeenCalled()
     })
 
     it('on non-Error throw still rolls back and toasts string representation', async () => {
@@ -203,7 +206,7 @@ describe('edge-handlers', () => {
         targetId: 'n2',
         targetInputName: 'x',
       })
-      vi.mocked(request).mockRejectedValue('Network error')
+      mockSendRequest.mockRejectedValue('Network error')
       const addToast = vi.fn()
       useUIStore.setState({ addToast })
 

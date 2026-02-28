@@ -42,7 +42,7 @@ Clients should send `snaqlite/unsubscribe` when closing the file or hiding the r
 
 ## Visual computation graph
 
-The server supports a **visual computation graph** (DAG): each **Computation Box** is a node identified by a **virtual document URI** (e.g. `snaq://graph/node_42.sl`). The frontend opens virtual URIs with `textDocument/didOpen` and edits them with `didChange`; the server keeps multi-document state keyed by URI. Nodes can declare **input ports** and be **wired** together; **Presentation Blocks** (widgets) subscribe to a node’s output and receive live stream or one-shot updates.
+The server supports a **visual computation graph** (DAG): each **Computation Box** is a node identified by a **virtual document URI** (e.g. `snaq://graph/node_42.sl`). The frontend uses a **single shared LSP connection** (vscode-jsonrpc MessageConnection over the Web Worker message router). It opens virtual URIs with `textDocument/didOpen` and sends `didChange`; the server keeps multi-document state keyed by URI. Diagnostics, hover, and inlay hints are provided by the LSP over the same connection; the frontend applies `textDocument/publishDiagnostics` to Monaco via `setModelMarkers`. Nodes can declare **input ports** and be **wired** together; **Presentation Blocks** (widgets) subscribe to a node’s output and receive live stream or one-shot updates.
 
 ### Virtual URIs and multi-document state
 

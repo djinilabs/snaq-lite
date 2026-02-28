@@ -1,6 +1,6 @@
 /**
  * Dispatches incoming LSP messages: responses → request-id callbacks or Monaco;
- * custom notifications (nodeSignatureUpdated, widgetDataUpdate) → store or widget handlers.
+ * custom notifications (nodeSignatureUpdated, widgetDataUpdate, publishDiagnostics) → store or registered handler.
  */
 
 import type {
@@ -12,15 +12,30 @@ import type {
 } from './types'
 import { isResponse, isNotification } from './types'
 
+const LSP_DIAGNOSTICS_METHOD = 'textDocument/publishDiagnostics'
+
 export type OnNodeSignatureUpdated = (params: NodeSignatureUpdatedParams) => void
 export type OnWidgetDataUpdate = (params: WidgetDataUpdateParams) => void
 export type OnLspResponse = (response: JsonRpcResponse) => void
+
+export interface PublishDiagnosticsParams {
+  uri?: string
+  diagnostics?: Array<{
+    range?: { start?: { line?: number; character?: number }; end?: { line?: number; character?: number } }
+    message?: string
+    severity?: number
+  }>
+}
+
+export type OnPublishDiagnostics = (params: PublishDiagnosticsParams) => void
 
 export interface MessageRouterHandlers {
   onNodeSignatureUpdated?: OnNodeSignatureUpdated
   onWidgetDataUpdate?: OnWidgetDataUpdate
   /** Called for every LSP response (id + result/error); used by client to resolve promises. */
   onLspResponse?: OnLspResponse
+  /** Called when server sends textDocument/publishDiagnostics; app can apply to Monaco. */
+  onPublishDiagnostics?: OnPublishDiagnostics
 }
 
 let handlers: MessageRouterHandlers = {}
@@ -56,8 +71,10 @@ export function routeMessage(raw: string): void {
       case 'snaqlite/graph/widgetDataUpdate':
         handlers.onWidgetDataUpdate?.(notification.params as WidgetDataUpdateParams)
         break
+      case LSP_DIAGNOSTICS_METHOD:
+        handlers.onPublishDiagnostics?.(notification.params as PublishDiagnosticsParams)
+        break
       default:
-        // Other LSP notifications (e.g. textDocument/publishDiagnostics) can be handled here
         break
     }
   }

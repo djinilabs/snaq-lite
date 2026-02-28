@@ -1,12 +1,13 @@
 /**
  * Renders Monaco when node is in view or focused; creates/gets model via virtual-uri;
- * calls layout() on resize; didChange is sent via LSP (message router).
+ * calls layout() on resize. Sends didOpen/didChange via the language client when available.
+ * On unmount disposes only the editor instance; the model stays in the registry (disposed when node is removed from graph).
  */
 
 import { useEffect, useRef } from 'react'
 import { nodeIdToUri } from '~/editor/virtual-uri'
-import { getOrCreateModel, disposeModel } from '~/editor/text-model-registry'
-import { sendNotification } from '~/lsp'
+import { getOrCreateModel } from '~/editor/text-model-registry'
+import { hasLanguageClient, getLanguageClient } from '~/lsp/language-client-singleton'
 
 const LSP_METHOD_DID_OPEN = 'textDocument/didOpen'
 const LSP_METHOD_DID_CHANGE = 'textDocument/didChange'
@@ -47,20 +48,24 @@ export function ComputationBoxEditor({
         language: 'snaq',
       })
       editorRef.current = editor
-      sendNotification(LSP_METHOD_DID_OPEN, {
-        textDocument: { uri, version: 1, languageId: 'snaq', text: model.getValue() },
-      })
-      model.onDidChangeContent(() => {
-        sendNotification(LSP_METHOD_DID_CHANGE, {
-          textDocument: { uri, version: model.getVersionId() },
-          contentChanges: [{ text: model.getValue() }],
+      if (hasLanguageClient()) {
+        getLanguageClient().sendNotification(LSP_METHOD_DID_OPEN, {
+          textDocument: { uri, version: 1, languageId: 'snaq', text: model.getValue() },
         })
+      }
+      model.onDidChangeContent(() => {
+        if (hasLanguageClient()) {
+          getLanguageClient().sendNotification(LSP_METHOD_DID_CHANGE, {
+            textDocument: { uri, version: model.getVersionId() },
+            contentChanges: [{ text: model.getValue() }],
+          })
+        }
       })
     })
     return () => {
       editorRef.current?.dispose()
       editorRef.current = null
-      disposeModel(uri)
+      // Do not dispose the model here; it is disposed when the node is removed from the graph (store subscription).
     }
   }, [uri, visible, initialContent])
 

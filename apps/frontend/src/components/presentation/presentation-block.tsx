@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useRef } from 'react'
-import { request } from '~/lsp'
+import { getLanguageClient, hasLanguageClient } from '~/lsp/language-client-singleton'
 import { LSP_METHOD_SUBSCRIBE_WIDGET, LSP_METHOD_UNSUBSCRIBE_WIDGET } from '~/lib/constants'
 import { generateWidgetId } from '~/lib/utils'
 import { useWidgetStore } from '~/store'
@@ -24,10 +24,41 @@ export function PresentationBlock({ sourceUri, widgetId: widgetIdProp }: Present
   const removeWidget = useWidgetStore((s) => s.removeWidget)
 
   useEffect(() => {
-    request(LSP_METHOD_SUBSCRIBE_WIDGET, { widgetId, sourceUri }).catch(() => {})
+    let didSubscribe = false
+    const maxWaitMs = 10_000
+    const intervalMs = 200
+    const deadline = Date.now() + maxWaitMs
+    let intervalId: ReturnType<typeof setInterval> | null = null
+
+    function subscribe(): void {
+      if (!hasLanguageClient()) return
+      didSubscribe = true
+      getLanguageClient()
+        .sendRequest(LSP_METHOD_SUBSCRIBE_WIDGET, { widgetId, sourceUri })
+        .catch(() => {})
+    }
+
+    if (hasLanguageClient()) {
+      subscribe()
+    } else {
+      intervalId = setInterval(() => {
+        if (didSubscribe || Date.now() >= deadline) {
+          if (intervalId != null) clearInterval(intervalId)
+          intervalId = null
+          return
+        }
+        subscribe()
+      }, intervalMs)
+    }
+
     return () => {
-      request(LSP_METHOD_UNSUBSCRIBE_WIDGET, { widgetId }).catch(() => {})
+      if (intervalId != null) clearInterval(intervalId)
       removeWidget(widgetId)
+      if (didSubscribe && hasLanguageClient()) {
+        getLanguageClient()
+          .sendRequest(LSP_METHOD_UNSUBSCRIBE_WIDGET, { widgetId })
+          .catch(() => {})
+      }
     }
   }, [widgetId, sourceUri, removeWidget])
 

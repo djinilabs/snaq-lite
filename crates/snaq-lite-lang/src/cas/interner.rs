@@ -63,6 +63,8 @@ pub enum ExprNode {
     MapLiteral(Vec<(String, ExprId)>),
     /// External stream input: `$name`. Pass-through in CAS; eval looks up in stream input registry.
     ExternalStream(String),
+    /// Declarative graph input (input name: TypeName). Metadata only; pass-through in CAS.
+    InputDecl(String, String),
 }
 
 /// Central cache: same structure => same ExprId. New nodes are interned on construction.

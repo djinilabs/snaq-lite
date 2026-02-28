@@ -121,6 +121,8 @@ pub enum SpannedExprDefKind {
     ExternalStream(String),
     /// Map literal: { key: value, ... }. At least one entry; keys are unquoted idents.
     MapLiteral(Vec<(String, SpannedExprDef)>),
+    /// Declarative graph input: input name : TypeName. Metadata only; evaluation skips. Same name as used in $name.
+    InputDecl(String, String),
 }
 
 impl SpannedExprDef {
@@ -204,6 +206,7 @@ impl SpannedExprDef {
                     .map(|(k, v)| (k.clone(), Box::new(v.to_expr_def())))
                     .collect(),
             ),
+            SpannedExprDefKind::InputDecl(name, type_name) => ExprDef::InputDecl(name.clone(), type_name.clone()),
         }
     }
 }
@@ -273,6 +276,8 @@ pub enum ExprDef {
     ExternalStream(String),
     /// Map literal: { key: value, ... }. At least one entry.
     MapLiteral(Vec<(String, Box<ExprDef>)>),
+    /// Declarative graph input (input name: TypeName). Metadata only; block evaluation skips.
+    InputDecl(String, String),
 }
 
 /// Input that holds the root expression definition.
@@ -354,4 +359,6 @@ pub enum ExprData<'db> {
     ExternalStream(String),
     /// Map literal: { key: value, ... }. At least one entry.
     MapLiteral(Vec<(String, Expression<'db>)>),
+    /// Declarative graph input (input name: TypeName). Metadata only; block evaluation skips.
+    InputDecl(String, String),
 }

@@ -1,23 +1,29 @@
-//! Shared LSP state: document, Salsa DB, and diagnostics.
+//! Shared LSP state: multi-document map, Salsa DB, and diagnostics.
 
 use crate::mapping::{run_error_to_diagnostic, span_to_range};
+use std::collections::{HashMap, HashSet};
 use tower_lsp::lsp_types::{Diagnostic, InlayHint, Position, Range, Url};
 use snaq_lite_lang::{
     cas, default_si_registry, empty_scope, format_value_for_display, parse, program,
     set_eval_registry, set_stream_input_registry, ExprDef, Expression, ProgramDef, UnitRegistry,
 };
 
-/// Internal LSP state (held under async lock).
+/// Per-document state (one entry per open virtual or physical URI).
+#[derive(Clone)]
+pub struct DocumentEntry {
+    pub source: String,
+    pub version: Option<i32>,
+    pub root_def: Option<ExprDef>,
+    pub root_spanned: Option<snaq_lite_lang::SpannedExprDef>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Internal LSP state (held under async lock). Tracks multiple documents by URI (e.g. snaq://graph/node_42.sl).
 pub struct LspState {
     db: salsa::DatabaseImpl,
-    source: String,
-    uri: Option<Url>,
-    version: Option<i32>,
-    root_def: Option<ExprDef>,
-    root_spanned: Option<snaq_lite_lang::SpannedExprDef>,
+    /// Map from document URI to parsed/resolved state and diagnostics.
+    documents: HashMap<Url, DocumentEntry>,
     unit_registry: UnitRegistry,
-    /// Cached diagnostics from last parse/resolve/simplify.
-    diagnostics: Vec<Diagnostic>,
 }
 
 fn empty_block_def() -> ExprDef {
@@ -28,36 +34,34 @@ impl LspState {
     pub fn new() -> Self {
         Self {
             db: salsa::DatabaseImpl::new(),
-            source: String::new(),
-            uri: None,
-            version: None,
-            root_def: None,
-            root_spanned: None,
+            documents: HashMap::new(),
             unit_registry: default_si_registry(),
-            diagnostics: Vec::new(),
         }
     }
 
-    /// Update document content and re-parse/resolve/simplify; update diagnostics.
+    /// Update document content and re-parse/resolve/simplify; update diagnostics for this URI.
     pub fn update_document(&mut self, uri: Url, version: i32, text: &str) {
-        self.source = text.to_string();
-        self.uri = Some(uri);
-        self.version = Some(version);
+        let entry = self.parse_document(version, text);
+        self.documents.insert(uri, entry);
+    }
 
+    fn parse_document(&self, version: i32, text: &str) -> DocumentEntry {
         if text.trim().is_empty() {
-            self.root_def = Some(empty_block_def());
-            self.root_spanned = None;
-            self.diagnostics = Vec::new();
-            return;
+            return DocumentEntry {
+                source: text.to_string(),
+                version: Some(version),
+                root_def: Some(empty_block_def()),
+                root_spanned: None,
+                diagnostics: Vec::new(),
+            };
         }
 
         let mut diags = Vec::new();
-        match parse(text) {
+        let (root_def, root_spanned) = match parse(text) {
             Err(pe) => {
                 let err = snaq_lite_lang::RunError::from(pe);
                 diags.push(run_error_to_diagnostic(&err, text));
-                self.root_def = Some(empty_block_def());
-                self.root_spanned = None;
+                (empty_block_def(), None)
             }
             Ok(spanned) => {
                 set_eval_registry(self.unit_registry.clone());
@@ -68,42 +72,60 @@ impl LspState {
                 match snaq_lite_lang::resolve::resolve(spanned.clone(), &self.unit_registry) {
                     Err(e) => {
                         diags.push(run_error_to_diagnostic(&e, text));
-                        self.root_def = Some(empty_block_def());
-                        self.root_spanned = None;
+                        (spanned.to_expr_def(), Some(spanned))
                     }
                     Ok(resolved) => match cas::simplify_symbolic(resolved.clone(), &self.unit_registry) {
                         Err(e) => {
                             diags.push(run_error_to_diagnostic(&e, text));
-                            self.root_def = Some(resolved.to_expr_def());
-                            self.root_spanned = Some(resolved);
+                            (resolved.to_expr_def(), Some(resolved))
                         }
                         Ok(simplified) => {
                             let root_def = simplified.to_expr_def();
                             let program_def =
                                 ProgramDef::new(&self.db, root_def.clone(), Some(simplified.clone()));
                             let _root_expr = program(&self.db, program_def);
-                            self.root_def = Some(root_def);
-                            self.root_spanned = Some(simplified);
+                            (root_def, Some(simplified))
                         }
                     },
                 }
             }
+        };
+
+        DocumentEntry {
+            source: text.to_string(),
+            version: Some(version),
+            root_def: Some(root_def),
+            root_spanned,
+            diagnostics: diags,
         }
-        self.diagnostics = diags;
     }
 
-    pub fn document_version(&self) -> Option<i32> {
-        self.version
+    /// Document version for the given URI, if open.
+    pub fn document_version(&self, uri: &Url) -> Option<i32> {
+        self.documents.get(uri).and_then(|e| e.version)
     }
 
-    /// Current document URI (for pub-sub subscription validation).
-    pub fn uri(&self) -> Option<&Url> {
-        self.uri.as_ref()
+    /// Set of open document URIs (for graph topological order).
+    pub fn document_uris(&self) -> HashSet<Url> {
+        self.documents.keys().cloned().collect()
     }
 
-    /// Current source text (for run_with_stream_inputs in subscribe).
-    pub fn source(&self) -> &str {
-        &self.source
+    /// Whether the given URI is open (for pub-sub subscription validation).
+    pub fn has_document(&self, uri: &Url) -> bool {
+        self.documents.contains_key(uri)
+    }
+
+    /// Document entry for the given URI, if open. Used for graph node signature and similar.
+    pub fn get_document(&self, uri: &Url) -> Option<&DocumentEntry> {
+        self.documents.get(uri)
+    }
+
+    /// Source text for the given URI, if open. Returns empty string if not found.
+    pub fn source(&self, uri: &Url) -> String {
+        self.documents
+            .get(uri)
+            .map(|e| e.source.clone())
+            .unwrap_or_default()
     }
 
     /// Unit registry (for run_with_stream_inputs in subscribe).
@@ -111,18 +133,23 @@ impl LspState {
         &self.unit_registry
     }
 
-    /// Return current diagnostics (after last update_document).
-    pub fn diagnostics(&self) -> Vec<Diagnostic> {
-        self.diagnostics.clone()
+    /// Return current diagnostics for the given URI.
+    pub fn diagnostics(&self, uri: &Url) -> Vec<Diagnostic> {
+        self.documents
+            .get(uri)
+            .map(|e| e.diagnostics.clone())
+            .unwrap_or_default()
     }
 
     /// Hover at (line, character) - 0-based. Returns (formatted value, optional range for highlighting) or None.
     pub fn hover_at(&self, uri: &Url, line: u32, character: u32) -> Option<(String, Option<Range>)> {
-        if self.uri.as_ref() != Some(uri) || self.source.is_empty() {
+        let doc = self.documents.get(uri)?;
+        let source = &doc.source;
+        if source.is_empty() {
             return None;
         }
-        let root_def = self.root_def.as_ref()?;
-        let root_spanned = self.root_spanned.clone();
+        let root_def = doc.root_def.as_ref()?;
+        let root_spanned = doc.root_spanned.clone();
         set_eval_registry(self.unit_registry.clone());
         set_stream_input_registry(snaq_lite_lang::StreamInputRegistry::new(
             &self.db,
@@ -130,23 +157,27 @@ impl LspState {
         ));
         let program_def = ProgramDef::new(&self.db, root_def.clone(), root_spanned);
         let root = program(&self.db, program_def);
-        let offset = position_to_byte_offset(&self.source, line, character)?;
+        let offset = position_to_byte_offset(source, line, character)?;
         let expr = expression_at_offset(&self.db, root, offset)?;
         let range = expr
             .span(&self.db)
-            .map(|s| span_to_range(&s, &self.source));
+            .map(|s| span_to_range(&s, source));
         let scope = empty_scope(&self.db);
         let value = snaq_lite_lang::value(&self.db, scope, expr).ok()?;
         let content = format_value_for_display(&self.db, &value).ok()?;
         Some((content, range))
     }
 
-    /// Inlay hints for the document.
+    /// Inlay hints for the document at the given URI.
     pub fn inlay_hints(&self, uri: &Url) -> Vec<InlayHint> {
-        if self.uri.as_ref() != Some(uri) || self.source.is_empty() {
+        let doc = match self.documents.get(uri) {
+            Some(d) => d,
+            None => return Vec::new(),
+        };
+        if doc.source.is_empty() {
             return Vec::new();
         }
-        let Some(root_def) = self.root_def.as_ref() else {
+        let Some(root_def) = doc.root_def.as_ref() else {
             return Vec::new();
         };
         set_eval_registry(self.unit_registry.clone());
@@ -157,10 +188,10 @@ impl LspState {
         let program_def = ProgramDef::new(
             &self.db,
             root_def.clone(),
-            self.root_spanned.clone(),
+            doc.root_spanned.clone(),
         );
         let root = program(&self.db, program_def);
-        collect_inlay_hints(&self.db, &self.source, root)
+        collect_inlay_hints(&self.db, &doc.source, root)
     }
 }
 

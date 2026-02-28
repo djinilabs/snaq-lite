@@ -30,6 +30,7 @@ extern {
         "if" => Tok::If,
         "then" => Tok::Then,
         "else" => Tok::Else,
+        "input" => Tok::Input,
         "π" => Tok::Pi,
         "," => Tok::Comma,
         ":" => Tok::Colon,
@@ -82,9 +83,14 @@ FnName: String = {
     FuncIdent => <>,
 };
 
-// Block item: named function, binding, or expression.
+// Block item: input declaration, named function, binding, or expression.
+// Input declarations (input name: TypeName) are metadata for the graph LSP; evaluation skips them.
 // Standalone expression uses ExprReset so top-level and RHS accept full expressions (LALRPOP #596 workaround).
 BlockItem: SpannedExprDef = {
+    <lo:@L> "input" <name:Ident> ":" <type_name:Ident> <hi:@R> => SpannedExprDef {
+        span: Span { start: lo, end: hi },
+        value: SpannedExprDefKind::InputDecl(name, type_name)
+    },
     <lo:@L> "fn" <name:FnName> "(" <params:ParamList> ")" "=>" <content:BlockBracedContent> <hi:@R> => {
         let params = params.into_iter().map(|(s, o)| (s, o.map(Box::new))).collect();
         SpannedExprDef {

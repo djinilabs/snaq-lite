@@ -66,7 +66,8 @@ pub fn resolve(def: SpannedExprDef, registry: &UnitRegistry) -> Result<SpannedEx
         SpannedExprDefKind::Lit(_)
         | SpannedExprDefKind::LitFuzzyBool(_)
         | SpannedExprDefKind::LitSymbol(_)
-        | SpannedExprDefKind::ExternalStream(_) => Ok(SpannedExprDef { span, value: def.value }),
+        | SpannedExprDefKind::ExternalStream(_)
+        | SpannedExprDefKind::InputDecl(_, _) => Ok(SpannedExprDef { span, value: def.value }),
         SpannedExprDefKind::Binding(name, rhs) => {
             let rhs = resolve(*rhs, registry)?;
             Ok(SpannedExprDef {

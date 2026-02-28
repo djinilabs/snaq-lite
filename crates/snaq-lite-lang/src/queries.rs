@@ -788,6 +788,7 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef, spanned: Option<Span
         ExprDef::LitSymbol(name) => return Expression::new(db, ExprData::LitSymbol(name), span),
         ExprDef::LitDate(gd) => return Expression::new(db, ExprData::LitDate(gd.clone()), span),
         ExprDef::ExternalStream(name) => return Expression::new(db, ExprData::ExternalStream(name), span),
+        ExprDef::InputDecl(name, type_name) => return Expression::new(db, ExprData::InputDecl(name, type_name), span),
         ExprDef::LitTemporal(_) => {
             panic!("unresolved LitTemporal: resolve() must convert to LitDate before building the graph")
         }
@@ -1244,6 +1245,10 @@ pub fn value<'db>(
                 .and_then(|reg| reg.inputs(db).get(name).copied())
                 .ok_or_else(|| run_err_with_span(db, expr, RunErrorKind::UnboundStreamInput(name.clone())))?;
             Ok(Value::Vector(VectorValue::column(LazyVector::FromInput(handle))))
+        }
+        ExprData::InputDecl(_, _) => {
+            // Metadata only; not evaluated standalone. Block iteration skips these.
+            Ok(Value::Undefined)
         }
         ExprData::Add(l, r) => {
             let left = value(db, scope, *l)?;
@@ -1806,6 +1811,12 @@ pub fn value<'db>(
                 let n = exprs.len();
                 for (i, e) in exprs.iter().enumerate() {
                     match e.data(db) {
+                        ExprData::InputDecl(_, _) => {
+                            // Metadata only; skip. If this is the last item, block value is Undefined.
+                            if i == n - 1 {
+                                return Ok(Value::Undefined);
+                            }
+                        }
                         ExprData::Binding(_, _) => {
                             let (v, new_scope) =
                                 eval_binding_chain(db, current_scope, *e)?;
@@ -1871,6 +1882,7 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
         ExprData::LitSymbol(name) => ExprDef::LitSymbol(name.clone()),
         ExprData::LitDate(gd) => ExprDef::LitDate(gd.clone()),
         ExprData::ExternalStream(name) => ExprDef::ExternalStream(name.clone()),
+        ExprData::InputDecl(name, type_name) => ExprDef::InputDecl(name.clone(), type_name.clone()),
         ExprData::Add(l, r) => ExprDef::Add(
             Box::new(expression_to_def(db, *l)),
             Box::new(expression_to_def(db, *r)),

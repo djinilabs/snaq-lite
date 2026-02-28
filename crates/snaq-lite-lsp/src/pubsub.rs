@@ -62,6 +62,89 @@ pub struct PublishResultParams {
     pub data: Option<serde_json::Value>,
 }
 
+// ---- Graph (snaqlite/graph/*) ----
+
+/// Custom LSP notification for snaqlite/graph/nodeSignatureUpdated (server → client).
+/// Sent after didOpen/didChange for a document so the frontend can render input/output ports.
+pub struct NodeSignatureUpdatedNotification;
+impl tower_lsp::lsp_types::notification::Notification for NodeSignatureUpdatedNotification {
+    type Params = NodeSignatureUpdatedParams;
+    const METHOD: &'static str = "snaqlite/graph/nodeSignatureUpdated";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeSignatureUpdatedParams {
+    pub uri: String,
+    pub inputs: Vec<NodeInputPort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeInputPort {
+    pub name: String,
+    pub r#type: String,
+}
+
+/// Params for snaqlite/graph/connect request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectParams {
+    pub source_uri: String,
+    pub target_uri: String,
+    pub target_input_name: String,
+}
+
+/// Params for snaqlite/graph/disconnect request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisconnectParams {
+    pub target_uri: String,
+    pub target_input_name: String,
+}
+
+/// Notification snaqlite/graph/widgetDataUpdate (server → client).
+pub struct WidgetDataUpdateNotification;
+impl tower_lsp::lsp_types::notification::Notification for WidgetDataUpdateNotification {
+    type Params = WidgetDataUpdateParams;
+    const METHOD: &'static str = "snaqlite/graph/widgetDataUpdate";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WidgetDataUpdateParams {
+    pub widget_id: String,
+    pub status: WidgetDataStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum WidgetDataStatus {
+    Running,
+    Completed,
+    Cancelled,
+    Error,
+}
+
+/// Params for snaqlite/graph/subscribeWidget request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscribeWidgetParams {
+    pub widget_id: String,
+    pub source_uri: String,
+}
+
+/// Params for snaqlite/graph/unsubscribeWidget request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsubscribeWidgetParams {
+    pub widget_id: String,
+}
+
 /// Serialize a single stream element (Result<Option<Value>, RunError>) to JSON for the protocol.
 /// Uses format_value_for_display for Ok(Some(Value)); undefined → null; error → { kind, message }.
 pub fn stream_element_to_json(

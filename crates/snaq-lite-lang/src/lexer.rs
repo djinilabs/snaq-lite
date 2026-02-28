@@ -28,6 +28,8 @@ pub enum Tok {
     If,
     Then,
     Else,
+    /// "input" for declarative graph node input (e.g. input revenue: ProbabilisticTensor).
+    Input,
     Pi,
     Comma,
     Colon,
@@ -309,22 +311,25 @@ impl<'input> Iterator for Lexer<'input> {
         let start = self.pos;
         let rest = &self.input[self.pos..];
 
-        // Newline: \n or \r\n (expression separator)
+        // Newline: \n or \r\n (expression separator); next token may start new expression (e.g. [1, 2]).
         if rest.starts_with('\n') {
             self.last_was_number = false;
             self.any_token_emitted = true;
+            self.after_postfix_factor = false;
             self.pos += 1;
             return Some(Ok((start, Tok::Newline, self.pos)));
         }
         if rest.starts_with("\r\n") {
             self.last_was_number = false;
             self.any_token_emitted = true;
+            self.after_postfix_factor = false;
             self.pos += 2;
             return Some(Ok((start, Tok::Newline, self.pos)));
         }
         if rest.starts_with('\r') {
             self.last_was_number = false;
             self.any_token_emitted = true;
+            self.after_postfix_factor = false;
             self.pos += 1;
             return Some(Ok((start, Tok::Newline, self.pos)));
         }
@@ -362,6 +367,12 @@ impl<'input> Iterator for Lexer<'input> {
             self.after_postfix_factor = false; // next token may start an expression (else branch, e.g. [1, 2])
             self.pos += 4;
             return Some(Ok((start, Tok::Else, self.pos)));
+        }
+        if rest.starts_with("input") && !rest[5..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            self.last_was_number = false;
+            self.any_token_emitted = true;
+            self.pos += 5;
+            return Some(Ok((start, Tok::Input, self.pos)));
         }
         if rest.starts_with("fn") && !rest[2..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
             self.last_was_number = false;

@@ -25,6 +25,7 @@ pub mod vector_registry;
 pub mod map_registry;
 pub mod stream_handle;
 pub mod stream_variance;
+pub mod graph;
 
 pub use error::{format_run_error_with_source, ParseError, RunError, RunErrorKind, Span};
 pub use quantity::{Quantity, QuantityError, SnaqNumber};
@@ -43,6 +44,7 @@ pub use map_registry::{
     MapId, Record, record_to_chunk_element, record_to_value,
 };
 pub use stream_variance::{decimal_string_to_quantity, StreamVarianceMode};
+pub use graph::{extract_input_decls_from_block, value_type_name};
 
 /// Parse and evaluate the expression, returning a Value (symbolic by default, e.g. "6 + π").
 ///
@@ -3213,6 +3215,67 @@ mod tests {
             SpannedExprDefKind::ExternalStream(name) => assert_eq!(name, "foo"),
             _ => panic!("resolve should leave ExternalStream, got {:?}", block[0].value),
         }
+    }
+
+    // --- Declarative input (input name: TypeName) for graph nodes ---
+
+    #[test]
+    fn parse_input_decl() {
+        use crate::ir::SpannedExprDefKind;
+
+        let root = parse("input revenue: ProbabilisticTensor").unwrap();
+        let block = match &root.value {
+            SpannedExprDefKind::Block(ref items) => items,
+            _ => panic!("expected Block"),
+        };
+        assert_eq!(block.len(), 1);
+        match &block[0].value {
+            SpannedExprDefKind::InputDecl(name, type_name) => {
+                assert_eq!(name, "revenue");
+                assert_eq!(type_name, "ProbabilisticTensor");
+            }
+            _ => panic!("expected InputDecl, got {:?}", block[0].value),
+        }
+    }
+
+    #[test]
+    fn parse_input_decl_then_expr() {
+        use crate::graph::extract_input_decls_from_block;
+
+        let root = parse("input a: Vector\ninput b: Numeric\n1 + 2").unwrap();
+        let resolved = resolve::resolve(root, &default_si_registry()).unwrap();
+        let def = resolved.to_expr_def();
+        let inputs = extract_input_decls_from_block(&def);
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0], ("a".to_string(), "Vector".to_string()));
+        assert_eq!(inputs[1], ("b".to_string(), "Numeric".to_string()));
+        assert_eq!(run_with_registry("input a: Vector\n1 + 2", &default_si_registry()).unwrap(), run("1 + 2").unwrap());
+    }
+
+    #[test]
+    fn extract_input_decls_single_input_and_vector_literal() {
+        use crate::graph::extract_input_decls_from_block;
+
+        // Same shape as LSP node "input x: Vector\n[1, 2]" used in graph tests.
+        let root = parse("input x: Vector\n[1, 2]").unwrap();
+        let resolved = resolve::resolve(root, &default_si_registry()).unwrap();
+        let def = resolved.to_expr_def();
+        let inputs = extract_input_decls_from_block(&def);
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0], ("x".to_string(), "Vector".to_string()));
+    }
+
+    #[test]
+    fn value_type_name_all_variants() {
+        use crate::graph::value_type_name;
+
+        assert_eq!(value_type_name(&Value::Numeric(Quantity::from_scalar(1.0))).as_deref(), Some("Numeric"));
+        assert_eq!(value_type_name(&Value::Vector(crate::vector::VectorValue::column(LazyVector::from_evaluated(vec![])))).as_deref(), Some("Vector"));
+        assert_eq!(value_type_name(&Value::FuzzyBool(FuzzyBool::True)).as_deref(), Some("FuzzyBool"));
+        assert_eq!(value_type_name(&Value::Undefined).as_deref(), Some("Undefined"));
+        let date_val = run("@2026-01-01").unwrap();
+        assert!(matches!(date_val, Value::Date(_)));
+        assert_eq!(value_type_name(&date_val).as_deref(), Some("Date"));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 //! snaq-lite LSP server: dual-target (native stdio + WASM Web Worker) language server.
 
+pub mod graph;
 pub mod mapping;
+pub mod widget_registry;
 pub mod pubsub;
 pub mod state;
 pub mod subscription;
@@ -19,10 +21,13 @@ use tower_lsp::lsp_types::{
 
 use crate::mapping::SERVER_NAME;
 use crate::pubsub::{
-    PublishResultNotification, PublishResultParams, PublishStatus, SubscribeParams, SubscribeResponse,
-    UnsubscribeParams,
+    ConnectParams, DisconnectParams, NodeInputPort, NodeSignatureUpdatedNotification,
+    NodeSignatureUpdatedParams, PublishResultNotification, PublishResultParams, PublishStatus,
+    SubscribeParams, SubscribeResponse, UnsubscribeParams, SubscribeWidgetParams,
+    UnsubscribeWidgetParams, WidgetDataStatus, WidgetDataUpdateNotification, WidgetDataUpdateParams,
 };
 use crate::subscription::SubscriptionRegistry;
+use crate::widget_registry::WidgetRegistry;
 use tower_lsp::{Client, LanguageServer, LspService};
 #[cfg(not(target_arch = "wasm32"))]
 use tower_lsp::Server;
@@ -35,18 +40,32 @@ pub type SharedState = Arc<Mutex<LspState>>;
 /// Shared subscription registry (async lock).
 pub type SharedSubscriptions = Arc<Mutex<SubscriptionRegistry>>;
 
+/// Shared graph state (edges for connect).
+pub type SharedGraphState = Arc<Mutex<graph::GraphState>>;
+
+/// Shared widget registry (subscribeWidget / unsubscribeWidget).
+pub type SharedWidgetRegistry = Arc<Mutex<WidgetRegistry>>;
+
 /// Channel to send publish notifications from background consumer to the backend.
 pub type NotificationSender = futures::channel::mpsc::UnboundedSender<(String, PublishResultParams)>;
 pub type NotificationReceiver = futures::channel::mpsc::UnboundedReceiver<(String, PublishResultParams)>;
+
+/// Channel to send widget data updates from background consumer to the backend.
+pub type WidgetNotificationSender = futures::channel::mpsc::UnboundedSender<WidgetDataUpdateParams>;
+pub type WidgetNotificationReceiver = futures::channel::mpsc::UnboundedReceiver<WidgetDataUpdateParams>;
 
 /// Backend implementing the Language Server Protocol for snaq-lite.
 pub struct SnaqLiteBackend {
     pub client: Client,
     pub state: SharedState,
     pub subscriptions: SharedSubscriptions,
+    pub graph_state: SharedGraphState,
+    pub widgets: SharedWidgetRegistry,
     pub notification_tx: NotificationSender,
     /// Locked receiver for draining pending publishResult notifications (sent by consumer threads).
     pub notification_rx: Arc<Mutex<NotificationReceiver>>,
+    pub widget_notification_tx: WidgetNotificationSender,
+    pub widget_notification_rx: Arc<Mutex<WidgetNotificationReceiver>>,
 }
 
 #[tower_lsp::async_trait]
@@ -89,6 +108,20 @@ impl LanguageServer for SnaqLiteBackend {
                 })
                 .await;
         }
+        let widget_cancel = {
+            let mut w = self.widgets.lock().await;
+            w.invalidate_all()
+        };
+        for (widget_id, cancel_tx) in widget_cancel {
+            let _ = cancel_tx.send(());
+            self.client
+                .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                    widget_id,
+                    status: WidgetDataStatus::Cancelled,
+                    payload: Some(serde_json::json!({ "reason": "Server shutdown" })),
+                })
+                .await;
+        }
         Ok(())
     }
 
@@ -100,8 +133,11 @@ impl LanguageServer for SnaqLiteBackend {
         state.update_document(uri.clone(), version, &text);
         drop(state);
         self.invalidate_subscriptions_for_uri(&uri).await;
+        self.invalidate_widgets_for_uri(&uri).await;
         self.drain_notifications().await;
-        self.publish_diagnostics(uri).await;
+        self.drain_widget_notifications().await;
+        self.publish_diagnostics(uri.clone()).await;
+        self.send_node_signature_updated(&uri).await;
     }
 
     async fn did_change(&self, params: tower_lsp::lsp_types::DidChangeTextDocumentParams) {
@@ -115,11 +151,15 @@ impl LanguageServer for SnaqLiteBackend {
         }
         drop(state);
         self.invalidate_subscriptions_for_uri(&uri).await;
+        self.invalidate_widgets_for_uri(&uri).await;
         self.drain_notifications().await;
-        self.publish_diagnostics(uri).await;
+        self.drain_widget_notifications().await;
+        self.publish_diagnostics(uri.clone()).await;
+        self.send_node_signature_updated(&uri).await;
     }
 
     async fn hover(&self, params: tower_lsp::lsp_types::HoverParams) -> tower_lsp::jsonrpc::Result<Option<Hover>> {
+        self.drain_widget_notifications().await;
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
         let state = self.state.lock().await;
@@ -139,6 +179,7 @@ impl LanguageServer for SnaqLiteBackend {
         &self,
         params: tower_lsp::lsp_types::InlayHintParams,
     ) -> tower_lsp::jsonrpc::Result<Option<Vec<InlayHint>>> {
+        self.drain_widget_notifications().await;
         let uri = params.text_document.uri;
         let state = self.state.lock().await;
         let hints = state.inlay_hints(&uri);
@@ -149,8 +190,8 @@ impl LanguageServer for SnaqLiteBackend {
 impl SnaqLiteBackend {
     async fn publish_diagnostics(&self, uri: Url) {
         let state = self.state.lock().await;
-        let diagnostics = state.diagnostics();
-        let version = state.document_version();
+        let diagnostics = state.diagnostics(&uri);
+        let version = state.document_version(&uri);
         drop(state);
         self.client
             .publish_diagnostics(uri, diagnostics, version)
@@ -165,6 +206,75 @@ impl SnaqLiteBackend {
                 .send_notification::<PublishResultNotification>(params)
                 .await;
         }
+    }
+
+    /// Drain pending widgetDataUpdate notifications and send them to the client.
+    async fn drain_widget_notifications(&self) {
+        let mut rx = self.widget_notification_rx.lock().await;
+        while let Ok(params) = rx.try_recv() {
+            self.client
+                .send_notification::<WidgetDataUpdateNotification>(params)
+                .await;
+        }
+    }
+
+    /// Invalidate all widget subscriptions for the given uri: send cancel and widgetDataUpdate(Cancelled).
+    async fn invalidate_widgets_for_uri(&self, uri: &Url) {
+        let to_cancel = {
+            let mut w = self.widgets.lock().await;
+            w.invalidate_uri(uri)
+        };
+        for (widget_id, cancel_tx) in to_cancel {
+            let _ = cancel_tx.send(());
+            self.client
+                .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                    widget_id,
+                    status: WidgetDataStatus::Cancelled,
+                    payload: Some(serde_json::json!({ "reason": "Document changed" })),
+                })
+                .await;
+        }
+    }
+
+    /// Send snaqlite/graph/nodeSignatureUpdated for the given URI so the frontend can render ports.
+    async fn send_node_signature_updated(&self, uri: &Url) {
+        let (_source, root_def, _unit_registry) = {
+            let state = self.state.lock().await;
+            let doc = match state.get_document(uri) {
+                Some(d) => d,
+                None => return,
+            };
+            (
+                doc.source.clone(),
+                doc.root_def.clone(),
+                state.unit_registry().clone(),
+            )
+        };
+        let inputs: Vec<NodeInputPort> = root_def
+            .as_ref()
+            .map(|root| {
+                snaq_lite_lang::extract_input_decls_from_block(root)
+                    .into_iter()
+                    .map(|(name, type_name)| NodeInputPort {
+                        name,
+                        r#type: type_name,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let output_type = self
+            .run_node_with_graph_inputs(uri)
+            .await
+            .ok()
+            .and_then(|(value, _)| snaq_lite_lang::value_type_name(&value));
+        let params = NodeSignatureUpdatedParams {
+            uri: uri.to_string(),
+            inputs,
+            output_type,
+        };
+        self.client
+            .send_notification::<NodeSignatureUpdatedNotification>(params)
+            .await;
     }
 
     /// Invalidate all subscriptions for the given uri: send cancel and publishResult(Cancelled).
@@ -193,14 +303,14 @@ impl SnaqLiteBackend {
         self.drain_notifications().await;
         let uri = params.text_document.uri;
         let state = self.state.lock().await;
-        let source = state.source().to_string();
-        let unit_registry = state.unit_registry().clone();
-        let doc_uri = state.uri().cloned();
-        let version = state.document_version();
-        drop(state);
-        if doc_uri.as_ref() != Some(&uri) {
+        if !state.has_document(&uri) {
+            drop(state);
             return Err(tower_lsp::jsonrpc::Error::invalid_params("document not open or URI mismatch"));
         }
+        let source = state.source(&uri);
+        let unit_registry = state.unit_registry().clone();
+        let version = state.document_version(&uri);
+        drop(state);
         let stream_inputs = std::collections::HashMap::new();
         let result = snaq_lite_lang::run_with_stream_inputs(&source, &unit_registry, stream_inputs);
         match result {
@@ -267,6 +377,304 @@ impl SnaqLiteBackend {
         }
         Ok(())
     }
+
+    /// Handle snaqlite/graph/connect: type-check and add edge.
+    pub async fn graph_connect(
+        &self,
+        params: ConnectParams,
+    ) -> tower_lsp::jsonrpc::Result<()> {
+        let source_uri = Url::parse(&params.source_uri)
+            .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid sourceUri"))?;
+        let target_uri = Url::parse(&params.target_uri)
+            .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid targetUri"))?;
+        let (source_source, target_input_type, unit_registry) = {
+            let state = self.state.lock().await;
+            let source_doc = state
+                .get_document(&source_uri)
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("source document not open"))?;
+            let target_doc = state
+                .get_document(&target_uri)
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("target document not open"))?;
+            let target_input_type = target_doc
+                .root_def
+                .as_ref()
+                .map(snaq_lite_lang::extract_input_decls_from_block)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|(name, _)| name == &params.target_input_name)
+                .map(|(_, t)| t);
+            let target_input_type = target_input_type
+                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params(format!("target has no input named '{}'", params.target_input_name)))?;
+            (
+                source_doc.source.clone(),
+                target_input_type,
+                state.unit_registry().clone(),
+            )
+        };
+        let source_output_type = snaq_lite_lang::run_with_stream_inputs(
+            &source_source,
+            &unit_registry,
+            std::collections::HashMap::new(),
+        )
+        .ok()
+        .and_then(|(value, _)| snaq_lite_lang::value_type_name(&value))
+        .unwrap_or_else(|| "Unknown".to_string());
+        if source_output_type != target_input_type {
+            return Err(tower_lsp::jsonrpc::Error {
+                code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32001),
+                message: format!(
+                    "Type mismatch: source output type '{}' does not match target input '{}' type '{}'",
+                    source_output_type, params.target_input_name, target_input_type
+                )
+                .into(),
+                data: None,
+            });
+        }
+        let mut graph = self.graph_state.lock().await;
+        graph.connect(source_uri, target_uri, params.target_input_name);
+        Ok(())
+    }
+
+    /// Handle snaqlite/graph/disconnect: remove edge and invalidate widgets for the target node.
+    pub async fn graph_disconnect(
+        &self,
+        params: DisconnectParams,
+    ) -> tower_lsp::jsonrpc::Result<()> {
+        let target_uri = Url::parse(&params.target_uri)
+            .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid targetUri"))?;
+        {
+            let mut graph = self.graph_state.lock().await;
+            graph.disconnect(&target_uri, &params.target_input_name);
+        }
+        self.invalidate_widgets_for_uri(&target_uri).await;
+        self.drain_widget_notifications().await;
+        Ok(())
+    }
+
+    /// Handle snaqlite/graph/subscribeWidget: run source node (with graph inputs when wired), stream or one-shot to widget.
+    pub async fn subscribe_widget(
+        &self,
+        params: SubscribeWidgetParams,
+    ) -> tower_lsp::jsonrpc::Result<()> {
+        self.drain_notifications().await;
+        self.drain_widget_notifications().await;
+        let source_uri = Url::parse(&params.source_uri)
+            .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid sourceUri"))?;
+        {
+            let state = self.state.lock().await;
+            if !state.has_document(&source_uri) {
+                return Err(tower_lsp::jsonrpc::Error::invalid_params("source document not open"));
+            }
+        }
+        let result = self.run_node_with_graph_inputs(&source_uri).await;
+        match result {
+            Err(e) => {
+                self.client
+                    .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                        widget_id: params.widget_id.clone(),
+                        status: WidgetDataStatus::Error,
+                        payload: Some(serde_json::json!({ "message": e.to_string() })),
+                    })
+                    .await;
+                Ok(())
+            }
+            Ok((value, db)) => {
+                let widget_id = params.widget_id.clone();
+                match &value {
+                    snaq_lite_lang::Value::Vector(v) => {
+                        let inner = v.inner.clone();
+                        let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
+                        self.widgets.lock().await.insert(
+                            params.widget_id,
+                            source_uri,
+                            cancel_tx,
+                        );
+                        let widget_tx = self.widget_notification_tx.clone();
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            std::thread::spawn(move || {
+                                run_stream_consumer_for_widget(db, inner, widget_id, widget_tx, cancel_rx);
+                            });
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            let display = snaq_lite_lang::format_value_for_display(&db, &value)
+                                .unwrap_or_else(|_| "<vector>".to_string());
+                            let _ = (inner, cancel_rx);
+                            self.client
+                                .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                                    widget_id: params.widget_id,
+                                    status: WidgetDataStatus::Completed,
+                                    payload: Some(serde_json::json!({ "display": display })),
+                                })
+                                .await;
+                        }
+                    }
+                    _ => {
+                        let display = snaq_lite_lang::format_value_for_display(&db, &value)
+                            .unwrap_or_else(|_| "<error>".to_string());
+                        self.client
+                            .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                                widget_id: params.widget_id,
+                                status: WidgetDataStatus::Completed,
+                                payload: Some(serde_json::json!({ "display": display })),
+                            })
+                            .await;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Handle snaqlite/graph/unsubscribeWidget: cancel and send Cancelled.
+    pub async fn unsubscribe_widget(
+        &self,
+        params: UnsubscribeWidgetParams,
+    ) -> tower_lsp::jsonrpc::Result<()> {
+        self.drain_widget_notifications().await;
+        let mut w = self.widgets.lock().await;
+        if let Some(cancel_tx) = w.remove(&params.widget_id) {
+            let _ = cancel_tx.send(());
+            drop(w);
+            self.client
+                .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                    widget_id: params.widget_id,
+                    status: WidgetDataStatus::Cancelled,
+                    payload: Some(serde_json::json!({ "reason": "Unsubscribed" })),
+                })
+                .await;
+        }
+        Ok(())
+    }
+
+    /// Run the graph up to sink_uri (topological order), filling stream inputs from upstream outputs.
+    /// Returns (Value, Database) for the sink node. On cycle or missing docs returns Err.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn run_node_with_graph_inputs(
+        &self,
+        sink_uri: &Url,
+    ) -> Result<
+        (snaq_lite_lang::Value, salsa::DatabaseImpl),
+        snaq_lite_lang::RunError,
+    > {
+        let (order, sources, unit_registry, incoming_map) = {
+            let state = self.state.lock().await;
+            let graph = self.graph_state.lock().await;
+            let docs = state.document_uris();
+            let order = match graph.topological_order(sink_uri, &docs) {
+                Some(o) => o,
+                None => {
+                    return Err(snaq_lite_lang::RunError::new(
+                        snaq_lite_lang::RunErrorKind::InvalidArgument(
+                            "graph cycle or node not in documents".to_string(),
+                        ),
+                    ));
+                }
+            };
+            let sources: Vec<(Url, String)> =
+                order.iter().map(|u| (u.clone(), state.source(u))).collect();
+            let incoming_map: std::collections::HashMap<Url, Vec<(String, Url)>> = order
+                .iter()
+                .map(|u| (u.clone(), graph.incoming(u)))
+                .collect();
+            (
+                order,
+                sources,
+                state.unit_registry().clone(),
+                incoming_map,
+            )
+        };
+        let mut output_handles: std::collections::HashMap<Url, snaq_lite_lang::StreamHandleId> =
+            std::collections::HashMap::new();
+        let mut last_value = None;
+        let mut last_db = None;
+        for (uri, source_entry) in order.iter().zip(sources.iter()) {
+            let source = &source_entry.1;
+            let stream_inputs: std::collections::HashMap<String, snaq_lite_lang::StreamHandleId> =
+                incoming_map
+                    .get(uri)
+                    .map(|incoming| {
+                        incoming
+                            .iter()
+                            .filter_map(|(name, source_uri)| {
+                                output_handles.get(source_uri).map(|&id| (name.clone(), id))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            let (value, db) =
+                snaq_lite_lang::run_with_stream_inputs(source, &unit_registry, stream_inputs)?;
+            if uri == sink_uri {
+                last_value = Some(value.clone());
+                last_db = Some(db.clone());
+            }
+            if let snaq_lite_lang::Value::Vector(v) = &value {
+                if uri != sink_uri {
+                    let (handle_id, sender) = snaq_lite_lang::create_stream_input();
+                    output_handles.insert(uri.clone(), handle_id);
+                    feed_vector_to_chunk_sender(db, v.inner.clone(), sender);
+                }
+            }
+        }
+        Ok((
+            last_value.expect("sink in order"),
+            last_db.expect("sink in order"),
+        ))
+    }
+
+    /// Run node with graph inputs (WASM: fallback to empty inputs only).
+    #[cfg(target_arch = "wasm32")]
+    async fn run_node_with_graph_inputs(
+        &self,
+        sink_uri: &Url,
+    ) -> Result<
+        (snaq_lite_lang::Value, salsa::DatabaseImpl),
+        snaq_lite_lang::RunError,
+    > {
+        let (source, unit_registry) = {
+            let state = self.state.lock().await;
+            (
+                state.source(sink_uri),
+                state.unit_registry().clone(),
+            )
+        };
+        snaq_lite_lang::run_with_stream_inputs(
+            &source,
+            &unit_registry,
+            std::collections::HashMap::new(),
+        )
+    }
+}
+
+/// Native: feed a vector stream into a Chunk sender (for graph run: upstream node output → downstream input).
+#[cfg(not(target_arch = "wasm32"))]
+fn feed_vector_to_chunk_sender(
+    db: salsa::DatabaseImpl,
+    inner: snaq_lite_lang::LazyVector,
+    sender: futures::channel::mpsc::UnboundedSender<snaq_lite_lang::Chunk>,
+) {
+    use futures::stream::StreamExt;
+    use futures::task::LocalSpawnExt;
+    const BATCH: usize = 64;
+    let run = async move {
+        let mut stream = snaq_lite_lang::vector_into_stream(&db, inner);
+        let mut batch = Vec::with_capacity(BATCH);
+        while let Some(item) = stream.next().await {
+            batch.push(item);
+            if batch.len() >= BATCH {
+                let _ = sender.unbounded_send(std::mem::take(&mut batch));
+                batch = Vec::with_capacity(BATCH);
+            }
+        }
+        if !batch.is_empty() {
+            let _ = sender.unbounded_send(batch);
+        }
+        drop(sender);
+    };
+    let mut pool = futures::executor::LocalPool::new();
+    pool.spawner().spawn_local(run).ok();
+    pool.run();
 }
 
 /// Native: run the stream in a blocking thread and send batches via notification_tx.
@@ -358,20 +766,104 @@ fn run_stream_consumer(
     pool.run();
 }
 
-/// Build the LSP service (same for native and WASM). Uses custom methods for snaqlite/subscribe and snaqlite/unsubscribe.
+/// Native: run the stream for a widget and send WidgetDataUpdate notifications.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_stream_consumer_for_widget(
+    db: salsa::DatabaseImpl,
+    inner: snaq_lite_lang::LazyVector,
+    widget_id: String,
+    widget_tx: WidgetNotificationSender,
+    cancel_rx: futures::channel::oneshot::Receiver<()>,
+) {
+    use futures::future::{select, Either};
+    use futures::stream::StreamExt;
+    use futures::task::LocalSpawnExt;
+    const BATCH_SIZE: usize = 100;
+    let run = async move {
+        let mut stream = snaq_lite_lang::vector_into_stream(&db, inner);
+        let mut batch: Vec<serde_json::Value> = Vec::with_capacity(BATCH_SIZE);
+        let mut offset: u64 = 0;
+        let mut total: u64 = 0;
+        let mut stream_next = stream.next();
+        let mut cancel_rx = cancel_rx;
+        loop {
+            match select(stream_next, cancel_rx).await {
+                Either::Left((opt, cr)) => {
+                    cancel_rx = cr;
+                    match opt {
+                        Some(item) => {
+                            let json = crate::pubsub::stream_element_to_json(&db, &item);
+                            batch.push(json);
+                            total += 1;
+                            if batch.len() >= BATCH_SIZE {
+                                let _ = widget_tx.unbounded_send(WidgetDataUpdateParams {
+                                    widget_id: widget_id.clone(),
+                                    status: WidgetDataStatus::Running,
+                                    payload: Some(serde_json::json!({
+                                        "elements": batch.clone(),
+                                        "offset": offset,
+                                        "count": batch.len()
+                                    })),
+                                });
+                                offset += batch.len() as u64;
+                                batch.clear();
+                            }
+                            stream_next = stream.next();
+                        }
+                        None => break,
+                    }
+                }
+                Either::Right(_) => return,
+            }
+        }
+        if !batch.is_empty() {
+            let _ = widget_tx.unbounded_send(WidgetDataUpdateParams {
+                widget_id: widget_id.clone(),
+                status: WidgetDataStatus::Running,
+                payload: Some(serde_json::json!({
+                    "elements": batch,
+                    "offset": offset,
+                    "count": batch.len()
+                })),
+            });
+        }
+        let _ = widget_tx.unbounded_send(WidgetDataUpdateParams {
+            widget_id,
+            status: WidgetDataStatus::Completed,
+            payload: Some(serde_json::json!({ "totalElements": total })),
+        });
+    };
+    let mut pool = futures::executor::LocalPool::new();
+    let spawner = pool.spawner();
+    spawner.spawn_local(run).ok();
+    pool.run();
+}
+
+/// Build the LSP service (same for native and WASM). Uses custom methods for snaqlite/subscribe, unsubscribe, snaqlite/graph/connect, subscribeWidget, unsubscribeWidget.
 pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSocket) {
     let state: SharedState = Arc::new(Mutex::new(LspState::new()));
     let subscriptions: SharedSubscriptions = Arc::new(Mutex::new(SubscriptionRegistry::new()));
+    let graph_state: SharedGraphState = Arc::new(Mutex::new(graph::GraphState::new()));
+    let widgets: SharedWidgetRegistry = Arc::new(Mutex::new(WidgetRegistry::new()));
     let (notification_tx, notification_rx) = futures::channel::mpsc::unbounded();
+    let (widget_notification_tx, widget_notification_rx) = futures::channel::mpsc::unbounded();
     let (service, socket) = LspService::build(move |client| SnaqLiteBackend {
         client,
         state: Arc::clone(&state),
         subscriptions: Arc::clone(&subscriptions),
+        graph_state: Arc::clone(&graph_state),
+        widgets: Arc::clone(&widgets),
         notification_tx,
         notification_rx: Arc::new(Mutex::new(notification_rx)),
+        widget_notification_tx,
+        widget_notification_rx: Arc::new(Mutex::new(widget_notification_rx)),
     })
     .custom_method("snaqlite/subscribe", SnaqLiteBackend::subscribe)
     .custom_method("snaqlite/unsubscribe", SnaqLiteBackend::unsubscribe)
+    .custom_method("snaqlite/graph/connect", SnaqLiteBackend::graph_connect)
+    .custom_method("snaqlite/graph/disconnect", SnaqLiteBackend::graph_disconnect)
+    .custom_method("snaqlite/graph/subscribeWidget", SnaqLiteBackend::subscribe_widget)
+    .custom_method("snaqlite/graph/unsubscribeWidget", SnaqLiteBackend::unsubscribe_widget)
     .finish();
     (service, socket)
 }
@@ -496,8 +988,8 @@ mod tests {
         let mut state = state::LspState::new();
         let uri = Url::parse("file:///doc.snaq").unwrap();
         state.update_document(uri.clone(), 1, "");
-        assert!(state.diagnostics().is_empty());
-        assert_eq!(state.document_version(), Some(1));
+        assert!(state.diagnostics(&uri).is_empty());
+        assert_eq!(state.document_version(&uri), Some(1));
     }
 
     #[test]
@@ -505,7 +997,7 @@ mod tests {
         let mut state = state::LspState::new();
         let uri = Url::parse("file:///doc.snaq").unwrap();
         state.update_document(uri.clone(), 1, "syntax error @@");
-        let diags = state.diagnostics();
+        let diags = state.diagnostics(&uri);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR));
         assert!(!diags[0].message.is_empty());
@@ -516,7 +1008,7 @@ mod tests {
         let mut state = state::LspState::new();
         let uri = Url::parse("file:///doc.snaq").unwrap();
         state.update_document(uri.clone(), 1, "1 + 2");
-        assert!(state.diagnostics().is_empty());
+        assert!(state.diagnostics(&uri).is_empty());
     }
 
     #[test]
@@ -559,6 +1051,19 @@ mod tests {
         state.update_document(uri, 1, "1 + 2");
         let other = Url::parse("file:///other.snaq").unwrap();
         assert!(state.inlay_hints(&other).is_empty());
+    }
+
+    #[test]
+    fn state_document_uris_returns_open_uris() {
+        let mut state = state::LspState::new();
+        let u1 = Url::parse("file:///a.snaq").unwrap();
+        let u2 = Url::parse("snaq://graph/b.sl").unwrap();
+        state.update_document(u1.clone(), 1, "1");
+        state.update_document(u2.clone(), 1, "2");
+        let uris = state.document_uris();
+        assert_eq!(uris.len(), 2);
+        assert!(uris.contains(&u1));
+        assert!(uris.contains(&u2));
     }
 
     // ---- subscription registry ----
@@ -652,6 +1157,124 @@ mod tests {
         assert!(reg.remove("sub-2").is_none());
     }
 
+    // ---- graph state ----
+
+    #[test]
+    fn graph_connect_and_incoming() {
+        let mut graph = graph::GraphState::new();
+        let a = Url::parse("snaq://graph/a.sl").unwrap();
+        let b = Url::parse("snaq://graph/b.sl").unwrap();
+        graph.connect(a.clone(), b.clone(), "x".to_string());
+        let incoming = graph.incoming(&b);
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].0, "x");
+        assert_eq!(incoming[0].1, a);
+    }
+
+    #[test]
+    fn graph_connect_replaces_same_target_input() {
+        let mut graph = graph::GraphState::new();
+        let a = Url::parse("snaq://graph/a.sl").unwrap();
+        let b = Url::parse("snaq://graph/b.sl").unwrap();
+        let c = Url::parse("snaq://graph/c.sl").unwrap();
+        graph.connect(a.clone(), b.clone(), "x".to_string());
+        graph.connect(c.clone(), b.clone(), "x".to_string());
+        let incoming = graph.incoming(&b);
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].1, c);
+    }
+
+    #[test]
+    fn graph_disconnect_removes_edge() {
+        let mut graph = graph::GraphState::new();
+        let a = Url::parse("snaq://graph/a.sl").unwrap();
+        let b = Url::parse("snaq://graph/b.sl").unwrap();
+        graph.connect(a, b.clone(), "x".to_string());
+        graph.disconnect(&b, "x");
+        assert!(graph.incoming(&b).is_empty());
+    }
+
+    #[test]
+    fn graph_topological_order_linear() {
+        let mut graph = graph::GraphState::new();
+        let a = Url::parse("snaq://graph/a.sl").unwrap();
+        let b = Url::parse("snaq://graph/b.sl").unwrap();
+        let c = Url::parse("snaq://graph/c.sl").unwrap();
+        graph.connect(a.clone(), b.clone(), "x".to_string());
+        graph.connect(b.clone(), c.clone(), "y".to_string());
+        let docs: std::collections::HashSet<_> = [a.clone(), b.clone(), c.clone()].into_iter().collect();
+        let order = graph.topological_order(&c, &docs).expect("no cycle");
+        assert_eq!(order.len(), 3);
+        assert_eq!(order[0], a);
+        assert_eq!(order[1], b);
+        assert_eq!(order[2], c);
+    }
+
+    #[test]
+    fn graph_topological_order_single_node() {
+        let graph = graph::GraphState::new();
+        let a = Url::parse("snaq://graph/a.sl").unwrap();
+        let docs: std::collections::HashSet<_> = [a.clone()].into_iter().collect();
+        let order = graph.topological_order(&a, &docs).expect("no cycle");
+        assert_eq!(order, vec![a]);
+    }
+
+    #[test]
+    fn graph_topological_order_cycle_returns_none() {
+        let mut graph = graph::GraphState::new();
+        let a = Url::parse("snaq://graph/a.sl").unwrap();
+        let b = Url::parse("snaq://graph/b.sl").unwrap();
+        graph.connect(a.clone(), b.clone(), "x".to_string());
+        graph.connect(b.clone(), a.clone(), "y".to_string());
+        let docs: std::collections::HashSet<_> = [a.clone(), b.clone()].into_iter().collect();
+        let order = graph.topological_order(&a, &docs);
+        assert!(order.is_none(), "cycle a->b->a should yield None");
+    }
+
+    // ---- widget registry ----
+
+    #[test]
+    fn widget_registry_insert_remove() {
+        let mut reg = widget_registry::WidgetRegistry::new();
+        let uri = Url::parse("file:///doc.snaq").unwrap();
+        let (tx, _rx) = futures::channel::oneshot::channel();
+        reg.insert("w1".to_string(), uri, tx);
+        let removed = reg.remove("w1");
+        assert!(removed.is_some());
+        assert!(reg.remove("w1").is_none());
+    }
+
+    #[test]
+    fn widget_registry_invalidate_uri() {
+        let mut reg = widget_registry::WidgetRegistry::new();
+        let u1 = Url::parse("file:///a.snaq").unwrap();
+        let u2 = Url::parse("file:///b.snaq").unwrap();
+        let (tx1, _rx1) = futures::channel::oneshot::channel();
+        let (tx2, _rx2) = futures::channel::oneshot::channel();
+        reg.insert("w1".to_string(), u1.clone(), tx1);
+        reg.insert("w2".to_string(), u2, tx2);
+        let cancelled = reg.invalidate_uri(&u1);
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(cancelled[0].0, "w1");
+        assert!(reg.remove("w2").is_some());
+    }
+
+    #[test]
+    fn widget_registry_invalidate_all() {
+        let mut reg = widget_registry::WidgetRegistry::new();
+        let u1 = Url::parse("file:///a.snaq").unwrap();
+        let u2 = Url::parse("file:///b.snaq").unwrap();
+        let (tx1, _rx1) = futures::channel::oneshot::channel();
+        let (tx2, _rx2) = futures::channel::oneshot::channel();
+        reg.insert("w1".to_string(), u1, tx1);
+        reg.insert("w2".to_string(), u2, tx2);
+        let cancelled = reg.invalidate_all();
+        assert_eq!(cancelled.len(), 2);
+        let ids: std::collections::HashSet<_> = cancelled.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains("w1"));
+        assert!(ids.contains("w2"));
+    }
+
     // ---- pubsub wire format (camelCase) ----
 
     #[test]
@@ -677,6 +1300,38 @@ mod tests {
         let json = r#"{"subscriptionId":"sub-1"}"#;
         let params: pubsub::UnsubscribeParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.subscription_id, "sub-1");
+    }
+
+    #[test]
+    fn disconnect_params_deserializes_camel_case() {
+        let json = r#"{"targetUri":"file:///t.snaq","targetInputName":"x"}"#;
+        let params: pubsub::DisconnectParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.target_uri, "file:///t.snaq");
+        assert_eq!(params.target_input_name, "x");
+    }
+
+    #[test]
+    fn subscribe_widget_params_deserializes_camel_case() {
+        let json = r#"{"widgetId":"w1","sourceUri":"file:///n.snaq"}"#;
+        let params: pubsub::SubscribeWidgetParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.widget_id, "w1");
+        assert_eq!(params.source_uri, "file:///n.snaq");
+    }
+
+    #[test]
+    fn widget_data_status_serializes_pascal_case() {
+        use pubsub::{WidgetDataStatus, WidgetDataUpdateParams};
+        let params = WidgetDataUpdateParams {
+            widget_id: "w1".to_string(),
+            status: WidgetDataStatus::Cancelled,
+            payload: None,
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        assert!(
+            json.contains("\"status\":\"Cancelled\""),
+            "status should be PascalCase: {}",
+            json
+        );
     }
 
     #[test]

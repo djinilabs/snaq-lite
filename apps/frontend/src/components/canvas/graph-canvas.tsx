@@ -1,6 +1,7 @@
 /**
- * React Flow wrapper: reads nodes/edges from graph store, custom node types (computation, presentation),
- * handles edge creation (optimistic + snaqlite/graph/connect; on error clear pending + toast).
+ * React Flow wrapper: reads nodes/edges from graph store, custom node types (computation, presentation).
+ * Handles edge creation (optimistic + snaqlite/graph/connect; on error clear pending + toast)
+ * and edge deletion (onEdgesDelete → disconnectEdge + LSP disconnect).
  */
 
 import { useCallback, useMemo } from 'react'
@@ -13,16 +14,17 @@ import {
   type Edge,
   type NodeChange,
 } from '@xyflow/react'
+import { connectEdge, disconnectEdge } from './edge-handlers'
+import { getDisconnectParamsForDeletedEdges } from './edge-delete-params'
 import '@xyflow/react/dist/style.css'
 import { useGraphStore } from '~/store'
 import { ComputationBoxNode } from './computation-box-node'
 import { PresentationBlockNode } from './presentation-block-node'
-import { connectEdge } from './edge-handlers'
 
 const nodeTypes = {
   computation: ComputationBoxNode,
   presentation: PresentationBlockNode,
-}
+} as const
 
 function graphNodeToFlowNode(n: import('~/store').GraphNode): Node {
   return {
@@ -87,6 +89,14 @@ export function GraphCanvas() {
     [moveNode],
   )
 
+  const onEdgesDelete = useCallback((deleted: Edge[]) => {
+    const nodes = useGraphStore.getState().nodes
+    const params = getDisconnectParamsForDeletedEdges(deleted, nodes)
+    for (const { targetUri, targetInputName } of params) {
+      void disconnectEdge(targetUri, targetInputName)
+    }
+  }, [])
+
   return (
     <div style={{ width: '100%', height: '100%' }}>
       <ReactFlow
@@ -94,6 +104,7 @@ export function GraphCanvas() {
         edges={edges}
         onNodesChange={onNodesChange}
         onConnect={onConnect}
+        onEdgesDelete={onEdgesDelete}
         nodeTypes={nodeTypes}
         fitView
       >

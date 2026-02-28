@@ -77,7 +77,7 @@ Multiple widgets on the same node each get their own run (one consumer per widge
 ### Reactive invalidation
 
 - **Document change** — On `didChange` / `didOpen` for a URI, the server invalidates all subscriptions (pub-sub and widget) that reference that URI: it cancels background tasks and sends `Cancelled` (e.g. `snaqlite/publishResult` or `snaqlite/graph/widgetDataUpdate` with reason such as `"Document changed"`).
-- **Edge removal** — When `snaqlite/graph/disconnect` is called, the server removes the edge and invalidates all widget subscriptions for the target URI (cancel and send `widgetDataUpdate` Cancelled).
+- **Edge removal** — When `snaqlite/graph/disconnect` is called, the server removes the edge and invalidates all widget subscriptions for the target URI (cancel and send `widgetDataUpdate` Cancelled). The UI triggers disconnect when the user deletes an edge (e.g. select edge and Backspace).
 - Connect failure (type mismatch) does not add an edge, so no invalidation is needed.
 
 ## Native (stdio)

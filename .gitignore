@@ -1,3 +1,56 @@
+# Commit pnpm-lock.yaml (root and apps/frontend). Ignore only npm lockfiles and backup.
+# Rust
 /target/
 **/*.rs.bk
+
+# WASM (wasm-pack)
 pkg/
+
+# Build / output
+dist/
+*.so
+*.dylib
+*.dll
+
+# Node / pnpm (project uses pnpm)
+node_modules/
+.pnpm-store/
+pnpm-debug.log*
+pnpm-lock.yaml.bak
+# npm-only (do not commit)
+package-lock.json
+npm-debug.log*
+.npm
+.yarn-integrity
+
+# Env files (may contain secrets; keep .env.example)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# IDE / editor
+.idea/
+*.iml
+.project
+.classpath
+.settings/
+
+# Test / coverage
+coverage/
+.nyc_output/
+*.lcov
+tarpaulin-report.html
+cargo-tarpaulin.stderr
+
+# Logs and temp
+*.log
+*.tmp
+*.temp
+.cache/

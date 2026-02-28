@@ -1,0 +1,22 @@
+{
+  "name": "snaq-lite",
+  "private": true,
+  "packageManager": "pnpm@10.13.1",
+  "scripts": {
+    "install:frontend": "pnpm -C apps/frontend install",
+    "test": "pnpm run test:backend && pnpm run test:frontend",
+    "test:backend": "cargo test --workspace && wasm-pack test --node crates/snaq-lite-wasm",
+    "test:frontend": "pnpm -C apps/frontend run test",
+    "test:frontend:watch": "pnpm -C apps/frontend run test:watch",
+    "build": "pnpm run build:backend && pnpm run build:frontend",
+    "build:backend": "cargo build --workspace",
+    "build:frontend": "pnpm -C apps/frontend run build",
+    "lint": "pnpm run lint:backend && pnpm run lint:frontend",
+    "lint:backend": "cargo clippy --workspace",
+    "lint:frontend": "pnpm -C apps/frontend run lint",
+    "dev": "pnpm run dev:frontend",
+    "dev:frontend": "pnpm -C apps/frontend run dev",
+    "preview": "pnpm run preview:frontend",
+    "preview:frontend": "pnpm -C apps/frontend run preview"
+  }
+}

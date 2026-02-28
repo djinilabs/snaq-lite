@@ -55,15 +55,16 @@ Use `run_with_registry(input, &UnitRegistry)` (and optional symbol registry) for
 - **snaq-lite-lang** — Core library (parser, AST, eval). Platform-agnostic.
 - **snaq-lite-cli** — Native CLI binary.
 - **snaq-lite-wasm** — WASM build for the web.
+- **apps/frontend** — TanStack Start SPA; LSP in a Web Worker (WASM). Uses pnpm.
 
 ---
 
 ## Run tests
 
-- **All tests (native):** `cargo test --workspace`
-- **Core library only:** `cargo test -p snaq-lite-lang`
-- **With output:** `cargo test --workspace -- --nocapture`
-- **WASM (Node):** `wasm-pack test --node crates/snaq-lite-wasm` (requires [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) and Node)
+- **All (from root):** `pnpm run install:frontend` once, then `pnpm test` (backend then frontend).
+- **Backend only:** `cargo test --workspace`; **Clippy:** `cargo clippy --workspace -- -D warnings`; **WASM (Node):** `wasm-pack test --node crates/snaq-lite-wasm` (requires [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) and Node).
+- **Frontend only:** `pnpm run install:frontend` then `pnpm run test:frontend` (from root) or `pnpm test` in `apps/frontend`.
+- **Lint:** `pnpm run lint` (backend clippy + frontend ESLint; from root).
 
 ---
 
@@ -72,3 +73,4 @@ Use `run_with_registry(input, &UnitRegistry)` (and optional symbol registry) for
 - **Native CLI:** `cargo run -p snaq-lite-cli`
 - **WASM:** `rustup target add wasm32-unknown-unknown`, install [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/), then  
   `wasm-pack build crates/snaq-lite-wasm --target web` (output in `crates/snaq-lite-wasm/pkg/`)
+- **Frontend:** From root, `pnpm run install:frontend` then `pnpm run dev` (dev server) or `pnpm run build:frontend` then `pnpm run preview`.

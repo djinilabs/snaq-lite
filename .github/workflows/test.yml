@@ -26,15 +26,24 @@ jobs:
         with:
           version: latest
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "lts/*"
+          cache: "pnpm"
+
+      - name: Install frontend dependencies
+        run: pnpm run install:frontend
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Run tests
+      - name: Run backend tests
         run: cargo test --workspace
 
       - name: Run clippy
@@ -42,3 +51,9 @@ jobs:
 
       - name: Run WASM tests
         run: wasm-pack test --node crates/snaq-lite-wasm
+
+      - name: Lint frontend
+        run: pnpm run lint:frontend
+
+      - name: Test frontend
+        run: pnpm run test:frontend

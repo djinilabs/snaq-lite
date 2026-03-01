@@ -87,3 +87,33 @@ export function buildSnapshotFromGraph(
     edges: edges.map((e) => ({ sourceId: e.sourceId, targetId: e.targetId, targetInputName: e.targetInputName })),
   }
 }
+
+/**
+ * Build graph state for undo stack: deep-cloned nodes with initialContent from Monaco model for computation nodes, and copy of edges.
+ */
+export function getGraphStateForUndo(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+): { nodes: GraphNode[]; edges: GraphEdge[] } {
+  const nodesWithContent = nodes.map((n) => {
+    const content =
+      n.type === 'computation'
+        ? getModel(nodeIdToUri(n.id), undefined as never)?.getValue() ?? n.initialContent ?? ''
+        : n.initialContent ?? ''
+    return { ...n, initialContent: content }
+  })
+  const clonedNodes = JSON.parse(JSON.stringify(nodesWithContent)) as GraphNode[]
+  const clonedEdges = JSON.parse(JSON.stringify(edges)) as GraphEdge[]
+  return { nodes: clonedNodes, edges: clonedEdges }
+}
+
+/**
+ * Sync Monaco models to match the given nodes' initialContent (e.g. after undo/redo).
+ */
+export function syncModelsToGraphNodes(nodes: GraphNode[]): void {
+  for (const n of nodes) {
+    if (n.type !== 'computation') continue
+    const model = getModel(nodeIdToUri(n.id), undefined as never)
+    if (model) model.setValue(n.initialContent ?? '')
+  }
+}

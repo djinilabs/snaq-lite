@@ -6,6 +6,7 @@
  */
 
 import { useEffect, useRef } from 'react'
+import { useAutoSave } from '~/contexts/auto-save-context'
 import { nodeIdToUri } from '~/editor/virtual-uri'
 import { getOrCreateModel } from '~/editor/text-model-registry'
 import { hasLanguageClient, getLanguageClient } from '~/lsp/language-client-singleton'
@@ -32,6 +33,9 @@ export function ComputationBoxEditor({
   const containerRef = useRef<HTMLDivElement>(null)
   const editorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null)
   const effectRunIdRef = useRef(0)
+  const autoSave = useAutoSave()
+  const requestSaveRef = useRef(autoSave?.requestSave ?? (() => {}))
+  requestSaveRef.current = autoSave?.requestSave ?? (() => {})
 
   const uri = nodeIdToUri(nodeId)
 
@@ -76,6 +80,7 @@ export function ComputationBoxEditor({
             contentChanges: [{ text: model.getValue() }],
           })
         }
+        requestSaveRef.current()
       })
     })
     return () => {

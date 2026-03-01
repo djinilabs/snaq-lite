@@ -6,6 +6,8 @@ import {
   setProjectSnapshot,
   deleteProjectSnapshot,
   buildSnapshotFromGraph,
+  getGraphStateForUndo,
+  syncModelsToGraphNodes,
   PROJECTS_INDEX_KEY,
   PROJECT_KEY_PREFIX,
 } from './project-storage'
@@ -163,6 +165,90 @@ describe('project-storage', () => {
       ]
       const snapshot = buildSnapshotFromGraph('p', nodes, [])
       expect(snapshot.nodes[0].inputs).toEqual([{ name: 'x', type: 'Vector' }])
+    })
+  })
+
+  describe('getGraphStateForUndo', () => {
+    it('returns deep-cloned nodes and edges with initialContent', () => {
+      const nodes = [
+        {
+          id: 'n1',
+          position: { x: 0, y: 0 },
+          type: 'computation' as const,
+          uri: 'snaq://graph/n1.sl',
+          initialContent: '2 * 2',
+        },
+      ]
+      const edges = [{ sourceId: 'n1', targetId: 'n2', targetInputName: 'x' }]
+      const result = getGraphStateForUndo(nodes, edges)
+      expect(result.nodes).toHaveLength(1)
+      expect(result.nodes[0].initialContent).toBe('2 * 2')
+      expect(result.edges).toEqual(edges)
+      expect(result.nodes).not.toBe(nodes)
+      expect(result.edges).not.toBe(edges)
+    })
+
+    it('returns independent copies so mutating result does not affect input', () => {
+      const nodes = [
+        {
+          id: 'n1',
+          position: { x: 0, y: 0 },
+          type: 'presentation' as const,
+          uri: 'snaq://graph/n1.sl',
+        },
+      ]
+      const edges = [{ sourceId: 'a', targetId: 'b', targetInputName: 'in' }]
+      const result = getGraphStateForUndo(nodes, edges)
+      result.nodes[0].position = { x: 999, y: 999 }
+      result.edges[0].targetInputName = 'other'
+      expect(nodes[0].position).toEqual({ x: 0, y: 0 })
+      expect(edges[0].targetInputName).toBe('in')
+    })
+
+    it('handles multiple nodes and edges', () => {
+      const nodes = [
+        { id: 'a', position: { x: 0, y: 0 }, type: 'computation' as const, uri: 'snaq://graph/a.sl', initialContent: '1' },
+        { id: 'b', position: { x: 10, y: 10 }, type: 'presentation' as const, uri: 'snaq://graph/b.sl' },
+      ]
+      const edges = [
+        { sourceId: 'a', targetId: 'b', targetInputName: 'x' },
+        { sourceId: 'a', targetId: 'b', targetInputName: 'y' },
+      ]
+      const result = getGraphStateForUndo(nodes, edges)
+      expect(result.nodes).toHaveLength(2)
+      expect(result.edges).toHaveLength(2)
+      expect(result.nodes[0].initialContent).toBe('1')
+    })
+  })
+
+  describe('syncModelsToGraphNodes', () => {
+    it('does not throw when given empty nodes', () => {
+      expect(() => syncModelsToGraphNodes([])).not.toThrow()
+    })
+
+    it('does not throw when given computation nodes without models', () => {
+      const nodes = [
+        {
+          id: 'n1',
+          position: { x: 0, y: 0 },
+          type: 'computation' as const,
+          uri: 'snaq://graph/n1.sl',
+          initialContent: 'x',
+        },
+      ]
+      expect(() => syncModelsToGraphNodes(nodes)).not.toThrow()
+    })
+
+    it('does not throw when given presentation nodes', () => {
+      const nodes = [
+        {
+          id: 'p1',
+          position: { x: 0, y: 0 },
+          type: 'presentation' as const,
+          uri: 'snaq://graph/p1.sl',
+        },
+      ]
+      expect(() => syncModelsToGraphNodes(nodes)).not.toThrow()
     })
   })
 })

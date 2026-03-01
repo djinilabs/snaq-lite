@@ -83,11 +83,14 @@ test.describe('canvas', () => {
     await expect(page.getByTestId('add-computation-btn')).toHaveText('Add computation box')
   })
 
-  test('toolbar shows Save, Export, Add presentation, Delete selected, Rename, Delete project', async ({
+  test('toolbar shows Undo, Redo, Export, Add presentation, Delete selected, Rename, Delete project', async ({
     page,
   }) => {
     await gotoCanvas(page)
-    await expect(page.getByTestId('save-btn')).toBeVisible()
+    await expect(page.getByTestId('undo-btn')).toBeVisible()
+    await expect(page.getByTestId('redo-btn')).toBeVisible()
+    await expect(page.getByTestId('undo-btn')).toBeDisabled()
+    await expect(page.getByTestId('redo-btn')).toBeDisabled()
     await expect(page.getByTestId('export-btn')).toBeVisible()
     await expect(page.getByTestId('add-presentation-btn')).toHaveText('Add presentation block')
     await expect(page.getByTestId('delete-selected-btn')).toBeVisible()
@@ -116,11 +119,43 @@ test.describe('canvas', () => {
     await expect(page.getByTestId('presentation-node')).toHaveCount(1)
   })
 
-  test('Save button is clickable without error', async ({ page }) => {
+  test('Undo and Redo buttons are visible and Undo removes added node', async ({ page }) => {
+    await gotoCanvas(page)
+    await expect(page.getByTestId('computation-node')).toHaveCount(0)
+    await page.getByTestId('add-computation-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
+    await page.getByTestId('undo-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(0)
+  })
+
+  test('Redo restores node after Undo', async ({ page }) => {
     await gotoCanvas(page)
     await page.getByTestId('add-computation-btn').click()
-    await page.getByTestId('save-btn').click()
-    await expect(page.getByTestId('canvas-toolbar')).toBeVisible()
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
+    await page.getByTestId('undo-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(0)
+    await page.getByTestId('redo-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
+  })
+
+  test('Ctrl+Z (undo) removes added node', async ({ page }) => {
+    await gotoCanvas(page)
+    await page.getByTestId('add-computation-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
+    await page.getByTestId('canvas-page').click({ position: { x: 10, y: 10 } })
+    await page.keyboard.press('Control+z')
+    await expect(page.getByTestId('computation-node')).toHaveCount(0)
+  })
+
+  test('Shift+Ctrl+Z (redo) restores node after undo', async ({ page }) => {
+    await gotoCanvas(page)
+    await page.getByTestId('add-computation-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
+    await page.getByTestId('canvas-page').click({ position: { x: 10, y: 10 } })
+    await page.keyboard.press('Control+z')
+    await expect(page.getByTestId('computation-node')).toHaveCount(0)
+    await page.keyboard.press('Shift+Control+z')
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
   })
 
   test('Export triggers download with project UUID and .snaq.json filename', async ({ page }) => {

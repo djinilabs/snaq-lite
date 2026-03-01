@@ -1,10 +1,10 @@
 /**
- * Toolbar for the canvas page: Back to projects, Save, Export, Add blocks, Rename, Delete project.
+ * Toolbar for the canvas page: Back to projects, Export, Undo, Redo, Add blocks, Rename, Delete project.
  */
 
 import { Link, useNavigate } from '@tanstack/react-router'
 import { downloadProjectSnapshot } from '~/lib/export-import'
-import { buildSnapshotFromGraph, setProjectSnapshot } from '~/lib/project-storage'
+import { buildSnapshotFromGraph, syncModelsToGraphNodes } from '~/lib/project-storage'
 import { useGraphStore } from '~/store'
 import { useProjectsIndexStore } from '~/store'
 
@@ -27,15 +27,17 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
   const meta = projects.find((p) => p.id === projectId)
   const updateProjectName = useProjectsIndexStore((s) => s.updateProjectName)
   const removeProject = useProjectsIndexStore((s) => s.removeProject)
+  const undoStackLength = useGraphStore((s) => s.undoStack.length)
+  const redoStackLength = useGraphStore((s) => s.redoStack.length)
 
-  const saveCurrent = () => {
-    const snapshot = getCurrentSnapshot(projectId)
-    setProjectSnapshot(snapshot)
-    const projectsState = useProjectsIndexStore.getState().projects
-    const updated = projectsState.map((p) =>
-      p.id === projectId ? { ...p, updatedAt: Date.now() } : p,
-    )
-    useProjectsIndexStore.getState().setProjects(updated)
+  const handleUndo = () => {
+    useGraphStore.getState().undo()
+    syncModelsToGraphNodes(useGraphStore.getState().nodes)
+  }
+
+  const handleRedo = () => {
+    useGraphStore.getState().redo()
+    syncModelsToGraphNodes(useGraphStore.getState().nodes)
   }
 
   const handleExport = () => {
@@ -65,11 +67,21 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
       <span style={{ width: 1, height: 18, background: 'var(--border)', margin: '0 4px' }} />
       <button
         type="button"
-        data-testid="save-btn"
-        onClick={saveCurrent}
+        data-testid="undo-btn"
+        onClick={handleUndo}
+        disabled={undoStackLength === 0}
         style={{ padding: '6px 12px', cursor: 'pointer', borderRadius: 'var(--radius-sm)' }}
       >
-        Save
+        Undo
+      </button>
+      <button
+        type="button"
+        data-testid="redo-btn"
+        onClick={handleRedo}
+        disabled={redoStackLength === 0}
+        style={{ padding: '6px 12px', cursor: 'pointer', borderRadius: 'var(--radius-sm)' }}
+      >
+        Redo
       </button>
       <button
         type="button"

@@ -48,9 +48,9 @@ export function useProjectLoader(projectId: string): void {
     if (snapshot) {
       const nodes = snapshotToGraphNodes(snapshot)
       const edges = snapshot.edges
-      useGraphStore.getState().setGraph(nodes, edges)
+      useGraphStore.getState().setGraph(nodes, edges, { clearHistory: true })
     } else {
-      useGraphStore.getState().setGraph([], [])
+      useGraphStore.getState().setGraph([], [], { clearHistory: true })
     }
     useWidgetStore.getState().clearAll()
   }, [projectId, navigate])

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
+import { UNDO_STACK_MAX } from '~/lib/constants'
 import { useGraphStore } from './graph-store'
 
 describe('graph-store', () => {
@@ -8,6 +9,9 @@ describe('graph-store', () => {
       edges: [],
       pendingEdge: null,
       focusEditorForNodeId: null,
+      undoStack: [],
+      redoStack: [],
+      undoSnapshotGetter: null,
     })
   })
 
@@ -205,5 +209,286 @@ describe('graph-store', () => {
     ]
     useGraphStore.getState().setGraph(nodes, [])
     expect(useGraphStore.getState().nodes[0].initialContent).toBe('2 + 2')
+  })
+
+  it('when getter is not set, mutators do not push to undo (no crash)', () => {
+    expect(useGraphStore.getState().undoSnapshotGetter).toBeNull()
+    useGraphStore.getState().addNode({
+      id: 'n1',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/n1.sl',
+    })
+    expect(useGraphStore.getState().undoStack).toHaveLength(0)
+  })
+
+  it('when getter is set, addNode pushes to undo and undo restores previous state', () => {
+    const getter = () => ({
+      nodes: [...useGraphStore.getState().nodes],
+      edges: [...useGraphStore.getState().edges],
+    })
+    useGraphStore.getState().setUndoSnapshotGetter(getter)
+    useGraphStore.getState().addNode({
+      id: 'n1',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/n1.sl',
+    })
+    expect(useGraphStore.getState().undoStack).toHaveLength(1)
+    expect(useGraphStore.getState().nodes).toHaveLength(1)
+    useGraphStore.getState().undo()
+    expect(useGraphStore.getState().nodes).toHaveLength(0)
+    expect(useGraphStore.getState().undoStack).toHaveLength(0)
+    expect(useGraphStore.getState().redoStack).toHaveLength(1)
+  })
+
+  it('redo restores state after undo', () => {
+    const getter = () => ({
+      nodes: [...useGraphStore.getState().nodes],
+      edges: [...useGraphStore.getState().edges],
+    })
+    useGraphStore.getState().setUndoSnapshotGetter(getter)
+    useGraphStore.getState().addNode({
+      id: 'n1',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/n1.sl',
+    })
+    useGraphStore.getState().undo()
+    expect(useGraphStore.getState().nodes).toHaveLength(0)
+    useGraphStore.getState().redo()
+    expect(useGraphStore.getState().nodes).toHaveLength(1)
+    expect(useGraphStore.getState().nodes[0].id).toBe('n1')
+  })
+
+  it('setGraph with clearHistory: true clears undo and redo stacks', () => {
+    const getter = () => ({
+      nodes: [...useGraphStore.getState().nodes],
+      edges: [...useGraphStore.getState().edges],
+    })
+    useGraphStore.getState().setUndoSnapshotGetter(getter)
+    useGraphStore.getState().addNode({
+      id: 'n1',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/n1.sl',
+    })
+    expect(useGraphStore.getState().undoStack).toHaveLength(1)
+    useGraphStore.getState().setGraph([], [], { clearHistory: true })
+    expect(useGraphStore.getState().undoStack).toHaveLength(0)
+    expect(useGraphStore.getState().redoStack).toHaveLength(0)
+  })
+
+  it('undo stack is capped at UNDO_STACK_MAX (10)', () => {
+    const getter = () => ({
+      nodes: [...useGraphStore.getState().nodes],
+      edges: [...useGraphStore.getState().edges],
+    })
+    useGraphStore.getState().setUndoSnapshotGetter(getter)
+    for (let i = 0; i < 15; i++) {
+      useGraphStore.getState().addNode({
+        id: `n${i}`,
+        position: { x: i * 10, y: 0 },
+        type: 'computation',
+        uri: `snaq://graph/n${i}.sl`,
+      })
+    }
+    expect(useGraphStore.getState().undoStack.length).toBeLessThanOrEqual(UNDO_STACK_MAX)
+    expect(useGraphStore.getState().undoStack.length).toBe(UNDO_STACK_MAX)
+  })
+
+  it('applyNodeSignature does not push to undo stack', () => {
+    const getter = () => ({
+      nodes: [...useGraphStore.getState().nodes],
+      edges: [...useGraphStore.getState().edges],
+    })
+    useGraphStore.getState().setUndoSnapshotGetter(getter)
+    useGraphStore.getState().addNode({
+      id: 'n1',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/n1.sl',
+    })
+    const lenBefore = useGraphStore.getState().undoStack.length
+    useGraphStore.getState().applyNodeSignature('snaq://graph/n1.sl', [], 'Numeric')
+    expect(useGraphStore.getState().undoStack.length).toBe(lenBefore)
+  })
+
+  it('when getter is set, moveNode pushes to undo and undo restores position', () => {
+    const getter = () => ({
+      nodes: [...useGraphStore.getState().nodes],
+      edges: [...useGraphStore.getState().edges],
+    })
+    useGraphStore.getState().setUndoSnapshotGetter(getter)
+    useGraphStore.getState().addNode({
+      id: 'n1',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/n1.sl',
+    })
+    useGraphStore.getState().moveNode('n1', { x: 100, y: 200 })
+    expect(useGraphStore.getState().nodes[0].position).toEqual({ x: 100, y: 200 })
+    useGraphStore.getState().undo()
+    expect(useGraphStore.getState().nodes).toHaveLength(1)
+    expect(useGraphStore.getState().nodes[0].position).toEqual({ x: 0, y: 0 })
+  })
+
+  it('when getter is set, removeEdge pushes to undo', () => {
+    const getter = () => ({
+      nodes: [...useGraphStore.getState().nodes],
+      edges: [...useGraphStore.getState().edges],
+    })
+    useGraphStore.getState().setUndoSnapshotGetter(getter)
+    useGraphStore.getState().addEdge({ sourceId: 'a', targetId: 'b', targetInputName: 'x' })
+    expect(useGraphStore.getState().undoStack).toHaveLength(1)
+    useGraphStore.getState().removeEdge('b', 'x')
+    expect(useGraphStore.getState().undoStack).toHaveLength(2)
+    useGraphStore.getState().undo()
+    expect(useGraphStore.getState().edges).toHaveLength(1)
+  })
+
+  it('undo when undoStack is empty leaves state unchanged', () => {
+    useGraphStore.getState().addNode({
+      id: 'n1',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/n1.sl',
+    })
+    const nodesBefore = useGraphStore.getState().nodes.length
+    useGraphStore.getState().undo()
+    expect(useGraphStore.getState().nodes).toHaveLength(nodesBefore)
+  })
+
+  it('redo when redoStack is empty leaves state unchanged', () => {
+    const getter = () => ({
+      nodes: [...useGraphStore.getState().nodes],
+      edges: [...useGraphStore.getState().edges],
+    })
+    useGraphStore.getState().setUndoSnapshotGetter(getter)
+    useGraphStore.getState().addNode({
+      id: 'n1',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/n1.sl',
+    })
+    useGraphStore.getState().undo()
+    expect(useGraphStore.getState().nodes).toHaveLength(0)
+    useGraphStore.getState().redo()
+    expect(useGraphStore.getState().nodes).toHaveLength(1)
+    useGraphStore.getState().redo()
+    expect(useGraphStore.getState().nodes).toHaveLength(1)
+  })
+
+  it('when getter is set, removeNode pushes to undo and undo restores node', () => {
+    const getter = () => ({
+      nodes: [...useGraphStore.getState().nodes],
+      edges: [...useGraphStore.getState().edges],
+    })
+    useGraphStore.getState().setUndoSnapshotGetter(getter)
+    useGraphStore.getState().addNode({
+      id: 'n1',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/n1.sl',
+    })
+    expect(useGraphStore.getState().undoStack).toHaveLength(1)
+    useGraphStore.getState().removeNode('n1')
+    expect(useGraphStore.getState().nodes).toHaveLength(0)
+    useGraphStore.getState().undo()
+    expect(useGraphStore.getState().nodes).toHaveLength(1)
+    expect(useGraphStore.getState().nodes[0].id).toBe('n1')
+  })
+
+  it('when getter is set, addEdge pushes to undo and undo removes edge', () => {
+    const getter = () => ({
+      nodes: [...useGraphStore.getState().nodes],
+      edges: [...useGraphStore.getState().edges],
+    })
+    useGraphStore.getState().setUndoSnapshotGetter(getter)
+    useGraphStore.getState().addNode({
+      id: 'a',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/a.sl',
+    })
+    useGraphStore.getState().addNode({
+      id: 'b',
+      position: { x: 100, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/b.sl',
+    })
+    useGraphStore.getState().addEdge({ sourceId: 'a', targetId: 'b', targetInputName: 'x' })
+    expect(useGraphStore.getState().edges).toHaveLength(1)
+    useGraphStore.getState().undo()
+    expect(useGraphStore.getState().edges).toHaveLength(0)
+  })
+
+  it('when getter is set, setNodeInputs pushes to undo and undo restores previous inputs', () => {
+    const getter = () => ({
+      nodes: [...useGraphStore.getState().nodes],
+      edges: [...useGraphStore.getState().edges],
+    })
+    useGraphStore.getState().setUndoSnapshotGetter(getter)
+    useGraphStore.getState().addNode({
+      id: 'n1',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/n1.sl',
+    })
+    useGraphStore.getState().setNodeInputs('n1', [{ name: 'x', type: 'Numeric' }])
+    expect(useGraphStore.getState().nodes[0].inputs).toHaveLength(1)
+    useGraphStore.getState().setNodeInputs('n1', [
+      { name: 'x', type: 'Numeric' },
+      { name: 'y', type: 'Vector' },
+    ])
+    expect(useGraphStore.getState().nodes[0].inputs).toHaveLength(2)
+    useGraphStore.getState().undo()
+    expect(useGraphStore.getState().nodes[0].inputs).toHaveLength(1)
+    expect(useGraphStore.getState().nodes[0].inputs?.[0].name).toBe('x')
+  })
+
+  it('when getter throws, mutator does not push (undo stack unchanged)', () => {
+    const getter = () => {
+      throw new Error('getter error')
+    }
+    useGraphStore.getState().setUndoSnapshotGetter(getter)
+    useGraphStore.getState().addNode({
+      id: 'n1',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/n1.sl',
+    })
+    expect(useGraphStore.getState().undoStack).toHaveLength(0)
+    expect(useGraphStore.getState().nodes).toHaveLength(1)
+  })
+
+  it('setGraph without clearHistory preserves undo and redo stacks', () => {
+    const getter = () => ({
+      nodes: [...useGraphStore.getState().nodes],
+      edges: [...useGraphStore.getState().edges],
+    })
+    useGraphStore.getState().setUndoSnapshotGetter(getter)
+    useGraphStore.getState().addNode({
+      id: 'n1',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/n1.sl',
+    })
+    useGraphStore.getState().undo()
+    expect(useGraphStore.getState().undoStack).toHaveLength(0)
+    expect(useGraphStore.getState().redoStack).toHaveLength(1)
+    const newNodes = [
+      {
+        id: 'n2',
+        position: { x: 10, y: 10 },
+        type: 'computation' as const,
+        uri: 'snaq://graph/n2.sl',
+      },
+    ]
+    useGraphStore.getState().setGraph(newNodes, [])
+    expect(useGraphStore.getState().nodes).toHaveLength(1)
+    expect(useGraphStore.getState().nodes[0].id).toBe('n2')
+    expect(useGraphStore.getState().undoStack).toHaveLength(0)
+    expect(useGraphStore.getState().redoStack).toHaveLength(1)
   })
 })

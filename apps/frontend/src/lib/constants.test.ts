@@ -15,6 +15,8 @@ import {
   NODRAG_CLASS,
   NOWHEEL_CLASS,
   INPUT_PORT_TYPES,
+  AUTO_SAVE_DEBOUNCE_MS,
+  UNDO_STACK_MAX,
 } from './constants'
 
 describe('constants', () => {
@@ -52,5 +54,10 @@ describe('constants', () => {
     expect(INPUT_PORT_TYPES).toContain('Vector')
     expect(INPUT_PORT_TYPES).toContain('Numeric')
     expect(INPUT_PORT_TYPES.length).toBeGreaterThan(0)
+  })
+
+  it('AUTO_SAVE_DEBOUNCE_MS and UNDO_STACK_MAX are positive', () => {
+    expect(AUTO_SAVE_DEBOUNCE_MS).toBe(600)
+    expect(UNDO_STACK_MAX).toBe(10)
   })
 })

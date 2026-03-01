@@ -27,3 +27,9 @@ export const NOWHEEL_CLASS = 'nowheel'
 
 /** Allowed types for computation block input ports (use $name in script to reference). */
 export const INPUT_PORT_TYPES = ['Vector', 'Numeric', 'Symbolic', 'FuzzyBool', 'Undefined'] as const
+
+/** Debounce delay (ms) before auto-saving after graph or editor content change. */
+export const AUTO_SAVE_DEBOUNCE_MS = 600
+
+/** Maximum number of states kept in the undo stack (canvas boxes + connections). */
+export const UNDO_STACK_MAX = 10

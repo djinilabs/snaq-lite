@@ -64,7 +64,7 @@ Use `run_with_registry(input, &UnitRegistry)` (and optional symbol registry) for
 - **All (from root):** `pnpm run install:frontend` once, then `pnpm test` (backend then frontend).
 - **Backend only:** `cargo test --workspace`; **Clippy:** `cargo clippy --workspace -- -D warnings`; **WASM (Node):** `wasm-pack test --node crates/snaq-lite-wasm` (requires [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) and Node).
 - **Frontend only:** `pnpm run install:frontend` then `pnpm run test:frontend` (from root) or `pnpm test` in `apps/frontend`.
-- **Frontend E2E (Playwright):** From root, `pnpm smoketest` (builds frontend and runs smoke tests with a temporary server), or `pnpm smoketest:dev` (run smoke tests against an already-running dev server). First time (and in CI): install browsers with `pnpm -C apps/frontend exec playwright install --with-deps chromium`.
+- **Frontend E2E (Playwright):** From root, **`pnpm smoketest`** is the single command: it ensures the environment is ready (frontend deps + Playwright Chromium), builds the frontend, starts the preview server, runs the E2E tests, and stops the server when done. No separate bootstrap or sandbox is needed. For local iteration against an already-running dev server, use `pnpm smoketest:dev` (no server is started or stopped).
 - **Lint:** `pnpm run lint` (backend clippy + frontend ESLint; from root).
 
 ---

@@ -18,13 +18,9 @@ Use **pnpm** (this repo does not use npm for scripts). If using the run-smoke-te
   - `pnpm run smoketest` — Same as root smoketest but assumes you already built (or run from root for full flow).
   - `pnpm run smoketest:dev` — Same as root smoketest:dev; dev server must be running.
 
-First-time (and CI): install Playwright browser binaries:
+**Single command:** From repo root, **`pnpm smoketest`** prepares the environment (frontend deps + Playwright Chromium), builds the frontend, starts the preview server, runs E2E tests, and stops the server when tests finish. No separate sandbox or bootstrap is needed.
 
-```bash
-pnpm -C apps/frontend exec playwright install --with-deps chromium
-```
-
-For local only: `pnpm -C apps/frontend exec playwright install chromium`.
+If port 3000 is already in use, either stop the other process or set `PLAYWRIGHT_BASE_URL` and use `pnpm smoketest:dev` with the app already running. For local-only browser install (no system deps): `pnpm -C apps/frontend exec playwright install chromium`.
 
 ## Taking a screenshot the agent can read
 

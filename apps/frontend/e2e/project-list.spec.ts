@@ -16,8 +16,11 @@ test.describe('project list', () => {
 
   test('clicking New project navigates to canvas with project UUID', async ({ page }) => {
     await page.goto('/')
-    await page.getByTestId('new-project-btn').click()
-    await expect(page).toHaveURL(/\/project\/[0-9a-f-]{36}/i)
+    await expect(page.getByTestId('project-list-page')).toBeVisible()
+    const newProjectBtn = page.getByTestId('new-project-btn')
+    await expect(newProjectBtn).toBeVisible()
+    await newProjectBtn.click()
+    await expect(page).toHaveURL(/\/project\/[0-9a-f-]{36}/i, { timeout: 10_000 })
     await expect(page.getByTestId('canvas-page')).toBeVisible()
     await expect(page.getByTestId('canvas-toolbar')).toBeVisible()
   })
@@ -26,7 +29,9 @@ test.describe('project list', () => {
     page,
   }) => {
     await page.goto('/')
+    await expect(page.getByTestId('project-list-page')).toBeVisible()
     await page.getByTestId('new-project-btn').click()
+    await expect(page).toHaveURL(/\/project\/[0-9a-f-]{36}/i, { timeout: 10_000 })
     await expect(page.getByTestId('canvas-toolbar')).toBeVisible()
     await page.getByTestId('back-to-projects').click()
     await expect(page).toHaveURL('/')
@@ -40,7 +45,9 @@ test.describe('project list', () => {
 
   test('Delete project from list removes it after confirming', async ({ page }) => {
     await page.goto('/')
+    await expect(page.getByTestId('project-list-page')).toBeVisible()
     await page.getByTestId('new-project-btn').click()
+    await expect(page).toHaveURL(/\/project\/[0-9a-f-]{36}/i, { timeout: 10_000 })
     await expect(page.getByTestId('canvas-toolbar')).toBeVisible()
     await page.getByTestId('back-to-projects').click()
     await expect(page.getByTestId('project-item')).toHaveCount(1)
@@ -53,8 +60,9 @@ test.describe('project list', () => {
 
   test('Import valid project file navigates to canvas', async ({ page }) => {
     await page.goto('/')
+    await expect(page.getByTestId('project-list-page')).toBeVisible()
     await page.getByTestId('import-file-input').setInputFiles('e2e/fixtures/valid-project.snaq.json')
-    await expect(page).toHaveURL(/\/project\/[0-9a-f-]{36}/i)
+    await expect(page).toHaveURL(/\/project\/[0-9a-f-]{36}/i, { timeout: 10_000 })
     await expect(page.getByTestId('canvas-page')).toBeVisible()
     await expect(page.getByTestId('canvas-toolbar')).toBeVisible()
   })

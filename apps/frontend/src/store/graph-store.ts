@@ -37,6 +37,8 @@ interface GraphState {
   nodes: GraphNode[]
   edges: GraphEdge[]
   pendingEdge: PendingEdge | null
+  /** When set, the computation box editor for this node id should focus when it mounts. Cleared after focus or on setGraph. */
+  focusEditorForNodeId: string | null
   addNode: (node: Omit<GraphNode, 'inputs' | 'outputType'>) => void
   moveNode: (id: string, position: { x: number; y: number }) => void
   removeNode: (id: string) => void
@@ -44,8 +46,11 @@ interface GraphState {
   removeEdge: (targetId: string, targetInputName: string) => void
   setPendingEdge: (edge: PendingEdge | null) => void
   clearPendingEdge: () => void
-  applyNodeSignature: (uri: string, inputs: NodeInputPort[], outputType?: string | null) => void
-  /** Replace entire graph (e.g. when loading a project). Clears pendingEdge. */
+  setFocusEditorForNodeId: (id: string | null) => void
+  /** Updates only outputType from LSP. Inputs are block properties edited in the UI, not from block text. */
+  applyNodeSignature: (uri: string, _inputs: NodeInputPort[], outputType?: string | null) => void
+  setNodeInputs: (nodeId: string, inputs: NodeInputPort[]) => void
+  /** Replace entire graph (e.g. when loading a project). Clears pendingEdge and focusEditorForNodeId. */
   setGraph: (nodes: GraphNode[], edges: GraphEdge[]) => void
 }
 
@@ -53,10 +58,13 @@ export const useGraphStore = create<GraphState>((set) => ({
   nodes: [],
   edges: [],
   pendingEdge: null,
+  focusEditorForNodeId: null,
 
   addNode: (node) =>
     set((state) => ({
       nodes: [...state.nodes, { ...node, inputs: undefined, outputType: undefined }],
+      focusEditorForNodeId:
+        node.type === 'computation' ? node.id : state.focusEditorForNodeId,
     })),
 
   moveNode: (id, position) =>
@@ -89,13 +97,20 @@ export const useGraphStore = create<GraphState>((set) => ({
 
   clearPendingEdge: () => set({ pendingEdge: null }),
 
-  applyNodeSignature: (uri, inputs, outputType) =>
+  setFocusEditorForNodeId: (focusEditorForNodeId) => set({ focusEditorForNodeId }),
+
+  applyNodeSignature: (uri, _inputs, outputType) =>
     set((state) => ({
       nodes: state.nodes.map((n) =>
-        n.uri === uri ? { ...n, inputs, outputType: outputType ?? null } : n,
+        n.uri === uri ? { ...n, outputType: outputType ?? null } : n,
       ),
     })),
 
+  setNodeInputs: (nodeId, inputs) =>
+    set((state) => ({
+      nodes: state.nodes.map((n) => (n.id === nodeId ? { ...n, inputs } : n)),
+    })),
+
   setGraph: (nodes, edges) =>
-    set({ nodes, edges, pendingEdge: null }),
+    set({ nodes, edges, pendingEdge: null, focusEditorForNodeId: null }),
 }))

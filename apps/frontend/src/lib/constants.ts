@@ -10,3 +10,17 @@ export const LSP_METHOD_GRAPH_CONNECT = 'snaqlite/graph/connect'
 export const LSP_METHOD_GRAPH_DISCONNECT = 'snaqlite/graph/disconnect'
 export const LSP_METHOD_SUBSCRIBE_WIDGET = 'snaqlite/graph/subscribeWidget'
 export const LSP_METHOD_UNSUBSCRIBE_WIDGET = 'snaqlite/graph/unsubscribeWidget'
+
+/** Retry interval and max wait when LSP client is not ready before subscribeWidget. */
+export const LSP_SUBSCRIBE_RETRY_INTERVAL_MS = 200
+export const LSP_SUBSCRIBE_MAX_WAIT_MS = 10_000
+
+/** React Flow drag handle class names; only elements with this class start a node drag. */
+export const DRAG_HANDLE_CLASS_COMPUTATION = 'computation-drag-handle'
+export const DRAG_HANDLE_CLASS_PRESENTATION = 'presentation-drag-handle'
+
+/** React Flow utility class; elements with this class do not start a node drag (so inner UI is clickable). */
+export const NODRAG_CLASS = 'nodrag'
+
+/** Allowed types for computation block input ports (use $name in script to reference). */
+export const INPUT_PORT_TYPES = ['Vector', 'Numeric', 'Symbolic', 'FuzzyBool', 'Undefined'] as const

@@ -10,9 +10,17 @@ export interface LanguageClientLike {
 }
 
 let client: LanguageClientLike | null = null
+let resolveClient: ((c: LanguageClientLike) => void) | null = null
+const clientPromise = new Promise<LanguageClientLike>((resolve) => {
+  resolveClient = resolve
+})
 
 export function setLanguageClient(c: LanguageClientLike | null): void {
   client = c
+  if (c != null && resolveClient != null) {
+    resolveClient(c)
+    resolveClient = null
+  }
 }
 
 export function getLanguageClient(): LanguageClientLike {
@@ -24,4 +32,16 @@ export function getLanguageClient(): LanguageClientLike {
 
 export function hasLanguageClient(): boolean {
   return client != null
+}
+
+/**
+ * Returns a promise that resolves with the client when it is set, or null after timeoutMs.
+ * Use when the user action (e.g. connecting an edge) may happen before the LSP has finished initializing.
+ */
+export function waitForLanguageClient(timeoutMs: number): Promise<LanguageClientLike | null> {
+  if (client != null) return Promise.resolve(client)
+  return Promise.race([
+    clientPromise,
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+  ])
 }

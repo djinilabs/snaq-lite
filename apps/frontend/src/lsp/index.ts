@@ -23,6 +23,7 @@ export {
   setLanguageClient,
   getLanguageClient,
   hasLanguageClient,
+  waitForLanguageClient,
 } from './language-client-singleton'
 export type { LanguageClientLike } from './language-client-singleton'
 export * from './types'

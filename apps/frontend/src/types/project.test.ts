@@ -50,6 +50,28 @@ describe('parseProjectSnapshot', () => {
     })
   })
 
+  it('parses computation nodes with inputs', () => {
+    const snapshot = parseProjectSnapshot({
+      id: 'p',
+      nodes: [
+        {
+          id: 'n1',
+          position: { x: 0, y: 0 },
+          type: 'computation',
+          inputs: [
+            { name: 'x', type: 'Vector' },
+            { name: 'y', type: 'Numeric' },
+          ],
+        },
+      ],
+      edges: [],
+    })
+    expect(snapshot?.nodes[0].inputs).toEqual([
+      { name: 'x', type: 'Vector' },
+      { name: 'y', type: 'Numeric' },
+    ])
+  })
+
   it('parses edges', () => {
     const snapshot = parseProjectSnapshot({
       id: 'p',

@@ -1,4 +1,5 @@
 /// <reference types="vite/client" />
+import '../app.css'
 import { useEffect } from 'react'
 import type { ReactNode } from 'react'
 import {
@@ -8,6 +9,7 @@ import {
   Scripts,
 } from '@tanstack/react-router'
 import { LspProvider } from '~/components/lsp-provider'
+import { ToastList } from '~/components/toast-list'
 import { useProjectsIndexStore } from '~/store'
 
 export const Route = createRootRoute({
@@ -16,6 +18,21 @@ export const Route = createRootRoute({
       { charSet: 'utf-8' },
       { name: 'viewport', content: 'width=device-width, initial-scale=1' },
       { title: 'Snaq Lite' },
+    ],
+    links: [
+      {
+        rel: 'preconnect',
+        href: 'https://fonts.googleapis.com',
+      },
+      {
+        rel: 'preconnect',
+        href: 'https://fonts.gstatic.com',
+        crossOrigin: 'anonymous',
+      },
+      {
+        rel: 'stylesheet',
+        href: 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap',
+      },
     ],
   }),
   component: RootComponent,
@@ -30,6 +47,7 @@ function RootComponent() {
     <RootDocument>
       <LspProvider>
         <Outlet />
+        <ToastList />
       </LspProvider>
     </RootDocument>
   )

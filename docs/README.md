@@ -15,6 +15,7 @@ snaq-lite is an expression-oriented language for arithmetic with **physical quan
 - **Precision** — Implicit from decimal places in literals, or explicit with `value ~ error`.
 - **Variables** — Immutable bindings (`name = expression`) with lexical scope; result can be the last binding’s value.
 - **External streams** — `$name` refers to a stream supplied by the Host; see [EXTERNAL_STREAMS.md](EXTERNAL_STREAMS.md).
+- **Computation block inputs (visual graph)** — In the canvas app, declare input ports with `input name: Type` at the top of a block (e.g. `input x: Vector`); input handles appear and you can connect other blocks. See [COMPUTATION_BLOCKS.md](COMPUTATION_BLOCKS.md).
 
 Programs are **expression lists**: multiple expressions separated by newlines or `;`, optionally inside blocks `{ ... }`. The **result** is the last expression’s value (or the last binding’s right-hand side, or undefined if the list is empty).
 
@@ -37,5 +38,6 @@ Programs are **expression lists**: multiple expressions separated by newlines or
 | **Variable bindings** — Assignments, scope, shadowing, chained assignment | [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md) |
 | **Conditionals** — if/then/else, FuzzyBool, superposition | [CONDITIONALS.md](CONDITIONALS.md) |
 | **External streams** — `$name`, chunk format, Host workflow | [EXTERNAL_STREAMS.md](EXTERNAL_STREAMS.md) |
+| **Computation blocks** — Input parameters, wiring, `input name: Type` | [COMPUTATION_BLOCKS.md](COMPUTATION_BLOCKS.md) |
 
 Other: [NUMBAT_COMPARISON.md](NUMBAT_COMPARISON.md) — comparison with Numbat (implementation-oriented).

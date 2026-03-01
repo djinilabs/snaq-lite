@@ -15,7 +15,7 @@ import { useWidgetStore } from '~/store'
 
 export function useProjectLoader(projectId: string): void {
   const navigate = useNavigate()
-  const requestedRef = useRef<string | null>(null)
+  const lastLoadedProjectIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (!projectId || !isValidUuid(projectId)) {
@@ -30,30 +30,28 @@ export function useProjectLoader(projectId: string): void {
     const indexAfterHydrate = useProjectsIndexStore.getState().projects
     const inIndex = indexAfterHydrate.some((p) => p.id === projectId)
 
+    const snapshot = getProjectSnapshot(projectId)
+    if (!snapshot && !inIndex) {
+      navigate({ to: '/' })
+      return
+    }
+
+    // Avoid overwriting the graph when effect re-runs for the same project (e.g. React Strict Mode in dev).
+    if (lastLoadedProjectIdRef.current === projectId) {
+      return
+    }
+    lastLoadedProjectIdRef.current = projectId
+
     const currentNodes = useGraphStore.getState().nodes
-    requestedRef.current = projectId
+    disposeAllGraphModels(currentNodes.map((n) => n.id))
 
-    void (async () => {
-      const snapshot = getProjectSnapshot(projectId)
-      if (requestedRef.current !== projectId) return
-
-      if (!snapshot && !inIndex) {
-        navigate({ to: '/' })
-        return
-      }
-
-      disposeAllGraphModels(currentNodes.map((n) => n.id))
-      if (requestedRef.current !== projectId) return
-
-      if (snapshot) {
-        const nodes = snapshotToGraphNodes(snapshot)
-        const edges = snapshot.edges
-        useGraphStore.getState().setGraph(nodes, edges)
-      } else {
-        useGraphStore.getState().setGraph([], [])
-      }
-      useWidgetStore.getState().clearAll()
-      requestedRef.current = null
-    })()
+    if (snapshot) {
+      const nodes = snapshotToGraphNodes(snapshot)
+      const edges = snapshot.edges
+      useGraphStore.getState().setGraph(nodes, edges)
+    } else {
+      useGraphStore.getState().setGraph([], [])
+    }
+    useWidgetStore.getState().clearAll()
   }, [projectId, navigate])
 }

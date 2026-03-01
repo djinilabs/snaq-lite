@@ -55,24 +55,30 @@ function ProjectListPage() {
       data-testid="project-list-page"
       style={{
         minHeight: '100vh',
-        background: '#1e1e2e',
-        color: '#e4e4e7',
-        padding: 24,
+        background: 'var(--bg-primary)',
+        color: 'var(--text-primary)',
+        padding: 32,
+        maxWidth: 640,
+        margin: '0 auto',
       }}
     >
-      <h1 style={{ marginBottom: 24 }}>Projects</h1>
-      <div style={{ display: 'flex', gap: 12, marginBottom: 24 }}>
+      <h1 style={{ margin: '0 0 8px', fontSize: 28, fontWeight: 600 }}>Projects</h1>
+      <p style={{ margin: '0 0 24px', color: 'var(--text-secondary)', fontSize: 15 }}>
+        Create a project or import a file to get started.
+      </p>
+      <div style={{ display: 'flex', gap: 12, marginBottom: 32 }}>
         <button
           type="button"
           data-testid="new-project-btn"
           onClick={handleNewProject}
           style={{
-            padding: '8px 16px',
+            padding: '10px 20px',
             cursor: 'pointer',
-            background: '#3b82f6',
+            background: 'var(--accent)',
             color: '#fff',
             border: 'none',
-            borderRadius: 6,
+            borderRadius: 'var(--radius-sm)',
+            fontWeight: 500,
           }}
         >
           New project
@@ -82,12 +88,12 @@ function ProjectListPage() {
           data-testid="import-btn"
           onClick={handleImport}
           style={{
-            padding: '8px 16px',
+            padding: '10px 20px',
             cursor: 'pointer',
-            background: '#333',
-            color: '#fff',
-            border: '1px solid #555',
-            borderRadius: 6,
+            background: 'var(--bg-elevated)',
+            color: 'var(--text-primary)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-sm)',
           }}
         >
           Import
@@ -102,7 +108,7 @@ function ProjectListPage() {
         />
       </div>
       {sortedProjects.length === 0 ? (
-        <p style={{ color: '#888' }}>No projects yet. Create one or import a file.</p>
+        <p style={{ color: 'var(--text-muted)' }}>No projects yet. Create one or import a file.</p>
       ) : (
         <ul data-testid="project-list" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
           {sortedProjects.map((p) => (
@@ -114,27 +120,32 @@ function ProjectListPage() {
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
-                padding: '12px 16px',
-                marginBottom: 8,
-                background: '#2d2d44',
-                borderRadius: 8,
-                border: '1px solid #444',
+                padding: '16px 20px',
+                marginBottom: 10,
+                background: 'var(--bg-card)',
+                borderRadius: 'var(--radius)',
+                border: '1px solid var(--border)',
+                boxShadow: 'var(--shadow-sm)',
               }}
             >
-              <span>
-                {p.name ?? 'Untitled'} <span style={{ color: '#666', fontSize: 12 }}>({p.id.slice(0, 8)}…)</span>
+              <span style={{ fontWeight: 500 }}>
+                {p.name ?? 'Untitled'}{' '}
+                <span style={{ color: 'var(--text-muted)', fontSize: 13, fontWeight: 400 }}>
+                  ({p.id.slice(0, 8)}…)
+                </span>
               </span>
               <div style={{ display: 'flex', gap: 8 }}>
                 <button
                   type="button"
                   onClick={() => handleOpen(p.id)}
                   style={{
-                    padding: '4px 12px',
+                    padding: '6px 14px',
                     cursor: 'pointer',
-                    background: '#333',
+                    background: 'var(--accent)',
                     color: '#fff',
-                    border: '1px solid #555',
-                    borderRadius: 4,
+                    border: 'none',
+                    borderRadius: 'var(--radius-sm)',
+                    fontWeight: 500,
                   }}
                 >
                   Open
@@ -143,12 +154,12 @@ function ProjectListPage() {
                   type="button"
                   onClick={() => handleDelete(p.id)}
                   style={{
-                    padding: '4px 12px',
+                    padding: '6px 14px',
                     cursor: 'pointer',
-                    background: '#444',
-                    color: '#f87171',
-                    border: '1px solid #555',
-                    borderRadius: 4,
+                    background: 'transparent',
+                    color: 'var(--danger)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius-sm)',
                   }}
                 >
                   Delete

@@ -44,31 +44,30 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
 
   return (
     <div
+      className="canvas-toolbar"
       data-testid="canvas-toolbar"
       style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 12,
-        padding: '8px 12px',
-        background: '#1e1e2e',
-        borderBottom: '1px solid #333',
+        gap: 10,
+        padding: '10px 16px',
+        background: 'var(--bg-secondary)',
+        borderBottom: '1px solid var(--border)',
       }}
     >
-      <Link to="/" data-testid="back-to-projects" style={{ color: '#8ab4f8', textDecoration: 'none' }}>
-        Back to projects
+      <Link
+        to="/"
+        data-testid="back-to-projects"
+        style={{ color: 'var(--accent)', textDecoration: 'none', fontWeight: 500 }}
+      >
+        ← Back to projects
       </Link>
+      <span style={{ width: 1, height: 18, background: 'var(--border)', margin: '0 4px' }} />
       <button
         type="button"
         data-testid="save-btn"
         onClick={saveCurrent}
-        style={{
-          padding: '4px 10px',
-          cursor: 'pointer',
-          background: '#333',
-          color: '#fff',
-          border: '1px solid #555',
-          borderRadius: 4,
-        }}
+        style={{ padding: '6px 12px', cursor: 'pointer', borderRadius: 'var(--radius-sm)' }}
       >
         Save
       </button>
@@ -76,30 +75,17 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
         type="button"
         data-testid="export-btn"
         onClick={handleExport}
-        style={{
-          padding: '4px 10px',
-          cursor: 'pointer',
-          background: '#333',
-          color: '#fff',
-          border: '1px solid #555',
-          borderRadius: 4,
-        }}
+        style={{ padding: '6px 12px', cursor: 'pointer', borderRadius: 'var(--radius-sm)' }}
       >
         Export
       </button>
-      <span style={{ width: 1, height: 16, background: '#555', marginLeft: 4 }} />
+      <span style={{ width: 1, height: 18, background: 'var(--border)', margin: '0 4px' }} />
       <button
         type="button"
         data-testid="add-computation-btn"
+        data-accent
         onClick={() => onAddNode?.('computation')}
-        style={{
-          padding: '4px 10px',
-          cursor: 'pointer',
-          background: '#333',
-          color: '#fff',
-          border: '1px solid #555',
-          borderRadius: 4,
-        }}
+        style={{ padding: '6px 12px', cursor: 'pointer', borderRadius: 'var(--radius-sm)', fontWeight: 500 }}
       >
         Add computation box
       </button>
@@ -107,14 +93,7 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
         type="button"
         data-testid="add-presentation-btn"
         onClick={() => onAddNode?.('presentation')}
-        style={{
-          padding: '4px 10px',
-          cursor: 'pointer',
-          background: '#333',
-          color: '#fff',
-          border: '1px solid #555',
-          borderRadius: 4,
-        }}
+        style={{ padding: '6px 12px', cursor: 'pointer', borderRadius: 'var(--radius-sm)' }}
       >
         Add presentation block
       </button>
@@ -122,21 +101,15 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
         <button
           type="button"
           data-testid="delete-selected-btn"
+          data-danger-soft={hasSelection ? '' : undefined}
           onClick={onDeleteSelected}
           disabled={!hasSelection}
-          style={{
-            padding: '4px 10px',
-            cursor: hasSelection ? 'pointer' : 'not-allowed',
-            background: '#333',
-            color: hasSelection ? '#f87171' : '#666',
-            border: '1px solid #555',
-            borderRadius: 4,
-          }}
+          style={{ padding: '6px 12px', borderRadius: 'var(--radius-sm)' }}
         >
           Delete selected
         </button>
       )}
-      <span style={{ width: 1, height: 16, background: '#555', marginLeft: 4 }} />
+      <span style={{ flex: 1 }} />
       <button
         type="button"
         data-testid="rename-btn"
@@ -144,34 +117,21 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
           const name = window.prompt('Project name', meta?.name ?? '')
           if (name != null) updateProjectName(projectId, name)
         }}
-        style={{
-          padding: '4px 10px',
-          cursor: 'pointer',
-          background: '#333',
-          color: '#fff',
-          border: '1px solid #555',
-          borderRadius: 4,
-        }}
+        style={{ padding: '6px 12px', cursor: 'pointer', borderRadius: 'var(--radius-sm)' }}
       >
         Rename
       </button>
       <button
         type="button"
         data-testid="delete-project-btn"
+        data-danger-outline
         onClick={() => {
           if (window.confirm('Delete this project? This cannot be undone.')) {
             removeProject(projectId)
             navigate({ to: '/' })
           }
         }}
-        style={{
-          padding: '4px 10px',
-          cursor: 'pointer',
-          background: '#444',
-          color: '#f87171',
-          border: '1px solid #555',
-          borderRadius: 4,
-        }}
+        style={{ padding: '6px 12px', cursor: 'pointer', borderRadius: 'var(--radius-sm)' }}
       >
         Delete project
       </button>

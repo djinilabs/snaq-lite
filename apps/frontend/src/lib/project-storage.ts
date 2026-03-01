@@ -68,11 +68,16 @@ export function buildSnapshotFromGraph(
   const projectNodes = nodes.map((n) => {
     const model = getModel(nodeIdToUri(n.id), undefined as never)
     const content = model ? model.getValue() : n.initialContent ?? ''
-    return {
+    const base = {
       id: n.id,
       position: n.position,
       type: n.type,
-      ...(n.type === 'computation' && content ? { content } : {}),
+    }
+    if (n.type !== 'computation') return base
+    return {
+      ...base,
+      ...(content ? { content } : {}),
+      ...(n.inputs && n.inputs.length > 0 ? { inputs: n.inputs } : {}),
     }
   })
   return {

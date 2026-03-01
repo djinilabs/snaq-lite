@@ -5,16 +5,19 @@ import { useUIStore } from '~/store'
 import { LSP_METHOD_GRAPH_CONNECT, LSP_METHOD_GRAPH_DISCONNECT } from '~/lib/constants'
 
 const mockSendRequest = vi.fn()
+const mockHasLanguageClient = vi.fn(() => true)
+const mockClient = { sendRequest: mockSendRequest, sendNotification: vi.fn() }
 vi.mock('~/lsp/language-client-singleton', () => ({
-  getLanguageClient: () => ({
-    sendRequest: mockSendRequest,
-    sendNotification: vi.fn(),
-  }),
+  waitForLanguageClient: () =>
+    mockHasLanguageClient()
+      ? Promise.resolve(mockClient)
+      : Promise.resolve(null),
 }))
 
 describe('edge-handlers', () => {
   beforeEach(() => {
     mockSendRequest.mockReset()
+    mockHasLanguageClient.mockReturnValue(true)
     useGraphStore.setState({ nodes: [], edges: [], pendingEdge: null })
   })
 
@@ -81,6 +84,34 @@ describe('edge-handlers', () => {
       expect(addToast).toHaveBeenCalledWith('Type mismatch', 'error')
     })
 
+    it('returns false and does not add edge or call LSP when client not ready', async () => {
+      mockHasLanguageClient.mockReturnValue(false)
+      const addToast = vi.fn()
+      useUIStore.setState({ addToast })
+      useGraphStore.getState().addNode({
+        id: 'n1',
+        position: { x: 0, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n1.sl',
+      })
+      useGraphStore.getState().addNode({
+        id: 'n2',
+        position: { x: 100, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n2.sl',
+      })
+
+      const result = await connectEdge('snaq://graph/n1.sl', 'snaq://graph/n2.sl', 'x')
+
+      expect(result).toBe(false)
+      expect(useGraphStore.getState().edges).toHaveLength(0)
+      expect(mockSendRequest).not.toHaveBeenCalled()
+      expect(addToast).toHaveBeenCalledWith(
+        'Editor is still loading. Please try again in a moment.',
+        'error',
+      )
+    })
+
     it('returns false and does not call LSP when source or target node is missing', async () => {
       useGraphStore.getState().addNode({
         id: 'n1',
@@ -120,6 +151,38 @@ describe('edge-handlers', () => {
   })
 
   describe('disconnectEdge', () => {
+    it('shows toast and does not remove edge when client not ready', async () => {
+      mockHasLanguageClient.mockReturnValue(false)
+      const addToast = vi.fn()
+      useUIStore.setState({ addToast })
+      useGraphStore.getState().addNode({
+        id: 'n1',
+        position: { x: 0, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n1.sl',
+      })
+      useGraphStore.getState().addNode({
+        id: 'n2',
+        position: { x: 100, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n2.sl',
+      })
+      useGraphStore.getState().addEdge({
+        sourceId: 'n1',
+        targetId: 'n2',
+        targetInputName: 'x',
+      })
+
+      await disconnectEdge('snaq://graph/n2.sl', 'x')
+
+      expect(useGraphStore.getState().edges).toHaveLength(1)
+      expect(mockSendRequest).not.toHaveBeenCalled()
+      expect(addToast).toHaveBeenCalledWith(
+        'Editor is still loading. Please try again in a moment.',
+        'error',
+      )
+    })
+
     it('calls LSP disconnect and removes edge from store', async () => {
       useGraphStore.getState().addNode({
         id: 'n1',

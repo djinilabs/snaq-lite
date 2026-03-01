@@ -32,7 +32,7 @@ export function getFlowNodeData(
       : n.uri
   return {
     uri: n.uri,
-    label: n.id,
+    label: n.type === 'computation' ? 'Computation' : 'Presentation',
     sourceUri,
   }
 }

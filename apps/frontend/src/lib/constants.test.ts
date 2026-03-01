@@ -8,6 +8,12 @@ import {
   LSP_METHOD_GRAPH_DISCONNECT,
   LSP_METHOD_SUBSCRIBE_WIDGET,
   LSP_METHOD_UNSUBSCRIBE_WIDGET,
+  LSP_SUBSCRIBE_RETRY_INTERVAL_MS,
+  LSP_SUBSCRIBE_MAX_WAIT_MS,
+  DRAG_HANDLE_CLASS_COMPUTATION,
+  DRAG_HANDLE_CLASS_PRESENTATION,
+  NODRAG_CLASS,
+  INPUT_PORT_TYPES,
 } from './constants'
 
 describe('constants', () => {
@@ -27,5 +33,22 @@ describe('constants', () => {
     expect(LSP_METHOD_GRAPH_DISCONNECT).toBe('snaqlite/graph/disconnect')
     expect(LSP_METHOD_SUBSCRIBE_WIDGET).toBe('snaqlite/graph/subscribeWidget')
     expect(LSP_METHOD_UNSUBSCRIBE_WIDGET).toBe('snaqlite/graph/unsubscribeWidget')
+  })
+
+  it('LSP subscribe retry and drag handle constants are positive/non-empty', () => {
+    expect(LSP_SUBSCRIBE_RETRY_INTERVAL_MS).toBe(200)
+    expect(LSP_SUBSCRIBE_MAX_WAIT_MS).toBe(10_000)
+    expect(DRAG_HANDLE_CLASS_COMPUTATION).toBe('computation-drag-handle')
+    expect(DRAG_HANDLE_CLASS_PRESENTATION).toBe('presentation-drag-handle')
+  })
+
+  it('NODRAG_CLASS is non-empty', () => {
+    expect(NODRAG_CLASS).toBe('nodrag')
+  })
+
+  it('INPUT_PORT_TYPES includes Vector and Numeric', () => {
+    expect(INPUT_PORT_TYPES).toContain('Vector')
+    expect(INPUT_PORT_TYPES).toContain('Numeric')
+    expect(INPUT_PORT_TYPES.length).toBeGreaterThan(0)
   })
 })

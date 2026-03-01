@@ -7,6 +7,7 @@ describe('graph-store', () => {
       nodes: [],
       edges: [],
       pendingEdge: null,
+      focusEditorForNodeId: null,
     })
   })
 
@@ -26,6 +27,27 @@ describe('graph-store', () => {
     })
     expect(useGraphStore.getState().nodes[0].inputs).toBeUndefined()
     expect(useGraphStore.getState().nodes[0].outputType).toBeUndefined()
+  })
+
+  it('addNode sets focusEditorForNodeId for computation type', () => {
+    useGraphStore.getState().addNode({
+      id: 'c1',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/c1.sl',
+    })
+    expect(useGraphStore.getState().focusEditorForNodeId).toBe('c1')
+  })
+
+  it('addNode does not set focusEditorForNodeId for presentation type', () => {
+    useGraphStore.setState({ focusEditorForNodeId: null })
+    useGraphStore.getState().addNode({
+      id: 'p1',
+      position: { x: 0, y: 0 },
+      type: 'presentation',
+      uri: 'snaq://graph/p1.sl',
+    })
+    expect(useGraphStore.getState().focusEditorForNodeId).toBeNull()
   })
 
   it('moveNode updates position for matching id', () => {
@@ -101,7 +123,7 @@ describe('graph-store', () => {
       [{ name: 'x', type: 'Vector' }],
       'Numeric',
     )
-    expect(useGraphStore.getState().nodes[0].inputs).toEqual([{ name: 'x', type: 'Vector' }])
+    expect(useGraphStore.getState().nodes[0].inputs).toBeUndefined()
     expect(useGraphStore.getState().nodes[0].outputType).toBe('Numeric')
   })
 
@@ -114,6 +136,33 @@ describe('graph-store', () => {
     })
     useGraphStore.getState().applyNodeSignature('snaq://graph/n1.sl', [], null)
     expect(useGraphStore.getState().nodes[0].outputType).toBeNull()
+  })
+
+  it('setNodeInputs updates inputs for the node', () => {
+    useGraphStore.setState({ nodes: [], edges: [] })
+    useGraphStore.getState().addNode({
+      id: 'n1',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/n1.sl',
+    })
+    expect(useGraphStore.getState().nodes[0].inputs).toBeUndefined()
+    useGraphStore.getState().setNodeInputs('n1', [{ name: 'x', type: 'Vector' }])
+    expect(useGraphStore.getState().nodes[0].inputs).toEqual([{ name: 'x', type: 'Vector' }])
+    useGraphStore.getState().setNodeInputs('n1', [
+      { name: 'a', type: 'Numeric' },
+      { name: 'b', type: 'Vector' },
+    ])
+    expect(useGraphStore.getState().nodes[0].inputs).toEqual([
+      { name: 'a', type: 'Numeric' },
+      { name: 'b', type: 'Vector' },
+    ])
+  })
+
+  it('setGraph clears focusEditorForNodeId', () => {
+    useGraphStore.setState({ focusEditorForNodeId: 'some-id' })
+    useGraphStore.getState().setGraph([], [])
+    expect(useGraphStore.getState().focusEditorForNodeId).toBeNull()
   })
 
   it('setGraph replaces nodes and edges and clears pendingEdge', () => {

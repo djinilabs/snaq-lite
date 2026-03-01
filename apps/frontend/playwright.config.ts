@@ -14,6 +14,10 @@ export default defineConfig({
     baseURL,
     trace: process.env.CI ? 'on-first-retry' : 'on-first-retry',
     screenshot: 'only-on-failure',
+    // Optional: PLAYWRIGHT_SLOW_MO=500 to slow actions (ms) when watching with --headed
+    launchOptions: {
+      slowMo: Number(process.env.PLAYWRIGHT_SLOW_MO) || 0,
+    },
   },
   outputDir: 'test-results/playwright-output',
   ...(reuseServer

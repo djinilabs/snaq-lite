@@ -66,6 +66,13 @@ test.describe('canvas', () => {
     expect(filename).toMatch(/^project-[0-9a-f-]+\.snaq\.json$/i)
   })
 
+  test('Computation node shows Add input button (inputs UI is present)', async ({ page }) => {
+    await gotoCanvas(page)
+    await page.getByTestId('add-computation-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
+    await expect(page.getByTestId('computation-add-input')).toBeAttached()
+  })
+
   test('Delete selected removes selected node from canvas', async ({ page }) => {
     await gotoCanvas(page)
     await page.getByTestId('add-computation-btn').click()

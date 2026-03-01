@@ -5,6 +5,7 @@
 
 import type { NodeProps } from '@xyflow/react'
 import { Handle, Position } from '@xyflow/react'
+import { DRAG_HANDLE_CLASS_PRESENTATION, NODRAG_CLASS } from '~/lib/constants'
 import { PresentationBlock } from '~/components/presentation/presentation-block'
 
 export type PresentationBlockData = {
@@ -13,22 +14,49 @@ export type PresentationBlockData = {
   label?: string
 }
 
-export function PresentationBlockNode({ data }: NodeProps<{ data: PresentationBlockData }>) {
+export function PresentationBlockNode({
+  data,
+  selected,
+}: NodeProps<{ data: PresentationBlockData }>) {
   return (
     <div
+      className="nopan"
       data-testid="presentation-node"
       style={{
-        background: '#1e2d2e',
-        border: '1px solid #355',
-        borderRadius: 8,
-        minWidth: 240,
+        background: 'var(--bg-card)',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius)',
+        minWidth: 260,
         minHeight: 120,
-        padding: 8,
+        padding: 12,
+        boxShadow: 'var(--shadow)',
+        cursor: 'default',
+        ...(selected && {
+          outline: '2px solid var(--accent)',
+          outlineOffset: 2,
+        }),
       }}
     >
-      <div style={{ fontSize: 11, color: '#6a8' }}>{data.label ?? 'Presentation'}</div>
+      <div
+        className={DRAG_HANDLE_CLASS_PRESENTATION}
+        style={{
+          fontSize: 12,
+          color: 'var(--text-muted)',
+          marginBottom: 8,
+          fontWeight: 500,
+          cursor: 'grab',
+        }}
+      >
+        {data.label ?? 'Presentation'}
+      </div>
       <Handle type="target" position={Position.Left} id="input" />
-      <PresentationBlock sourceUri={data.sourceUri} />
+      <div
+        className={NODRAG_CLASS}
+        onPointerDown={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <PresentationBlock sourceUri={data.sourceUri} />
+      </div>
     </div>
   )
 }

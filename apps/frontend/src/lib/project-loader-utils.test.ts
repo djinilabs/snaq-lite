@@ -83,5 +83,23 @@ describe('project-loader-utils', () => {
       const nodes = snapshotToGraphNodes(snapshot)
       expect(nodes.map((n) => n.id)).toEqual(['a', 'b'])
     })
+
+    it('maps computation nodes with inputs to graph inputs', () => {
+      const snapshot = {
+        id: 'p',
+        nodes: [
+          {
+            id: 'n1',
+            position: { x: 0, y: 0 },
+            type: 'computation' as const,
+            content: '1 + 1',
+            inputs: [{ name: 'x', type: 'Vector' }],
+          },
+        ],
+        edges: [],
+      }
+      const nodes = snapshotToGraphNodes(snapshot)
+      expect(nodes[0].inputs).toEqual([{ name: 'x', type: 'Vector' }])
+    })
   })
 })

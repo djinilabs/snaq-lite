@@ -149,5 +149,20 @@ describe('project-storage', () => {
       const snapshot = buildSnapshotFromGraph('p', nodes, [])
       expect(snapshot.nodes[0]).not.toHaveProperty('content')
     })
+
+    it('includes inputs for computation nodes when present', () => {
+      const nodes = [
+        {
+          id: 'n1',
+          position: { x: 0, y: 0 },
+          type: 'computation' as const,
+          uri: 'snaq://graph/n1.sl',
+          initialContent: '1 + 1',
+          inputs: [{ name: 'x', type: 'Vector' }],
+        },
+      ]
+      const snapshot = buildSnapshotFromGraph('p', nodes, [])
+      expect(snapshot.nodes[0].inputs).toEqual([{ name: 'x', type: 'Vector' }])
+    })
   })
 })

@@ -5,12 +5,20 @@
 
 export type ProjectNodeType = 'computation' | 'presentation'
 
+/** Input port for a computation block (name used as $name in script and as targetInputName for edges). */
+export interface ProjectNodeInput {
+  name: string
+  type: string
+}
+
 export interface ProjectNode {
   id: string
   position: { x: number; y: number }
   type: ProjectNodeType
   /** Block text; only for computation nodes. */
   content?: string
+  /** Input ports; only for computation nodes. Editable in UI, not in block text. */
+  inputs?: ProjectNodeInput[]
 }
 
 export interface ProjectEdge {
@@ -47,11 +55,25 @@ export function parseProjectSnapshot(data: unknown): ProjectSnapshot | null {
     const pos = no.position
     if (pos == null || typeof pos !== 'object' || typeof (pos as { x?: unknown }).x !== 'number' || typeof (pos as { y?: unknown }).y !== 'number')
       return null
+    const inputs = no.inputs
+    const parsedInputs: ProjectNodeInput[] | undefined =
+      Array.isArray(inputs) && inputs.length > 0
+        ? inputs
+            .filter(
+              (i): i is ProjectNodeInput =>
+                i != null &&
+                typeof i === 'object' &&
+                typeof (i as ProjectNodeInput).name === 'string' &&
+                typeof (i as ProjectNodeInput).type === 'string',
+            )
+            .map((i) => ({ name: (i as ProjectNodeInput).name, type: (i as ProjectNodeInput).type }))
+        : undefined
     parsedNodes.push({
       id: no.id,
       position: { x: (pos as { x: number }).x, y: (pos as { y: number }).y },
       type: no.type as ProjectNodeType,
       content: typeof no.content === 'string' ? no.content : undefined,
+      inputs: parsedInputs,
     })
   }
   const parsedEdges: ProjectEdge[] = []

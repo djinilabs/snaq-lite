@@ -4,7 +4,7 @@ import react from 'eslint-plugin-react'
 import reactHooks from 'eslint-plugin-react-hooks'
 
 export default [
-  { ignores: ['dist/**', 'node_modules/**', 'public/lsp-wasm/**', 'e2e/**', '**/*.config.js', '**/*.config.ts'] },
+  { ignores: ['dist/**', 'node_modules/**', 'public/lsp-wasm/**', 'e2e/**', 'test-results/**', '**/*.config.js', '**/*.config.ts'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

@@ -20,5 +20,6 @@ export function snapshotToGraphNodes(snapshot: ProjectSnapshot): GraphNode[] {
     type: n.type,
     uri: nodeIdToUri(n.id),
     initialContent: n.type === 'computation' ? (n.content ?? '') : undefined,
+    inputs: n.type === 'computation' && n.inputs?.length ? n.inputs : undefined,
   }))
 }

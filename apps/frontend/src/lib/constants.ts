@@ -22,5 +22,8 @@ export const DRAG_HANDLE_CLASS_PRESENTATION = 'presentation-drag-handle'
 /** React Flow utility class; elements with this class do not start a node drag (so inner UI is clickable). */
 export const NODRAG_CLASS = 'nodrag'
 
+/** Prevents wheel from panning/zooming the canvas when over node content. */
+export const NOWHEEL_CLASS = 'nowheel'
+
 /** Allowed types for computation block input ports (use $name in script to reference). */
 export const INPUT_PORT_TYPES = ['Vector', 'Numeric', 'Symbolic', 'FuzzyBool', 'Undefined'] as const

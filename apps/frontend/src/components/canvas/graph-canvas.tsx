@@ -20,14 +20,11 @@ import {
 } from '@xyflow/react'
 import { connectEdge, disconnectEdge } from './edge-handlers'
 import { getDisconnectParamsForDeletedEdges } from './edge-delete-params'
+import { getDragHandleSelector } from './graph-drag-handle'
 import { getFlowNodeData } from './graph-node-data'
 import { ComputationBoxNode } from './computation-box-node'
 import { PresentationBlockNode } from './presentation-block-node'
 import '@xyflow/react/dist/style.css'
-import {
-  DRAG_HANDLE_CLASS_COMPUTATION,
-  DRAG_HANDLE_CLASS_PRESENTATION,
-} from '~/lib/constants'
 import { useGraphStore } from '~/store'
 
 const nodeTypes = {
@@ -114,10 +111,7 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
         ...graphNodeToFlowNode(n, storeNodes, storeEdges),
         position,
         selected: set.has(n.id),
-        dragHandle:
-          n.type === 'computation'
-            ? `.${DRAG_HANDLE_CLASS_COMPUTATION}`
-            : `.${DRAG_HANDLE_CLASS_PRESENTATION}`,
+        dragHandle: getDragHandleSelector(n.type),
       }
     })
   }, [storeNodes, storeEdges, selectedNodeIds, livePositions])

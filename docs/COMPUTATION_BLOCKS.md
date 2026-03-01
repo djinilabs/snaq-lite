@@ -12,6 +12,10 @@ Inputs are **properties of the block**, not part of the block text. You edit the
 
 You can add several inputs; each gets a port on the left side of the block. You can remove an input with the × button. The type is used for wiring: the app checks that the source block’s output type matches the input type (e.g. Vector → Vector).
 
+## Moving blocks
+
+To move a computation block, drag by its **title bar** (the “Computation” label at the top). The editor and input controls (name, type, + Add input) are clickable without moving the block.
+
 ## Example
 
 1. Add a computation block.

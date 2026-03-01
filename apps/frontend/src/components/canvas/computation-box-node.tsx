@@ -7,18 +7,15 @@
  */
 
 import { useState, useEffect, useRef } from 'react'
-import type { NodeProps } from '@xyflow/react'
+import type { Node, NodeProps } from '@xyflow/react'
 import { Handle, Position } from '@xyflow/react'
-import {
-  DRAG_HANDLE_CLASS_COMPUTATION,
-  INPUT_PORT_TYPES,
-  NODRAG_CLASS,
-} from '~/lib/constants'
+import { INPUT_PORT_TYPES } from '~/lib/constants'
 import type { NodeInputPort } from '~/lsp/types'
 import { useSubscribeWidget } from '~/hooks/use-subscribe-widget'
 import { useGraphStore, useWidgetStore } from '~/store'
 import { ComputationBoxEditor } from '~/components/editor/computation-box-editor'
 import { WidgetDataView } from '~/components/presentation/widget-data-view'
+import { NodeContentZone, NodeFrame } from './node-interaction-shell'
 import {
   computationNodeHandleTop,
   computationNodeMinHeight,
@@ -29,6 +26,8 @@ export type ComputationBoxData = {
   label?: string
 }
 
+type ComputationFlowNode = Node<ComputationBoxData, 'computation'>
+
 const PLACEHOLDER_MIN_HEIGHT = 60
 const RESULT_WIDGET_ID_PREFIX = 'computation-result-'
 
@@ -36,7 +35,7 @@ export function ComputationBoxNode({
   id,
   data,
   selected,
-}: NodeProps<{ data: ComputationBoxData }>) {
+}: NodeProps<ComputationFlowNode>) {
   const nodes = useGraphStore((s) => s.nodes)
   const setNodeInputs = useGraphStore((s) => s.setNodeInputs)
   const node = nodes.find((n) => n.id === id)
@@ -93,41 +92,15 @@ export function ComputationBoxNode({
   }
 
   return (
-    <div
-      className="nopan"
-      data-testid="computation-node"
-      style={{
-        background: 'var(--bg-card)',
-        border: '1px solid var(--border)',
-        borderRadius: 'var(--radius)',
-        minWidth: 260,
-        minHeight,
-        padding: 12,
-        boxShadow: 'var(--shadow)',
-        cursor: 'default',
-        ...(selected && {
-          outline: '2px solid var(--accent)',
-          outlineOffset: 2,
-        }),
-      }}
+    <NodeFrame
+      kind="computation"
+      nodeTestId="computation-node"
+      titleTestId="computation-drag-zone"
+      title={data.label ?? 'Computation'}
+      selected={selected}
+      minHeight={minHeight}
     >
-      <div
-        className={DRAG_HANDLE_CLASS_COMPUTATION}
-        style={{
-          fontSize: 12,
-          color: 'var(--text-muted)',
-          marginBottom: 8,
-          fontWeight: 500,
-          cursor: 'grab',
-        }}
-        title="Drag to move the block"
-      >
-        {data.label ?? 'Computation'}
-      </div>
-      <div
-        className={NODRAG_CLASS}
-        onPointerDown={(e) => e.stopPropagation()}
-        onMouseDown={(e) => e.stopPropagation()}
+      <NodeContentZone
         style={{
           fontSize: 11,
           color: 'var(--text-muted)',
@@ -137,11 +110,9 @@ export function ComputationBoxNode({
         title="Inputs are block properties. Use $name in the script."
       >
         Inputs
-      </div>
-      <div
-        className={`${NODRAG_CLASS} nowheel`}
-        onPointerDown={(e) => e.stopPropagation()}
-        onMouseDown={(e) => e.stopPropagation()}
+      </NodeContentZone>
+      <NodeContentZone
+        nowheel
         style={{
           marginBottom: 8,
           display: 'flex',
@@ -231,7 +202,7 @@ export function ComputationBoxNode({
         >
           + Add input
         </button>
-      </div>
+      </NodeContentZone>
       {inputs.map(
         (inp, i) =>
           inp.name ? (
@@ -245,11 +216,10 @@ export function ComputationBoxNode({
           ) : null,
       )}
       <Handle type="source" position={Position.Right} id="output" />
-      <div
+      <NodeContentZone
         ref={editorWrapRef}
-        className={`${NODRAG_CLASS} nowheel`}
-        onPointerDown={(e) => e.stopPropagation()}
-        onMouseDown={(e) => e.stopPropagation()}
+        nowheel
+        data-testid="computation-editor-zone"
         style={{
           width: '100%',
           minHeight: PLACEHOLDER_MIN_HEIGHT,
@@ -283,12 +253,9 @@ export function ComputationBoxNode({
             …
           </div>
         )}
-      </div>
-      <div
-        className={NODRAG_CLASS}
+      </NodeContentZone>
+      <NodeContentZone
         data-testid="computation-result"
-        onPointerDown={(e) => e.stopPropagation()}
-        onMouseDown={(e) => e.stopPropagation()}
         style={{
           marginTop: 10,
           paddingTop: 8,
@@ -300,7 +267,7 @@ export function ComputationBoxNode({
           Result
         </div>
         <WidgetDataView state={resultState} />
-      </div>
-    </div>
+      </NodeContentZone>
+    </NodeFrame>
   )
 }

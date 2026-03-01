@@ -13,6 +13,7 @@ import {
   DRAG_HANDLE_CLASS_COMPUTATION,
   DRAG_HANDLE_CLASS_PRESENTATION,
   NODRAG_CLASS,
+  NOWHEEL_CLASS,
   INPUT_PORT_TYPES,
 } from './constants'
 
@@ -42,8 +43,9 @@ describe('constants', () => {
     expect(DRAG_HANDLE_CLASS_PRESENTATION).toBe('presentation-drag-handle')
   })
 
-  it('NODRAG_CLASS is non-empty', () => {
+  it('NODRAG_CLASS and NOWHEEL_CLASS are non-empty', () => {
     expect(NODRAG_CLASS).toBe('nodrag')
+    expect(NOWHEEL_CLASS).toBe('nowheel')
   })
 
   it('INPUT_PORT_TYPES includes Vector and Numeric', () => {

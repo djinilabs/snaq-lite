@@ -44,6 +44,7 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
 
   return (
     <div
+      data-testid="canvas-toolbar"
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -53,11 +54,12 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
         borderBottom: '1px solid #333',
       }}
     >
-      <Link to="/" style={{ color: '#8ab4f8', textDecoration: 'none' }}>
+      <Link to="/" data-testid="back-to-projects" style={{ color: '#8ab4f8', textDecoration: 'none' }}>
         Back to projects
       </Link>
       <button
         type="button"
+        data-testid="save-btn"
         onClick={saveCurrent}
         style={{
           padding: '4px 10px',
@@ -72,6 +74,7 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
       </button>
       <button
         type="button"
+        data-testid="export-btn"
         onClick={handleExport}
         style={{
           padding: '4px 10px',
@@ -87,6 +90,7 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
       <span style={{ width: 1, height: 16, background: '#555', marginLeft: 4 }} />
       <button
         type="button"
+        data-testid="add-computation-btn"
         onClick={() => onAddNode?.('computation')}
         style={{
           padding: '4px 10px',
@@ -101,6 +105,7 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
       </button>
       <button
         type="button"
+        data-testid="add-presentation-btn"
         onClick={() => onAddNode?.('presentation')}
         style={{
           padding: '4px 10px',
@@ -116,6 +121,7 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
       {onDeleteSelected && (
         <button
           type="button"
+          data-testid="delete-selected-btn"
           onClick={onDeleteSelected}
           disabled={!hasSelection}
           style={{
@@ -133,6 +139,7 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
       <span style={{ width: 1, height: 16, background: '#555', marginLeft: 4 }} />
       <button
         type="button"
+        data-testid="rename-btn"
         onClick={() => {
           const name = window.prompt('Project name', meta?.name ?? '')
           if (name != null) updateProjectName(projectId, name)
@@ -150,6 +157,7 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
       </button>
       <button
         type="button"
+        data-testid="delete-project-btn"
         onClick={() => {
           if (window.confirm('Delete this project? This cannot be undone.')) {
             removeProject(projectId)

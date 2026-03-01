@@ -62,6 +62,7 @@ export function ComputationBoxNode({ id, data }: NodeProps<{ data: ComputationBo
 
   return (
     <div
+      data-testid="computation-node"
       style={{
         background: '#2d2d44',
         border: '1px solid #444',

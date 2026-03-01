@@ -56,3 +56,9 @@ jobs:
 
       - name: Test frontend
         run: pnpm run test:frontend
+
+      - name: Install Playwright browsers (E2E)
+        run: pnpm -C apps/frontend exec playwright install --with-deps chromium
+
+      - name: Run frontend E2E (Playwright smoketest)
+        run: pnpm run smoketest

@@ -49,6 +49,9 @@ coverage/
 *.lcov
 tarpaulin-report.html
 cargo-tarpaulin.stderr
+# Playwright / E2E
+apps/frontend/test-results/
+e2e-artifacts/
 
 # Logs and temp
 *.log

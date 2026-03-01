@@ -10,7 +10,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint . --max-warnings 0",
-    "lint:fix": "eslint . --max-warnings 0 --fix"
+    "lint:fix": "eslint . --max-warnings 0 --fix",
+    "smoketest": "playwright test",
+    "smoketest:dev": "PLAYWRIGHT_REUSE_SERVER=1 playwright test"
   },
   "dependencies": {
     "@tanstack/react-router": "^1.163.0",
@@ -37,6 +39,7 @@
     "typescript-eslint": "^8.15.0",
     "vite": "^7.0.0",
     "vite-tsconfig-paths": "^5.0.0",
-    "vitest": "^2.0.0"
+    "vitest": "^2.0.0",
+    "@playwright/test": "^1.49.0"
   }
 }

@@ -54,18 +54,23 @@ function graphEdgeToFlowEdge(e: import('~/store').GraphEdge): Edge {
 
 export interface GraphCanvasProps {
   onSelectionChange?: OnSelectionChangeFunc
+  /** Synced into node.selected so React Flow selection matches app state (e.g. toolbar Delete). */
+  selectedNodeIds?: string[]
 }
 
 export function GraphCanvas(props: GraphCanvasProps = {}) {
-  const { onSelectionChange } = props
+  const { onSelectionChange, selectedNodeIds = [] } = props
   const storeNodes = useGraphStore((s) => s.nodes)
   const storeEdges = useGraphStore((s) => s.edges)
   const moveNode = useGraphStore((s) => s.moveNode)
 
-  const nodes = useMemo(
-    () => storeNodes.map((n) => graphNodeToFlowNode(n, storeNodes, storeEdges)),
-    [storeNodes, storeEdges],
-  )
+  const nodes = useMemo(() => {
+    const set = new Set(selectedNodeIds)
+    return storeNodes.map((n) => ({
+      ...graphNodeToFlowNode(n, storeNodes, storeEdges),
+      selected: set.has(n.id),
+    }))
+  }, [storeNodes, storeEdges, selectedNodeIds])
   const edges = useMemo(
     () => storeEdges.map(graphEdgeToFlowEdge),
     [storeEdges],

@@ -37,6 +37,7 @@ After completing a task (or significant step), you must:
 1. After making new code or code changes, run **tests** and **lint** (both must pass): from root, `pnpm test` (backend: cargo test + wasm-pack test; frontend: vitest) and `pnpm run lint` (backend: cargo clippy; frontend: ESLint). Clippy is part of lint, not test.
 1.1. When changing the frontend (apps/frontend), also run `pnpm test`, `pnpm run lint`, and `pnpm build` there; they must pass.
 1.2. From repo root, `pnpm test` runs backend then frontend tests; `pnpm build` builds both; `pnpm dev` / `pnpm preview` run the frontend app.
+1.3. When changing UI or user-facing flows, run `pnpm smoketest` (or `pnpm smoketest:dev` if the dev server is already running) and ensure it passes.
 
 ## Unit tests
 

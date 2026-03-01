@@ -16,6 +16,7 @@ export type PresentationBlockData = {
 export function PresentationBlockNode({ data }: NodeProps<{ data: PresentationBlockData }>) {
   return (
     <div
+      data-testid="presentation-node"
       style={{
         background: '#1e2d2e',
         border: '1px solid #355',

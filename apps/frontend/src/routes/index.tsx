@@ -2,6 +2,7 @@ import { useMemo, useRef } from 'react'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { importProjectFile } from '~/lib/export-import'
 import { setProjectSnapshot } from '~/lib/project-storage'
+import { sortProjectsByUpdatedAt } from '~/lib/project-list-sort'
 import { useProjectsIndexStore, useUIStore } from '~/store'
 
 export const Route = createFileRoute('/')({
@@ -11,10 +12,7 @@ export const Route = createFileRoute('/')({
 function ProjectListPage() {
   const navigate = useNavigate()
   const projects = useProjectsIndexStore((s) => s.projects)
-  const sortedProjects = useMemo(
-    () => [...projects].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)),
-    [projects],
-  )
+  const sortedProjects = useMemo(() => sortProjectsByUpdatedAt(projects), [projects])
   const addProject = useProjectsIndexStore((s) => s.addProject)
   const removeProject = useProjectsIndexStore((s) => s.removeProject)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -54,6 +52,7 @@ function ProjectListPage() {
 
   return (
     <div
+      data-testid="project-list-page"
       style={{
         minHeight: '100vh',
         background: '#1e1e2e',
@@ -65,6 +64,7 @@ function ProjectListPage() {
       <div style={{ display: 'flex', gap: 12, marginBottom: 24 }}>
         <button
           type="button"
+          data-testid="new-project-btn"
           onClick={handleNewProject}
           style={{
             padding: '8px 16px',
@@ -79,6 +79,7 @@ function ProjectListPage() {
         </button>
         <button
           type="button"
+          data-testid="import-btn"
           onClick={handleImport}
           style={{
             padding: '8px 16px',
@@ -97,15 +98,18 @@ function ProjectListPage() {
           accept=".json,.snaq.json"
           style={{ display: 'none' }}
           onChange={onFileChange}
+          data-testid="import-file-input"
         />
       </div>
       {sortedProjects.length === 0 ? (
         <p style={{ color: '#888' }}>No projects yet. Create one or import a file.</p>
       ) : (
-        <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+        <ul data-testid="project-list" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
           {sortedProjects.map((p) => (
             <li
               key={p.id}
+              data-testid="project-item"
+              data-project-id={p.id}
               style={{
                 display: 'flex',
                 alignItems: 'center',

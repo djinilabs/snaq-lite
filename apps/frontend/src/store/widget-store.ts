@@ -22,6 +22,7 @@ interface WidgetStoreState {
   byId: Record<string, WidgetState>
   setWidget: (widgetId: string, state: WidgetState) => void
   removeWidget: (widgetId: string) => void
+  clearAll: () => void
 }
 
 /**
@@ -67,4 +68,5 @@ export const useWidgetStore = create<WidgetStoreState>((set) => ({
       delete next[widgetId]
       return { byId: next }
     }),
+  clearAll: () => set({ byId: {} }),
 }))

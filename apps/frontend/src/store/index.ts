@@ -1,5 +1,6 @@
 export { useGraphStore } from './graph-store'
 export type { GraphNode, GraphEdge, PendingEdge, NodeType } from './graph-store'
+export { useProjectsIndexStore } from './projects-index-store'
 export { useUIStore } from './ui-store'
 export type { Toast } from './ui-store'
 export { useWidgetStore } from './widget-store'

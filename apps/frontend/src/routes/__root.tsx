@@ -1,4 +1,5 @@
 /// <reference types="vite/client" />
+import { useEffect } from 'react'
 import type { ReactNode } from 'react'
 import {
   Outlet,
@@ -7,6 +8,7 @@ import {
   Scripts,
 } from '@tanstack/react-router'
 import { LspProvider } from '~/components/lsp-provider'
+import { useProjectsIndexStore } from '~/store'
 
 export const Route = createRootRoute({
   head: () => ({
@@ -20,6 +22,10 @@ export const Route = createRootRoute({
 })
 
 function RootComponent() {
+  const hydrate = useProjectsIndexStore((s) => s.hydrate)
+  useEffect(() => {
+    hydrate()
+  }, [hydrate])
   return (
     <RootDocument>
       <LspProvider>

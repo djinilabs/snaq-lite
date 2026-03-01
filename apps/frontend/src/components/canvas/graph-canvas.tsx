@@ -13,6 +13,7 @@ import {
   type Node,
   type Edge,
   type NodeChange,
+  type OnSelectionChangeFunc,
 } from '@xyflow/react'
 import { connectEdge, disconnectEdge } from './edge-handlers'
 import { getDisconnectParamsForDeletedEdges } from './edge-delete-params'
@@ -51,7 +52,12 @@ function graphEdgeToFlowEdge(e: import('~/store').GraphEdge): Edge {
   }
 }
 
-export function GraphCanvas() {
+export interface GraphCanvasProps {
+  onSelectionChange?: OnSelectionChangeFunc
+}
+
+export function GraphCanvas(props: GraphCanvasProps = {}) {
+  const { onSelectionChange } = props
   const storeNodes = useGraphStore((s) => s.nodes)
   const storeEdges = useGraphStore((s) => s.edges)
   const moveNode = useGraphStore((s) => s.moveNode)
@@ -107,6 +113,7 @@ export function GraphCanvas() {
         onNodesChange={onNodesChange}
         onConnect={onConnect}
         onEdgesDelete={onEdgesDelete}
+        onSelectionChange={onSelectionChange}
         nodeTypes={nodeTypes}
         fitView
       >

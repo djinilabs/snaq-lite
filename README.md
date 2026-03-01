@@ -55,7 +55,7 @@ Use `run_with_registry(input, &UnitRegistry)` (and optional symbol registry) for
 - **snaq-lite-lang** — Core library (parser, AST, eval). Platform-agnostic.
 - **snaq-lite-cli** — Native CLI binary.
 - **snaq-lite-wasm** — WASM build for the web.
-- **apps/frontend** — TanStack Start SPA; LSP in a Web Worker (WASM). Uses pnpm.
+- **apps/frontend** — TanStack Start SPA; LSP in a Web Worker (WASM). Multiple projects (create, rename, delete, export/import); each project is a canvas of computation and presentation blocks. Uses pnpm.
 
 ---
 

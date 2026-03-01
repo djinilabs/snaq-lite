@@ -1,0 +1,87 @@
+import { describe, it, expect } from 'vitest'
+import { isValidUuid, snapshotToGraphNodes } from './project-loader-utils'
+import { VIRTUAL_URI_PREFIX } from './constants'
+
+describe('project-loader-utils', () => {
+  describe('isValidUuid', () => {
+    it('accepts valid RFC 4122 UUIDs', () => {
+      expect(isValidUuid('550e8400-e29b-41d4-a716-446655440000')).toBe(true)
+      expect(isValidUuid('6ba7b810-9dad-11d1-80b4-00c04fd430c8')).toBe(true)
+      expect(isValidUuid('01234567-89ab-4def-8123-456789abcdef')).toBe(true)
+    })
+
+    it('rejects empty or non-string', () => {
+      expect(isValidUuid('')).toBe(false)
+    })
+
+    it('rejects invalid format', () => {
+      expect(isValidUuid('not-a-uuid')).toBe(false)
+      expect(isValidUuid('550e8400e29b41d4a716446655440000')).toBe(false)
+      expect(isValidUuid('550e8400-e29b-41d4-a716')).toBe(false)
+    })
+
+    it('rejects wrong variant (first digit of third group must be 1-5)', () => {
+      expect(isValidUuid('550e8400-e29b-61d4-a716-446655440000')).toBe(false)
+    })
+
+    it('rejects wrong version (second digit of third group 89ab for version 4)', () => {
+      expect(isValidUuid('550e8400-e29b-41d4-c716-446655440000')).toBe(false)
+    })
+  })
+
+  describe('snapshotToGraphNodes', () => {
+    it('maps computation nodes with content to initialContent', () => {
+      const snapshot = {
+        id: 'p',
+        nodes: [
+          { id: 'n1', position: { x: 0, y: 0 }, type: 'computation' as const, content: '1 + 1' },
+        ],
+        edges: [],
+      }
+      const nodes = snapshotToGraphNodes(snapshot)
+      expect(nodes).toHaveLength(1)
+      expect(nodes[0].id).toBe('n1')
+      expect(nodes[0].position).toEqual({ x: 0, y: 0 })
+      expect(nodes[0].type).toBe('computation')
+      expect(nodes[0].uri).toBe(`${VIRTUAL_URI_PREFIX}n1.sl`)
+      expect(nodes[0].initialContent).toBe('1 + 1')
+    })
+
+    it('maps computation nodes without content to empty string initialContent', () => {
+      const snapshot = {
+        id: 'p',
+        nodes: [{ id: 'n1', position: { x: 0, y: 0 }, type: 'computation' as const }],
+        edges: [],
+      }
+      const nodes = snapshotToGraphNodes(snapshot)
+      expect(nodes[0].initialContent).toBe('')
+    })
+
+    it('maps presentation nodes without initialContent', () => {
+      const snapshot = {
+        id: 'p',
+        nodes: [
+          { id: 'n2', position: { x: 100, y: 50 }, type: 'presentation' as const, content: 'ignored' },
+        ],
+        edges: [],
+      }
+      const nodes = snapshotToGraphNodes(snapshot)
+      expect(nodes[0].type).toBe('presentation')
+      expect(nodes[0].uri).toBe(`${VIRTUAL_URI_PREFIX}n2.sl`)
+      expect(nodes[0].initialContent).toBeUndefined()
+    })
+
+    it('maps multiple nodes and preserves order', () => {
+      const snapshot = {
+        id: 'p',
+        nodes: [
+          { id: 'a', position: { x: 0, y: 0 }, type: 'computation' as const },
+          { id: 'b', position: { x: 1, y: 1 }, type: 'presentation' as const },
+        ],
+        edges: [],
+      }
+      const nodes = snapshotToGraphNodes(snapshot)
+      expect(nodes.map((n) => n.id)).toEqual(['a', 'b'])
+    })
+  })
+})

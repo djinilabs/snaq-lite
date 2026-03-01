@@ -103,4 +103,11 @@ describe('widget-store', () => {
       payload: { message: 'parse error' },
     })
   })
+
+  it('clearAll empties byId', () => {
+    useWidgetStore.getState().setWidget('w1', { status: 'Running' })
+    useWidgetStore.getState().setWidget('w2', { status: 'Completed' })
+    useWidgetStore.getState().clearAll()
+    expect(useWidgetStore.getState().byId).toEqual({})
+  })
 })

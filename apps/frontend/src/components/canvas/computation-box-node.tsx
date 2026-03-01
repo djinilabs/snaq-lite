@@ -98,6 +98,7 @@ export function ComputationBoxNode({ id, data }: NodeProps<{ data: ComputationBo
             visible
             width={editorSize.width}
             height={editorSize.height}
+            initialContent={node?.initialContent ?? ''}
           />
         ) : (
           <div

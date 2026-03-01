@@ -4,6 +4,7 @@
  */
 
 import type * as Monaco from 'monaco-editor'
+import { nodeIdToUri } from './virtual-uri'
 
 const models = new Map<string, Monaco.editor.ITextModel>()
 
@@ -33,4 +34,11 @@ export function disposeModel(uri: string): void {
 
 export function hasModel(uri: string): boolean {
   return models.has(uri)
+}
+
+/** Dispose all models for the given node IDs (e.g. on project switch). */
+export function disposeAllGraphModels(nodeIds: string[]): void {
+  for (const id of nodeIds) {
+    disposeModel(nodeIdToUri(id))
+  }
 }

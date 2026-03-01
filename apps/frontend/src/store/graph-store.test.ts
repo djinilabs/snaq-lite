@@ -115,4 +115,46 @@ describe('graph-store', () => {
     useGraphStore.getState().applyNodeSignature('snaq://graph/n1.sl', [], null)
     expect(useGraphStore.getState().nodes[0].outputType).toBeNull()
   })
+
+  it('setGraph replaces nodes and edges and clears pendingEdge', () => {
+    useGraphStore.getState().addNode({
+      id: 'old',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/old.sl',
+    })
+    useGraphStore.getState().setPendingEdge({
+      sourceId: 'old',
+      sourceHandle: null,
+      targetPosition: { x: 1, y: 1 },
+    })
+    const nodes = [
+      {
+        id: 'a',
+        position: { x: 10, y: 20 },
+        type: 'computation' as const,
+        uri: 'snaq://graph/a.sl',
+      },
+    ]
+    const edges = [{ sourceId: 'a', targetId: 'b', targetInputName: 'x' }]
+    useGraphStore.getState().setGraph(nodes, edges)
+    expect(useGraphStore.getState().nodes).toHaveLength(1)
+    expect(useGraphStore.getState().nodes[0]).toMatchObject({ id: 'a', position: { x: 10, y: 20 } })
+    expect(useGraphStore.getState().edges).toEqual(edges)
+    expect(useGraphStore.getState().pendingEdge).toBeNull()
+  })
+
+  it('setGraph preserves initialContent on nodes', () => {
+    const nodes = [
+      {
+        id: 'n1',
+        position: { x: 0, y: 0 },
+        type: 'computation' as const,
+        uri: 'snaq://graph/n1.sl',
+        initialContent: '2 + 2',
+      },
+    ]
+    useGraphStore.getState().setGraph(nodes, [])
+    expect(useGraphStore.getState().nodes[0].initialContent).toBe('2 + 2')
+  })
 })

@@ -1,0 +1,84 @@
+/**
+ * LocalStorage persistence for projects index and per-project snapshots.
+ * Serialization builds ProjectSnapshot from graph store state and Monaco model content.
+ */
+
+import { getModel } from '~/editor/text-model-registry'
+import { nodeIdToUri } from '~/editor/virtual-uri'
+import type { GraphEdge, GraphNode } from '~/store'
+import type { ProjectSnapshot } from '~/types/project'
+import { parseProjectSnapshot } from '~/types/project'
+
+/** Storage keys; exported for tests and shared usage. */
+export const PROJECTS_INDEX_KEY = 'snaq-projects-index'
+export const PROJECT_KEY_PREFIX = 'snaq-project-'
+
+export interface ProjectMeta {
+  id: string
+  name?: string
+  updatedAt?: number
+}
+
+export function getProjectsIndex(): ProjectMeta[] {
+  try {
+    const raw = localStorage.getItem(PROJECTS_INDEX_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter(
+      (p): p is ProjectMeta =>
+        p != null && typeof p === 'object' && typeof (p as ProjectMeta).id === 'string',
+    )
+  } catch {
+    return []
+  }
+}
+
+export function setProjectsIndex(meta: ProjectMeta[]): void {
+  localStorage.setItem(PROJECTS_INDEX_KEY, JSON.stringify(meta))
+}
+
+export function getProjectSnapshot(projectId: string): ProjectSnapshot | null {
+  try {
+    const raw = localStorage.getItem(PROJECT_KEY_PREFIX + projectId)
+    if (!raw) return null
+    return parseProjectSnapshot(JSON.parse(raw))
+  } catch {
+    return null
+  }
+}
+
+export function setProjectSnapshot(snapshot: ProjectSnapshot): void {
+  localStorage.setItem(PROJECT_KEY_PREFIX + snapshot.id, JSON.stringify(snapshot))
+}
+
+export function deleteProjectSnapshot(projectId: string): void {
+  localStorage.removeItem(PROJECT_KEY_PREFIX + projectId)
+}
+
+/**
+ * Build a ProjectSnapshot from current graph nodes and edges.
+ * Node content comes from Monaco model if present, else node.initialContent or ''.
+ */
+export function buildSnapshotFromGraph(
+  projectId: string,
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+): ProjectSnapshot {
+  const projectNodes = nodes.map((n) => {
+    const model = getModel(nodeIdToUri(n.id), undefined as never)
+    const content = model ? model.getValue() : n.initialContent ?? ''
+    return {
+      id: n.id,
+      position: n.position,
+      type: n.type,
+      ...(n.type === 'computation' && content ? { content } : {}),
+    }
+  })
+  return {
+    id: projectId,
+    version: 1,
+    nodes: projectNodes,
+    edges: edges.map((e) => ({ sourceId: e.sourceId, targetId: e.targetId, targetInputName: e.targetInputName })),
+  }
+}

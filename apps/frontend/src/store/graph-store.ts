@@ -17,6 +17,8 @@ export interface GraphNode {
   /** From LSP nodeSignatureUpdated */
   inputs?: NodeInputPort[]
   outputType?: string | null
+  /** Initial block content when loading a project; Monaco is source of truth after first edit. */
+  initialContent?: string
 }
 
 export interface GraphEdge {
@@ -43,6 +45,8 @@ interface GraphState {
   setPendingEdge: (edge: PendingEdge | null) => void
   clearPendingEdge: () => void
   applyNodeSignature: (uri: string, inputs: NodeInputPort[], outputType?: string | null) => void
+  /** Replace entire graph (e.g. when loading a project). Clears pendingEdge. */
+  setGraph: (nodes: GraphNode[], edges: GraphEdge[]) => void
 }
 
 export const useGraphStore = create<GraphState>((set) => ({
@@ -91,4 +95,7 @@ export const useGraphStore = create<GraphState>((set) => ({
         n.uri === uri ? { ...n, inputs, outputType: outputType ?? null } : n,
       ),
     })),
+
+  setGraph: (nodes, edges) =>
+    set({ nodes, edges, pendingEdge: null }),
 }))

@@ -24,10 +24,43 @@ interface WidgetStoreState {
   removeWidget: (widgetId: string) => void
 }
 
+/**
+ * Merges incoming state with current: appends elements when both are Running with elements;
+ * otherwise returns incoming (replaces on Completed/Cancelled/Error or first Running).
+ */
+function mergeWidgetState(
+  current: WidgetState | undefined,
+  incoming: WidgetState,
+): WidgetState {
+  if (incoming.status !== 'Running' || incoming.payload?.elements == null) {
+    return incoming
+  }
+  if (
+    current?.status === 'Running' &&
+    current.payload?.elements != null
+  ) {
+    const accumulated = [...current.payload.elements, ...incoming.payload.elements]
+    return {
+      status: 'Running',
+      payload: {
+        ...incoming.payload,
+        elements: accumulated,
+        offset: incoming.payload.offset,
+        count: accumulated.length,
+      },
+    }
+  }
+  return incoming
+}
+
 export const useWidgetStore = create<WidgetStoreState>((set) => ({
   byId: {},
   setWidget: (widgetId, state) =>
-    set((s) => ({ byId: { ...s.byId, [widgetId]: state } })),
+    set((s) => {
+      const current = s.byId[widgetId]
+      const merged = mergeWidgetState(current, state)
+      return { byId: { ...s.byId, [widgetId]: merged } }
+    }),
   removeWidget: (widgetId) =>
     set((s) => {
       const next = { ...s.byId }

@@ -16,26 +16,28 @@ import {
 } from '@xyflow/react'
 import { connectEdge, disconnectEdge } from './edge-handlers'
 import { getDisconnectParamsForDeletedEdges } from './edge-delete-params'
-import '@xyflow/react/dist/style.css'
-import { useGraphStore } from '~/store'
+import { getFlowNodeData } from './graph-node-data'
 import { ComputationBoxNode } from './computation-box-node'
 import { PresentationBlockNode } from './presentation-block-node'
+import '@xyflow/react/dist/style.css'
+import { useGraphStore } from '~/store'
 
 const nodeTypes = {
   computation: ComputationBoxNode,
   presentation: PresentationBlockNode,
 } as const
 
-function graphNodeToFlowNode(n: import('~/store').GraphNode): Node {
+function graphNodeToFlowNode(
+  n: import('~/store').GraphNode,
+  storeNodes: import('~/store').GraphNode[],
+  storeEdges: import('~/store').GraphEdge[],
+): Node {
+  const data = getFlowNodeData(n, storeNodes, storeEdges)
   return {
     id: n.id,
     type: n.type,
     position: n.position,
-    data: {
-      uri: n.uri,
-      label: n.id,
-      sourceUri: n.uri,
-    },
+    data,
   }
 }
 
@@ -55,8 +57,8 @@ export function GraphCanvas() {
   const moveNode = useGraphStore((s) => s.moveNode)
 
   const nodes = useMemo(
-    () => storeNodes.map(graphNodeToFlowNode),
-    [storeNodes],
+    () => storeNodes.map((n) => graphNodeToFlowNode(n, storeNodes, storeEdges)),
+    [storeNodes, storeEdges],
   )
   const edges = useMemo(
     () => storeEdges.map(graphEdgeToFlowEdge),

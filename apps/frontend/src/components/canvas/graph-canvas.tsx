@@ -137,15 +137,6 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
-      setLivePositions((prev) => {
-        const next = { ...prev }
-        for (const ch of changes) {
-          if (ch.type !== 'position' || !ch.position) continue
-          if (ch.dragging === false) delete next[ch.id]
-          else next[ch.id] = ch.position
-        }
-        return next
-      })
       for (const ch of changes) {
         if (ch.type === 'position' && ch.dragging === false && ch.position) {
           moveNode(ch.id, ch.position)

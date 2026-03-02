@@ -155,11 +155,16 @@ export const useGraphStore = create<GraphState>((set) => ({
   setFocusEditorForNodeId: (focusEditorForNodeId) => set({ focusEditorForNodeId }),
 
   applyNodeSignature: (uri, _inputs, outputType) =>
-    set((state) => ({
-      nodes: state.nodes.map((n) =>
-        n.uri === uri ? { ...n, outputType: outputType ?? null } : n,
-      ),
-    })),
+    set((state) => {
+      const node = state.nodes.find((n) => n.uri === uri)
+      const nextOutput = outputType ?? null
+      if (!node || node.outputType === nextOutput) return state
+      return {
+        nodes: state.nodes.map((n) =>
+          n.uri === uri ? { ...n, outputType: nextOutput } : n,
+        ),
+      }
+    }),
 
   setNodeInputs: (nodeId, inputs) =>
     set((state) => {

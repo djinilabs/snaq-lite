@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 
 const E2E_LSP_LOG = '__E2E_LSP_LOG__'
+const FOCUS_DEBUG_LOG = '__FOCUS_DEBUG_LOG__'
 
 /** Navigate to app root and create a new project so the canvas is visible. */
 async function gotoCanvas(page: Page): Promise<void> {
@@ -146,5 +147,171 @@ test.describe('computation result (editor–worker–LSP)', () => {
     )
     expect(widgetUpdate?.params).toBeDefined()
     expect((widgetUpdate?.params as { status?: string })?.status).toBe('Completed')
+  })
+
+  test('focus: log when focus is lost and correlate with React events', async ({ page }) => {
+    test.setTimeout(25_000)
+    await page.addInitScript(() => {
+      const w = window as unknown as Record<string, unknown>
+      w['__FOCUS_DEBUG__'] = true
+      w['__FOCUS_DEBUG_LOG__'] = [] as Array<{ t: number; event: string; nodeId?: string; activeElementTag?: string; relatedTargetTag?: string }>
+    })
+    await gotoCanvas(page)
+    await page.getByTestId('add-computation-btn').click()
+    const editorZone = page.getByTestId('computation-editor-zone').first()
+    await expect(editorZone).toBeVisible({ timeout: 10_000 })
+
+    await page.evaluate((key) => {
+      const w = window as unknown as Record<string, unknown>
+      if (Array.isArray(w[key])) (w[key] as unknown[]).length = 0
+    }, FOCUS_DEBUG_LOG)
+
+    await editorZone.click()
+    await page.waitForTimeout(300)
+    await page.keyboard.type('4')
+    await page.waitForTimeout(200)
+    await page.keyboard.type('2')
+    await page.waitForTimeout(2500)
+
+    const result = await page.evaluate(
+      (logKey) => {
+        const w = window as unknown as Record<string, unknown>
+        const log = (w[logKey] as Array<{ t: number; event: string; nodeId?: string; activeElementTag?: string; relatedTargetTag?: string }>) ?? []
+        const t0 = log[0]?.t ?? 0
+        const active = document.activeElement
+        const editorRoot = document.querySelector('.computation-box-editor-root')
+        const focusInEditor = editorRoot != null && active != null && editorRoot.contains(active)
+        return {
+          log: log.map((e) => ({
+            ...e,
+            dt: e.t - t0,
+          })),
+          activeElementTag: active?.tagName ?? null,
+          activeElementClassName: active?.className ?? null,
+          focusInEditor,
+        }
+      },
+      FOCUS_DEBUG_LOG,
+    )
+
+    const focusLostEvents = result.log.filter((e) => e.event === 'editor-focus-lost')
+    const nodeRenders = result.log.filter((e) => e.event === 'node-render')
+    const editorRenders = result.log.filter((e) => e.event === 'editor-render')
+
+    console.log('--- Focus debug: event sequence (dt = ms since first event) ---')
+    result.log.forEach((e) => console.log(JSON.stringify(e)))
+    console.log('--- Focus in editor after typing? ---', result.focusInEditor)
+    console.log('--- activeElement ---', result.activeElementTag, result.activeElementClassName)
+    console.log('--- editor-focus-lost count ---', focusLostEvents.length)
+    console.log('--- node-render count ---', nodeRenders.length)
+    console.log('--- editor-render count ---', editorRenders.length)
+    if (focusLostEvents.length > 0) {
+      console.log('--- editor-focus-lost events (correlate with renders above) ---')
+      focusLostEvents.forEach((e) => console.log(JSON.stringify(e)))
+    }
+
+    expect(result.focusInEditor, 'Editor should retain focus after typing; see console for event log').toBe(true)
+  })
+
+  test('focus: repeatedly typing same digit reproduces focus loss and logs correlation', async ({ page }) => {
+    test.setTimeout(60_000)
+    await page.addInitScript(() => {
+      const w = window as unknown as Record<string, unknown>
+      w['__FOCUS_DEBUG__'] = true
+      w['__FOCUS_DEBUG_LOG__'] = [] as Array<{ t: number; event: string; nodeId?: string; activeElementTag?: string; relatedTargetTag?: string }>
+    })
+    await gotoCanvas(page)
+    await page.getByTestId('add-computation-btn').click()
+    const editorZone = page.getByTestId('computation-editor-zone').first()
+    await expect(editorZone).toBeVisible({ timeout: 10_000 })
+
+    await page.evaluate((key) => {
+      const w = window as unknown as Record<string, unknown>
+      if (Array.isArray(w[key])) (w[key] as unknown[]).length = 0
+    }, FOCUS_DEBUG_LOG)
+
+    await editorZone.click()
+    await page.waitForTimeout(400)
+
+    const REPEAT = 50
+    const DELAY_MS = 80
+    let lostAtKeystroke: number | null = null
+
+    for (let i = 0; i < REPEAT; i++) {
+      await page.keyboard.press('4')
+      await page.waitForTimeout(DELAY_MS)
+      const snapshot = await page.evaluate(
+        (logKey) => {
+          const w = window as unknown as Record<string, unknown>
+          const log = (w[logKey] as Array<{ t: number; event: string; nodeId?: string; activeElementTag?: string; relatedTargetTag?: string }>) ?? []
+          const active = document.activeElement
+          const editorRoot = document.querySelector('.computation-box-editor-root')
+          const focusInEditor = editorRoot != null && active != null && editorRoot.contains(active)
+          const t0 = log[0]?.t ?? 0
+          return {
+            focusInEditor,
+            activeTag: active?.tagName ?? null,
+            log: log.map((e) => ({ ...e, dt: e.t - t0 })),
+            focusLostCount: log.filter((e) => e.event === 'editor-focus-lost').length,
+          }
+        },
+        FOCUS_DEBUG_LOG,
+      )
+      if (!snapshot.focusInEditor) {
+        lostAtKeystroke = i + 1
+        break
+      }
+    }
+
+    const result = await page.evaluate(
+      (logKey) => {
+        const w = window as unknown as Record<string, unknown>
+        const log = (w[logKey] as Array<{ t: number; event: string; nodeId?: string; activeElementTag?: string; relatedTargetTag?: string }>) ?? []
+        const t0 = log[0]?.t ?? 0
+        const active = document.activeElement
+        const editorRoot = document.querySelector('.computation-box-editor-root')
+        const focusInEditor = editorRoot != null && active != null && editorRoot.contains(active)
+        return {
+          log: log.map((e) => ({ ...e, dt: e.t - t0 })),
+          focusInEditor,
+          activeElementTag: active?.tagName ?? null,
+          activeElementClassName: active?.className ?? null,
+          focusLostEvents: log.filter((e) => e.event === 'editor-focus-lost'),
+        }
+      },
+      FOCUS_DEBUG_LOG,
+    )
+
+    const focusLostEvents = result.log.filter((e) => e.event === 'editor-focus-lost')
+    const nodeRenders = result.log.filter((e) => e.event === 'node-render')
+    const editorRenders = result.log.filter((e) => e.event === 'editor-render')
+
+    console.log('--- Repeated digit typing: focus lost at keystroke? ---', lostAtKeystroke ?? 'no (all retained)')
+    console.log('--- Total events ---', result.log.length)
+    console.log('--- editor-focus-lost count ---', focusLostEvents.length)
+    console.log('--- node-render count ---', nodeRenders.length)
+    console.log('--- editor-render count ---', editorRenders.length)
+    console.log('--- Focus in editor at end? ---', result.focusInEditor)
+    console.log('--- activeElement at end ---', result.activeElementTag, result.activeElementClassName)
+    if (focusLostEvents.length > 0) {
+      console.log('--- editor-focus-lost events ---')
+      focusLostEvents.forEach((e) => console.log(JSON.stringify(e)))
+      const firstLost = focusLostEvents[0]
+      const firstLostDt = result.log.find((e) => e.event === 'editor-focus-lost')?.dt
+      const eventsBeforeFirstLost = result.log.filter((e) => (e.dt ?? 0) < (firstLostDt ?? 0)).slice(-15)
+      console.log('--- Events immediately before first focus-lost (last 15) ---')
+      eventsBeforeFirstLost.forEach((e) => console.log(JSON.stringify(e)))
+    }
+    console.log('--- Full event sequence (dt = ms since first) ---')
+    result.log.forEach((e) => console.log(JSON.stringify(e)))
+
+    const failureDetail =
+      !result.focusInEditor && result.log.length > 0
+        ? ` Event log (last 60): ${JSON.stringify(result.log.slice(-60), null, 0)}`
+        : ''
+    expect(
+      result.focusInEditor,
+      `Editor should retain focus after ${REPEAT} repeated keystrokes. Lost at keystroke: ${lostAtKeystroke ?? 'n/a'}.${failureDetail}`,
+    ).toBe(true)
   })
 })

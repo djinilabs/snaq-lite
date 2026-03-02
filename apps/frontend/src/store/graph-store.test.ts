@@ -142,6 +142,21 @@ describe('graph-store', () => {
     expect(useGraphStore.getState().nodes[0].outputType).toBeNull()
   })
 
+  it('applyNodeSignature does not update state when outputType is unchanged (avoids re-renders on repeated LSP updates)', () => {
+    useGraphStore.getState().addNode({
+      id: 'n1',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/n1.sl',
+    })
+    useGraphStore.getState().applyNodeSignature('snaq://graph/n1.sl', [], 'Numeric')
+    const nodesAfterFirst = useGraphStore.getState().nodes
+    useGraphStore.getState().applyNodeSignature('snaq://graph/n1.sl', [], 'Numeric')
+    const nodesAfterSecond = useGraphStore.getState().nodes
+    expect(nodesAfterFirst).toBe(nodesAfterSecond)
+    expect(nodesAfterFirst[0].outputType).toBe('Numeric')
+  })
+
   it('setNodeInputs updates inputs for the node', () => {
     useGraphStore.setState({ nodes: [], edges: [] })
     useGraphStore.getState().addNode({

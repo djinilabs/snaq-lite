@@ -14,10 +14,54 @@ import { INPUT_PORT_TYPES, LSP_METHOD_DID_OPEN } from '~/lib/constants'
 import type { NodeInputPort } from '~/lsp/types'
 import { useSubscribeWidget } from '~/hooks/use-subscribe-widget'
 import { useGraphStore, useWidgetStore } from '~/store'
+import { useWidgetContentVersionStore } from '~/store/widget-content-version-store'
 import { getLanguageClient } from '~/lsp/language-client-singleton'
 import { ComputationBoxEditor } from '~/components/editor/computation-box-editor'
 import { WidgetDataView } from '~/components/presentation/widget-data-view'
+
+/** Isolates widget store subscription so parent node does not re-render on result update (preserves editor focus). */
+function ComputationResultBlock({ widgetId }: { widgetId: string }) {
+  const resultState = useWidgetStore((s) => s.byId[widgetId])
+  return (
+    <NodeContentZone
+      data-testid="computation-result"
+      style={{
+        marginTop: 10,
+        paddingTop: 8,
+        borderTop: '1px solid var(--border)',
+        fontSize: 12,
+      }}
+    >
+      <div style={{ color: 'var(--text-muted)', marginBottom: 4, fontWeight: 500 }}>
+        Result
+      </div>
+      <WidgetDataView state={resultState} />
+    </NodeContentZone>
+  )
+}
+
+/** Runs useSubscribeWidget with subscribeKey from store so the node does not re-render when content version increments (preserves editor focus). */
+function WidgetSubscription({
+  widgetId,
+  sourceUri,
+  onBeforeSubscribe,
+}: {
+  widgetId: string
+  sourceUri: string
+  onBeforeSubscribe: () => void
+}) {
+  const contentVersion = useWidgetContentVersionStore((s) => s.byWidgetId[widgetId] ?? 0)
+  useSubscribeWidget({
+    widgetId,
+    sourceUri,
+    enabled: true,
+    onBeforeSubscribe,
+    subscribeKey: contentVersion,
+  })
+  return null
+}
 import { NodeContentZone, NodeFrame } from './node-interaction-shell'
+import { focusDebugNodeRender } from '~/lib/focus-debug'
 import {
   computationNodeHandleTop,
   computationNodeMinHeight,
@@ -44,13 +88,10 @@ export function ComputationBoxNode({
   const node = nodes.find((n) => n.id === id)
   const inputs = node?.inputs ?? []
   const widgetId = `${RESULT_WIDGET_ID_PREFIX}${id}`
-  const resultState = useWidgetStore((s) => s.byId[widgetId])
-  const [contentVersion, setContentVersion] = useState(0)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const onBeforeSubscribe = useCallback(() => {
     try {
-      // getModel(uri) only needs uri for map lookup; second param is for type compatibility
       const text =
         getModel(data.uri, undefined as never)?.getValue() ?? node?.initialContent ?? ''
       getLanguageClient().sendNotification(LSP_METHOD_DID_OPEN, {
@@ -65,9 +106,9 @@ export function ComputationBoxNode({
     if (debounceRef.current != null) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => {
       debounceRef.current = null
-      setContentVersion((v) => v + 1)
+      useWidgetContentVersionStore.getState().increment(widgetId)
     }, CONTENT_CHANGE_DEBOUNCE_MS)
-  }, [])
+  }, [widgetId])
 
   useEffect(() => {
     return () => {
@@ -75,31 +116,9 @@ export function ComputationBoxNode({
     }
   }, [])
 
-  useSubscribeWidget({
-    widgetId,
-    sourceUri: data.uri,
-    enabled: true,
-    onBeforeSubscribe,
-    subscribeKey: contentVersion,
-  })
-
   const minHeight = computationNodeMinHeight(inputs.length)
   const editorWrapRef = useRef<HTMLDivElement>(null)
-  const [editorSize, setEditorSize] = useState({ width: 224, height: 80 })
   const [inView, setInView] = useState(true)
-
-  useEffect(() => {
-    const el = editorWrapRef.current
-    if (!el) return
-    const ro = new ResizeObserver((entries) => {
-      const entry = entries[0]
-      if (!entry) return
-      const { width, height } = entry.contentRect
-      setEditorSize({ width: Math.max(1, width), height: Math.max(1, height) })
-    })
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
 
   useEffect(() => {
     const el = editorWrapRef.current
@@ -116,6 +135,10 @@ export function ComputationBoxNode({
   }, [])
 
   const visible = inView
+
+  useEffect(() => {
+    focusDebugNodeRender(id)
+  })
 
   const updateInput = (index: number, patch: Partial<NodeInputPort>) => {
     const next = inputs.slice()
@@ -269,8 +292,7 @@ export function ComputationBoxNode({
           <ComputationBoxEditor
             nodeId={id}
             visible
-            width={editorSize.width}
-            height={editorSize.height}
+            wrapperRef={editorWrapRef}
             initialContent={node?.initialContent ?? ''}
             onContentChange={onContentChange}
           />
@@ -278,7 +300,7 @@ export function ComputationBoxNode({
           <div
             style={{
               width: '100%',
-              height: editorSize.height,
+              height: 80,
               minHeight: PLACEHOLDER_MIN_HEIGHT,
               background: 'var(--bg-primary)',
               borderRadius: 'var(--radius-sm)',
@@ -293,20 +315,12 @@ export function ComputationBoxNode({
           </div>
         )}
       </NodeContentZone>
-      <NodeContentZone
-        data-testid="computation-result"
-        style={{
-          marginTop: 10,
-          paddingTop: 8,
-          borderTop: '1px solid var(--border)',
-          fontSize: 12,
-        }}
-      >
-        <div style={{ color: 'var(--text-muted)', marginBottom: 4, fontWeight: 500 }}>
-          Result
-        </div>
-        <WidgetDataView state={resultState} />
-      </NodeContentZone>
+      <WidgetSubscription
+        widgetId={widgetId}
+        sourceUri={data.uri}
+        onBeforeSubscribe={onBeforeSubscribe}
+      />
+      <ComputationResultBlock widgetId={widgetId} />
     </NodeFrame>
   )
 }

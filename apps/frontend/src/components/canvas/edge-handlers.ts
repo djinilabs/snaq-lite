@@ -43,8 +43,6 @@ export async function connectEdge(
   const targetId = useGraphStore.getState().nodes.find((n) => n.uri === targetUri)?.id
   if (!sourceId || !targetId) return false
 
-  useGraphStore.getState().addEdge({ sourceId, targetId, targetInputName })
-
   const targetNode = useGraphStore.getState().nodes.find((n) => n.id === targetId)
   if (targetNode?.type === 'presentation') {
     const content = presentationDocumentContent(targetNode.inputs)
@@ -60,9 +58,9 @@ export async function connectEdge(
       targetUri,
       targetInputName,
     })
+    useGraphStore.getState().addEdge({ sourceId, targetId, targetInputName })
     return true
   } catch (e) {
-    useGraphStore.getState().removeEdge(targetId, targetInputName)
     useGraphStore.getState().clearPendingEdge()
     useUIStore.getState().addToast(errorMessage(e), 'error')
     return false

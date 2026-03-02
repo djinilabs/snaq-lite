@@ -1,6 +1,8 @@
 /**
  * Loads a project when entering /project/$projectId. Disposes current models,
  * loads snapshot from storage, setGraph with initialContent, clears widgets.
+ * When the snapshot has edges, syncs them to the LSP (didOpen + graph/connect) before
+ * setGraph so the presentation block does not see "unbound stream input" when it subscribes.
  * Handles invalid/missing projectId (redirect to /) and race conditions.
  */
 
@@ -9,6 +11,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { disposeAllGraphModels } from '~/editor/text-model-registry'
 import { getProjectSnapshot } from '~/lib/project-storage'
 import { isValidUuid, snapshotToGraphNodes } from '~/lib/project-loader-utils'
+import { syncLoadedGraphToLsp } from '~/lib/sync-graph-to-lsp'
 import { useGraphStore } from '~/store'
 import { useProjectsIndexStore } from '~/store'
 import { useWidgetStore } from '~/store'
@@ -48,6 +51,20 @@ export function useProjectLoader(projectId: string): void {
     if (snapshot) {
       const nodes = snapshotToGraphNodes(snapshot)
       const edges = snapshot.edges
+
+      if (edges.length > 0) {
+        let cancelled = false
+        syncLoadedGraphToLsp(nodes, edges).then(() => {
+          if (!cancelled) {
+            useGraphStore.getState().setGraph(nodes, edges, { clearHistory: true })
+            useWidgetStore.getState().clearAll()
+          }
+        })
+        return () => {
+          cancelled = true
+        }
+      }
+
       useGraphStore.getState().setGraph(nodes, edges, { clearHistory: true })
     } else {
       useGraphStore.getState().setGraph([], [], { clearHistory: true })

@@ -52,7 +52,7 @@ export function PresentationBlockNode({
     >
       <Handle type="target" position={Position.Left} id="x" data-testid="presentation-input-handle" />
       <NodeContentZone data-testid="presentation-content">
-        <PresentationBlock sourceUri={data.sourceUri} />
+        <PresentationBlock sourceUri={data.sourceUri} documentUri={data.uri} />
       </NodeContentZone>
     </NodeFrame>
   )

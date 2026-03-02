@@ -35,7 +35,9 @@ describe('PresentationBlock', () => {
   })
 
   it('does not call subscribeWidget when sourceUri is empty', () => {
-    const { unmount } = render(<PresentationBlock sourceUri="" />)
+    const { unmount } = render(
+      <PresentationBlock sourceUri="" documentUri="snaq://graph/pres-1.sl" />,
+    )
     expect(mockSendRequest).not.toHaveBeenCalledWith(
       LSP_METHOD_SUBSCRIBE_WIDGET,
       expect.anything(),
@@ -44,7 +46,9 @@ describe('PresentationBlock', () => {
   })
 
   it('does not call subscribeWidget when sourceUri is only whitespace', () => {
-    const { unmount } = render(<PresentationBlock sourceUri="   " />)
+    const { unmount } = render(
+      <PresentationBlock sourceUri="   " documentUri="snaq://graph/pres-1.sl" />,
+    )
     expect(mockSendRequest).not.toHaveBeenCalledWith(
       LSP_METHOD_SUBSCRIBE_WIDGET,
       expect.anything(),
@@ -52,15 +56,20 @@ describe('PresentationBlock', () => {
     unmount()
   })
 
-  it('calls subscribeWidget with widgetId and sourceUri when sourceUri is non-empty', async () => {
-    const sourceUri = 'snaq://graph/comp-1.sl'
+  it('calls subscribeWidget with widgetId and documentUri (presentation URI) when wired', async () => {
+    const documentUri = 'snaq://graph/pres-1.sl'
     mockSendRequest.mockResolvedValue(undefined)
-    const { unmount } = render(<PresentationBlock sourceUri={sourceUri} />)
+    const { unmount } = render(
+      <PresentationBlock
+        sourceUri="snaq://graph/comp-1.sl"
+        documentUri={documentUri}
+      />,
+    )
     await act(async () => {})
     expect(mockSendRequest).toHaveBeenCalledWith(
       LSP_METHOD_SUBSCRIBE_WIDGET,
       expect.objectContaining({
-        sourceUri,
+        sourceUri: documentUri,
       }),
     )
     const call = mockSendRequest.mock.calls.find(
@@ -73,9 +82,13 @@ describe('PresentationBlock', () => {
   })
 
   it('calls unsubscribeWidget on unmount when subscribed', async () => {
-    const sourceUri = 'snaq://graph/comp-1.sl'
     mockSendRequest.mockResolvedValue(undefined)
-    const { unmount } = render(<PresentationBlock sourceUri={sourceUri} />)
+    const { unmount } = render(
+      <PresentationBlock
+        sourceUri="snaq://graph/comp-1.sl"
+        documentUri="snaq://graph/pres-1.sl"
+      />,
+    )
     await act(async () => {})
     expect(mockSendRequest).toHaveBeenCalledWith(
       LSP_METHOD_SUBSCRIBE_WIDGET,

@@ -230,6 +230,30 @@ test.describe('canvas', () => {
     })
   })
 
+  test('Input argument type select stays open when clicked (dropdown does not close immediately)', async ({
+    page,
+  }) => {
+    test.setTimeout(60_000)
+    await gotoCanvas(page)
+    await page.getByTestId('add-computation-btn').click()
+    const computationNode = page.getByTestId('computation-node').first()
+    await computationNode.scrollIntoViewIfNeeded()
+    await computationNode.getByTestId('computation-add-input').evaluate((el) => (el as HTMLButtonElement).click())
+    await expect(computationNode.getByTestId('computation-input-type-0')).toBeAttached({
+      timeout: 15_000,
+    })
+    await page.evaluate(() => {
+      (window as Window & { __E2E_DEBUG_CLICKS__?: boolean }).__E2E_DEBUG_CLICKS__ = true
+    })
+    const typeSelect = page.getByTestId('computation-input-type-0').first()
+    await typeSelect.click()
+    await page.waitForTimeout(150)
+    const lastClick = await page.evaluate(() => (window as Window & { __E2E_LAST_CLICK__?: string }).__E2E_LAST_CLICK__)
+    expect(lastClick).not.toBe('pane')
+    await typeSelect.selectOption('Numeric')
+    await expect(typeSelect).toHaveValue('Numeric')
+  })
+
   test('Dragging from presentation drag zone moves the presentation node', async ({ page }) => {
     await gotoCanvas(page)
     await page.getByTestId('add-presentation-btn').click()

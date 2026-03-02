@@ -156,6 +156,9 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
   /** When a node is clicked, set selection to that node so the parent state stays in sync. */
   const onNodeClick = useCallback(
     (_: MouseEvent, node: Node) => {
+      if (typeof window !== 'undefined' && (window as Window & { __E2E_DEBUG_CLICKS__?: boolean }).__E2E_DEBUG_CLICKS__) {
+        (window as Window & { __E2E_LAST_CLICK__?: string }).__E2E_LAST_CLICK__ = 'node'
+      }
       onSelectionChange?.({ nodes: [node], edges: [] })
     },
     [onSelectionChange],
@@ -163,6 +166,9 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
 
   /** When the pane is clicked (empty space), clear selection. */
   const onPaneClick = useCallback(() => {
+    if (typeof window !== 'undefined' && (window as Window & { __E2E_DEBUG_CLICKS__?: boolean }).__E2E_DEBUG_CLICKS__) {
+      (window as Window & { __E2E_LAST_CLICK__?: string }).__E2E_LAST_CLICK__ = 'pane'
+    }
     onSelectionChange?.({ nodes: [], edges: [] })
   }, [onSelectionChange])
 

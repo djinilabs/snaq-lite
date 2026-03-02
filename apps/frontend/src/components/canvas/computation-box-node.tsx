@@ -174,6 +174,8 @@ export function ComputationBoxNode({
       </NodeContentZone>
       <NodeContentZone
         nowheel
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
         style={{
           marginBottom: 8,
           display: 'flex',

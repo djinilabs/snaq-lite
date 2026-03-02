@@ -76,6 +76,58 @@ pub fn run_with_registry(input: &str, registry: &UnitRegistry) -> Result<Value, 
     value(&db, empty_scope(&db), root)
 }
 
+/// Format a vector for display: `[e1, e2, ...]`. Used by [format_value_for_display].
+fn format_vector_for_display(
+    db: &dyn salsa::Database,
+    v: &vector::VectorValue,
+) -> Result<String, RunError> {
+    let stream = vector_into_stream(db, v.inner.clone());
+    let results: Vec<_> = futures::executor::block_on(async move {
+        use futures::stream::StreamExt;
+        stream.collect().await
+    });
+    let mut parts = Vec::with_capacity(results.len());
+    for r in results {
+        let opt = r?;
+        let s = match opt {
+            None => "?".to_string(),
+            Some(inner) => format_value_for_display(db, &inner)?,
+        };
+        parts.push(s);
+    }
+    Ok(format!("[{}]", parts.join(", ")))
+}
+
+/// Like [format_vector_for_display], but when the vector has exactly one element returns that
+/// element's display string (so widgets show "7" not "[7]" or "1 elements"). Public for LSP.
+pub fn format_vector_for_widget_display(
+    db: &dyn salsa::Database,
+    v: &vector::VectorValue,
+) -> Result<String, RunError> {
+    let stream = vector_into_stream(db, v.inner.clone());
+    let results: Vec<_> = futures::executor::block_on(async move {
+        use futures::stream::StreamExt;
+        stream.collect().await
+    });
+    if results.len() == 1 {
+        match &results[0] {
+            Ok(Some(inner)) => return format_value_for_display(db, inner),
+            Ok(None) => return Ok("?".to_string()),
+            Err(e) => return Err(RunError::new(e.kind.clone())),
+        }
+    }
+    let mut parts = Vec::with_capacity(results.len());
+    for r in results {
+        let opt = r?;
+        let s = match opt {
+            None => "?".to_string(),
+            Some(inner) => format_value_for_display(db, &inner)?,
+        };
+        parts.push(s);
+    }
+    Ok(format!("[{}]", parts.join(", ")))
+}
+
 /// Recursively format a value for display. Vectors are shown as `[e1, e2, ...]` with nested
 /// vectors fully expanded. Sparse (undefined) elements are shown as `?`.
 /// Public so hosts (e.g. CLI) can format stream elements consistently.
@@ -86,24 +138,7 @@ pub fn format_value_for_display(db: &dyn salsa::Database, value: &Value) -> Resu
         Value::FuzzyBool(fb) => Ok(format!("{fb}")),
         Value::Undefined => Ok("undefined".to_string()),
         Value::Function(_) | Value::BuiltinFunction(_) => Ok("<function>".to_string()),
-        Value::Vector(v) => {
-            let stream = vector_into_stream(db, v.inner.clone());
-            let results: Vec<_> = futures::executor::block_on(async move {
-                use futures::stream::StreamExt;
-                stream.collect().await
-            });
-            let mut parts = Vec::with_capacity(results.len());
-            for r in results {
-                let opt = r?;
-                // Sparse (undefined) elements display as "?"
-                let s = match opt {
-                    None => "?".to_string(),
-                    Some(v) => format_value_for_display(db, &v)?,
-                };
-                parts.push(s);
-            }
-            Ok(format!("[{}]", parts.join(", ")))
-        }
+        Value::Vector(v) => format_vector_for_display(db, v),
         Value::Map(_) => Ok("<map>".to_string()),
         Value::Date(gd) => Ok(format!("{gd}")),
     }

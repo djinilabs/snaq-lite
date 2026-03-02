@@ -287,7 +287,7 @@ impl SnaqLiteBackend {
                                 }
                                 #[cfg(target_arch = "wasm32")]
                                 {
-                                    let display = snaq_lite_lang::format_value_for_display(&db, &value)
+                                    let display = snaq_lite_lang::format_vector_for_widget_display(&db, v)
                                         .unwrap_or_else(|_| "<vector>".to_string());
                                     let _ = (inner, cancel_rx);
                                     self.client
@@ -427,7 +427,7 @@ impl SnaqLiteBackend {
                         #[cfg(target_arch = "wasm32")]
                         {
                             // WASM: streaming subscription not yet supported; send Completed with display.
-                            let display = snaq_lite_lang::format_value_for_display(&db, &value)
+                            let display = snaq_lite_lang::format_vector_for_widget_display(&db, v)
                                 .unwrap_or_else(|_| "<vector>".to_string());
                             let _ = (inner, cancel_rx);
                             let sid = subscription_id.clone();
@@ -592,7 +592,7 @@ impl SnaqLiteBackend {
                         }
                         #[cfg(target_arch = "wasm32")]
                         {
-                            let display = snaq_lite_lang::format_value_for_display(&db, &value)
+                            let display = snaq_lite_lang::format_vector_for_widget_display(&db, v)
                                 .unwrap_or_else(|_| "<vector>".to_string());
                             let _ = (inner, cancel_rx);
                             self.widgets
@@ -968,6 +968,7 @@ fn run_stream_consumer_for_widget(
         let mut batch: Vec<serde_json::Value> = Vec::with_capacity(BATCH_SIZE);
         let mut offset: u64 = 0;
         let mut total: u64 = 0;
+        let mut single_display: Option<String> = None;
         let mut stream_next = stream.next();
         let mut cancel_rx = cancel_rx;
         loop {
@@ -977,6 +978,9 @@ fn run_stream_consumer_for_widget(
                     match opt {
                         Some(item) => {
                             let json = crate::pubsub::stream_element_to_json(&db, &item);
+                            if total == 0 {
+                                single_display = json.get("display").and_then(|v| v.as_str()).map(String::from);
+                            }
                             batch.push(json);
                             total += 1;
                             if batch.len() >= BATCH_SIZE {
@@ -1011,10 +1015,17 @@ fn run_stream_consumer_for_widget(
                 })),
             });
         }
+        let completed_payload = if total == 1 {
+            single_display
+                .map(|d| serde_json::json!({ "display": d, "totalElements": 1 }))
+                .unwrap_or_else(|| serde_json::json!({ "totalElements": 1 }))
+        } else {
+            serde_json::json!({ "totalElements": total })
+        };
         let _ = widget_tx.unbounded_send(WidgetDataUpdateParams {
             widget_id,
             status: WidgetDataStatus::Completed,
-            payload: Some(serde_json::json!({ "totalElements": total })),
+            payload: Some(completed_payload),
         });
     };
     let mut pool = futures::executor::LocalPool::new();

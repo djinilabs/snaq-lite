@@ -11,7 +11,7 @@ import {
   LSP_SUBSCRIBE_AFTER_DID_OPEN_MS,
 } from '~/lib/constants'
 import type { GraphEdge, GraphNode } from '~/store'
-import { getLanguageClient, waitForLanguageClient } from '~/lsp/language-client-singleton'
+import { waitForLanguageClient } from '~/lsp/language-client-singleton'
 
 const LSP_LOAD_SYNC_WAIT_MS = 8000
 

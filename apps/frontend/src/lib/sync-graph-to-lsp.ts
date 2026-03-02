@@ -13,6 +13,7 @@ import {
   LSP_SUBSCRIBE_AFTER_DID_OPEN_MS,
 } from '~/lib/constants'
 import type { GraphEdge, GraphNode } from '~/store'
+import type { LanguageClientLike } from '~/lsp/language-client-singleton'
 import {
   getLanguageClient,
   waitForLanguageClient,
@@ -22,13 +23,16 @@ import {
 /** Matches E2E "after full page refresh" assertion timeout; sync also runs when client becomes ready. */
 const LSP_LOAD_SYNC_WAIT_MS = 25_000
 
+/** When client is not ready in time, we register a callback; only the latest pending snapshot is synced when client becomes ready. */
+let pendingSync: { nodes: GraphNode[]; edges: GraphEdge[] } | null = null
+
 function presentationContent(inputs: { name: string; type: string }[] | undefined): string {
   if (!inputs?.length) return DEFAULT_PRESENTATION_DOCUMENT_CONTENT
   return inputs.map((i) => `input ${i.name}: ${i.type}\n$${i.name}`).join('\n')
 }
 
 function doSyncWithClient(
-  client: { sendRequest: (m: string, p?: unknown) => Promise<unknown>; sendNotification: (m: string, p?: unknown) => void },
+  client: LanguageClientLike,
   nodes: GraphNode[],
   edges: GraphEdge[],
 ): Promise<void> {
@@ -81,11 +85,16 @@ export async function syncLoadedGraphToLsp(
     await doSyncWithClient(client, nodes, edges)
     return
   }
+  pendingSync = { nodes, edges }
   whenClientReady(() => {
-    try {
-      void doSyncWithClient(getLanguageClient(), nodes, edges)
-    } catch {
-      // Client not set (e.g. race); ignore
+    const p = pendingSync
+    pendingSync = null
+    if (p) {
+      try {
+        void doSyncWithClient(getLanguageClient(), p.nodes, p.edges)
+      } catch {
+        // Client not set (e.g. race); ignore
+      }
     }
   })
 }

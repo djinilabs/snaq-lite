@@ -81,6 +81,31 @@ describe('PresentationBlock', () => {
     unmount()
   })
 
+  it('calls onBeforeSubscribe before subscribeWidget when provided (avoids "source document not open")', async () => {
+    vi.useFakeTimers()
+    mockSendRequest.mockResolvedValue(undefined)
+    const onBeforeSubscribe = vi.fn()
+    const { unmount } = render(
+      <PresentationBlock
+        sourceUri="snaq://graph/comp.sl"
+        documentUri="snaq://graph/pres.sl"
+        onBeforeSubscribe={onBeforeSubscribe}
+      />,
+    )
+    await act(async () => {})
+    expect(onBeforeSubscribe).toHaveBeenCalledTimes(1)
+    expect(mockSendRequest).not.toHaveBeenCalledWith(LSP_METHOD_SUBSCRIBE_WIDGET, expect.anything())
+    await act(async () => {
+      vi.advanceTimersByTime(200)
+    })
+    expect(mockSendRequest).toHaveBeenCalledWith(
+      LSP_METHOD_SUBSCRIBE_WIDGET,
+      expect.objectContaining({ sourceUri: 'snaq://graph/pres.sl' }),
+    )
+    vi.useRealTimers()
+    unmount()
+  })
+
   it('calls unsubscribeWidget on unmount when subscribed', async () => {
     mockSendRequest.mockResolvedValue(undefined)
     const { unmount } = render(

@@ -27,6 +27,14 @@ function presentationDocumentContent(inputs: { name: string; type: string }[] | 
   return inputs.map((i) => `input ${i.name}: ${i.type}\n$${i.name}`).join('\n')
 }
 
+function sendDidOpenForPresentation(uri: string, inputs: { name: string; type: string }[] | undefined): void {
+  if (!hasLanguageClient()) return
+  const content = presentationDocumentContent(inputs)
+  getLanguageClient().sendNotification(LSP_METHOD_DID_OPEN, {
+    textDocument: { uri, version: 1, languageId: 'snaq', text: content },
+  })
+}
+
 export function PresentationBlockNode({
   id,
   data,
@@ -35,19 +43,11 @@ export function PresentationBlockNode({
   const node = useGraphStore((s) => s.nodes.find((n) => n.id === id))
 
   useEffect(() => {
-    if (!hasLanguageClient()) return
-    const content = presentationDocumentContent(node?.inputs)
-    getLanguageClient().sendNotification(LSP_METHOD_DID_OPEN, {
-      textDocument: { uri: data.uri, version: 1, languageId: 'snaq', text: content },
-    })
+    sendDidOpenForPresentation(data.uri, node?.inputs)
   }, [data.uri, node?.inputs])
 
   const onBeforeSubscribe = useCallback(() => {
-    if (!hasLanguageClient()) return
-    const content = presentationDocumentContent(node?.inputs)
-    getLanguageClient().sendNotification(LSP_METHOD_DID_OPEN, {
-      textDocument: { uri: data.uri, version: 1, languageId: 'snaq', text: content },
-    })
+    sendDidOpenForPresentation(data.uri, node?.inputs)
   }, [data.uri, node?.inputs])
 
   return (

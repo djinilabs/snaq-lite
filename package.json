@@ -12,6 +12,7 @@
     "build:backend": "cargo build --workspace",
     "build:frontend": "pnpm -C apps/frontend run build",
     "build:lsp-wasm": "cargo build -p snaq-lite-lsp --target wasm32-unknown-unknown --lib && wasm-pack build crates/snaq-lite-lsp --target web --out-dir ../../apps/frontend/public/lsp-wasm",
+    "build:lsp-wasm:dev": "cargo build -p snaq-lite-lsp --target wasm32-unknown-unknown --lib && wasm-pack build crates/snaq-lite-lsp --target web --out-dir ../../apps/frontend/public/lsp-wasm --dev",
     "lint": "pnpm run lint:backend && pnpm run lint:frontend",
     "lint:backend": "cargo clippy --workspace",
     "lint:frontend": "pnpm -C apps/frontend run lint",
@@ -19,7 +20,7 @@
     "dev:frontend": "pnpm -C apps/frontend run dev",
     "preview": "pnpm run preview:frontend",
     "preview:frontend": "pnpm -C apps/frontend run preview",
-    "smoketest": "pnpm run bootstrap && pnpm run build:lsp-wasm && pnpm run build:frontend && pnpm -C apps/frontend run smoketest",
+    "smoketest": "pnpm run bootstrap && pnpm run build:lsp-wasm:dev && pnpm run build:frontend && pnpm -C apps/frontend run smoketest",
     "smoketest:dev": "pnpm -C apps/frontend run smoketest:dev",
     "bootstrap": "pnpm run install:frontend && pnpm -C apps/frontend exec playwright install --with-deps chromium"
   }

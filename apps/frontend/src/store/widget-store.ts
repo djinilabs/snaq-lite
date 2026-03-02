@@ -54,10 +54,25 @@ function mergeWidgetState(
   return incoming
 }
 
+function logWidgetUpdateIfE2E(widgetId: string, state: WidgetState): void {
+  if (typeof window !== 'undefined') {
+    const log = (window as unknown as { __E2E_WIDGET_LOG__?: Array<{ widgetId: string; status: string; display?: string }> })
+      .__E2E_WIDGET_LOG__
+    if (log) {
+      log.push({
+        widgetId,
+        status: state.status,
+        display: state.payload?.display,
+      })
+    }
+  }
+}
+
 export const useWidgetStore = create<WidgetStoreState>((set) => ({
   byId: {},
   setWidget: (widgetId, state) =>
     set((s) => {
+      logWidgetUpdateIfE2E(widgetId, state)
       const current = s.byId[widgetId]
       const merged = mergeWidgetState(current, state)
       return { byId: { ...s.byId, [widgetId]: merged } }

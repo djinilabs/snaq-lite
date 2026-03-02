@@ -134,6 +134,7 @@ impl LanguageServer for SnaqLiteBackend {
         drop(state);
         self.invalidate_subscriptions_for_uri(&uri).await;
         self.invalidate_widgets_for_uri(&uri).await;
+        self.refresh_downstream_widgets(&uri).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
         self.publish_diagnostics(uri.clone()).await;
@@ -152,6 +153,7 @@ impl LanguageServer for SnaqLiteBackend {
         drop(state);
         self.invalidate_subscriptions_for_uri(&uri).await;
         self.invalidate_widgets_for_uri(&uri).await;
+        self.refresh_downstream_widgets(&uri).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
         self.publish_diagnostics(uri.clone()).await;
@@ -233,6 +235,93 @@ impl SnaqLiteBackend {
                     payload: Some(serde_json::json!({ "reason": "Document changed" })),
                 })
                 .await;
+        }
+    }
+
+    /// Refresh downstream widgets: re-run each target document and push new result to subscribed widgets.
+    /// No Cancelled is sent; the client keeps the same subscription and receives the updated result.
+    async fn refresh_downstream_widgets(&self, source_uri: &Url) {
+        let downstream: Vec<Url> = {
+            let graph = self.graph_state.lock().await;
+            graph.targets_from_source(source_uri)
+        };
+        for target_uri in downstream {
+            let entries = {
+                let mut w = self.widgets.lock().await;
+                w.take_entries_for_uri(&target_uri)
+            };
+            for (widget_id, cancel_tx) in entries {
+                if let Some(tx) = cancel_tx {
+                    let _ = tx.send(());
+                }
+                match self.run_node_with_graph_inputs(&target_uri).await {
+                    Err(e) => {
+                        self.client
+                            .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                                widget_id: widget_id.clone(),
+                                status: WidgetDataStatus::Error,
+                                payload: Some(serde_json::json!({ "message": e.to_string() })),
+                            })
+                            .await;
+                        self.widgets
+                            .lock()
+                            .await
+                            .insert_scalar(widget_id, target_uri.clone());
+                    }
+                    Ok((value, db)) => {
+                        match &value {
+                            snaq_lite_lang::Value::Vector(v) => {
+                                let inner = v.inner.clone();
+                                let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
+                                self.widgets.lock().await.insert(
+                                    widget_id.clone(),
+                                    target_uri.clone(),
+                                    cancel_tx,
+                                );
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    let widget_tx = self.widget_notification_tx.clone();
+                                    std::thread::spawn(move || {
+                                        run_stream_consumer_for_widget(db, inner, widget_id, widget_tx, cancel_rx);
+                                    });
+                                }
+                                #[cfg(target_arch = "wasm32")]
+                                {
+                                    let display = snaq_lite_lang::format_value_for_display(&db, &value)
+                                        .unwrap_or_else(|_| "<vector>".to_string());
+                                    let _ = (inner, cancel_rx);
+                                    self.client
+                                        .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                                            widget_id: widget_id.clone(),
+                                            status: WidgetDataStatus::Completed,
+                                            payload: Some(serde_json::json!({ "display": display })),
+                                        })
+                                        .await;
+                                    self.widgets
+                                        .lock()
+                                        .await
+                                        .insert_scalar(widget_id, target_uri.clone());
+                                }
+                            }
+                            _ => {
+                                let display = snaq_lite_lang::format_value_for_display(&db, &value)
+                                    .unwrap_or_else(|_| "<error>".to_string());
+                                self.client
+                                    .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                                        widget_id: widget_id.clone(),
+                                        status: WidgetDataStatus::Completed,
+                                        payload: Some(serde_json::json!({ "display": display })),
+                                    })
+                                    .await;
+                                self.widgets
+                                    .lock()
+                                    .await
+                                    .insert_scalar(widget_id, target_uri.clone());
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -321,16 +410,16 @@ impl SnaqLiteBackend {
                     snaq_lite_lang::Value::Vector(v) => {
                         let inner = v.inner.clone();
                         let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
-                        let sid = subscription_id.clone();
                         self.subscriptions.lock().await.insert(
                             subscription_id.clone(),
                             uri.clone(),
                             version,
                             cancel_tx,
                         );
-                        let notification_tx = self.notification_tx.clone();
                         #[cfg(not(target_arch = "wasm32"))]
                         {
+                            let sid = subscription_id.clone();
+                            let notification_tx = self.notification_tx.clone();
                             std::thread::spawn(move || {
                                 run_stream_consumer(db, inner, sid, notification_tx, cancel_rx);
                             });
@@ -477,22 +566,26 @@ impl SnaqLiteBackend {
                         payload: Some(serde_json::json!({ "message": e.to_string() })),
                     })
                     .await;
+                self.widgets
+                    .lock()
+                    .await
+                    .insert_scalar(params.widget_id.clone(), source_uri.clone());
                 Ok(())
             }
             Ok((value, db)) => {
-                let widget_id = params.widget_id.clone();
                 match &value {
                     snaq_lite_lang::Value::Vector(v) => {
                         let inner = v.inner.clone();
                         let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
                         self.widgets.lock().await.insert(
                             params.widget_id.clone(),
-                            source_uri,
+                            source_uri.clone(),
                             cancel_tx,
                         );
-                        let widget_tx = self.widget_notification_tx.clone();
                         #[cfg(not(target_arch = "wasm32"))]
                         {
+                            let widget_id = params.widget_id.clone();
+                            let widget_tx = self.widget_notification_tx.clone();
                             std::thread::spawn(move || {
                                 run_stream_consumer_for_widget(db, inner, widget_id, widget_tx, cancel_rx);
                             });
@@ -502,6 +595,10 @@ impl SnaqLiteBackend {
                             let display = snaq_lite_lang::format_value_for_display(&db, &value)
                                 .unwrap_or_else(|_| "<vector>".to_string());
                             let _ = (inner, cancel_rx);
+                            self.widgets
+                                .lock()
+                                .await
+                                .insert_scalar(params.widget_id.clone(), source_uri.clone());
                             self.client
                                 .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
                                     widget_id: params.widget_id,
@@ -514,6 +611,10 @@ impl SnaqLiteBackend {
                     _ => {
                         let display = snaq_lite_lang::format_value_for_display(&db, &value)
                             .unwrap_or_else(|_| "<error>".to_string());
+                        self.widgets
+                            .lock()
+                            .await
+                            .insert_scalar(params.widget_id.clone(), source_uri.clone());
                         self.client
                             .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
                                 widget_id: params.widget_id,
@@ -528,15 +629,17 @@ impl SnaqLiteBackend {
         }
     }
 
-    /// Handle snaqlite/graph/unsubscribeWidget: cancel and send Cancelled.
+    /// Handle snaqlite/graph/unsubscribeWidget: cancel (if consumer) and send Cancelled.
     pub async fn unsubscribe_widget(
         &self,
         params: UnsubscribeWidgetParams,
     ) -> tower_lsp::jsonrpc::Result<()> {
         self.drain_widget_notifications().await;
         let mut w = self.widgets.lock().await;
-        if let Some(cancel_tx) = w.remove(&params.widget_id) {
-            let _ = cancel_tx.send(());
+        if let Some(maybe_tx) = w.remove(&params.widget_id) {
+            if let Some(cancel_tx) = maybe_tx {
+                let _ = cancel_tx.send(());
+            }
             drop(w);
             self.client
                 .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
@@ -610,11 +713,16 @@ impl SnaqLiteBackend {
                 last_value = Some(value.clone());
                 last_db = Some(db.clone());
             }
-            if let snaq_lite_lang::Value::Vector(v) = &value {
-                if uri != sink_uri {
+            if uri != sink_uri {
+                if let snaq_lite_lang::Value::Vector(v) = &value {
                     let (handle_id, sender) = snaq_lite_lang::create_stream_input();
                     output_handles.insert(uri.clone(), handle_id);
                     feed_vector_to_chunk_sender(db, v.inner.clone(), sender);
+                } else {
+                    let (handle_id, sender) = snaq_lite_lang::create_stream_input();
+                    let _ = sender.unbounded_send(vec![Ok(Some(value.clone()))]);
+                    drop(sender);
+                    output_handles.insert(uri.clone(), handle_id);
                 }
             }
         }
@@ -624,7 +732,7 @@ impl SnaqLiteBackend {
         ))
     }
 
-    /// Run node with graph inputs (WASM: fallback to empty inputs only).
+    /// Run node with graph inputs (WASM: same logic as native but no threads; feed streams inline).
     #[cfg(target_arch = "wasm32")]
     async fn run_node_with_graph_inputs(
         &self,
@@ -633,18 +741,93 @@ impl SnaqLiteBackend {
         (snaq_lite_lang::Value, salsa::DatabaseImpl),
         snaq_lite_lang::RunError,
     > {
-        let (source, unit_registry) = {
+        use futures::stream::Stream;
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+        let (order, sources, unit_registry, incoming_map) = {
             let state = self.state.lock().await;
+            let graph = self.graph_state.lock().await;
+            let docs = state.document_uris();
+            let order = match graph.topological_order(sink_uri, &docs) {
+                Some(o) => o,
+                None => {
+                    return Err(snaq_lite_lang::RunError::new(
+                        snaq_lite_lang::RunErrorKind::InvalidArgument(
+                            "graph cycle or node not in documents".to_string(),
+                        ),
+                    ));
+                }
+            };
+            let sources: Vec<(Url, String)> =
+                order.iter().map(|u| (u.clone(), state.source(u))).collect();
+            let incoming_map: std::collections::HashMap<Url, Vec<(String, Url)>> = order
+                .iter()
+                .map(|u| (u.clone(), graph.incoming(u)))
+                .collect();
             (
-                state.source(sink_uri),
+                order,
+                sources,
                 state.unit_registry().clone(),
+                incoming_map,
             )
         };
-        snaq_lite_lang::run_with_stream_inputs(
-            &source,
-            &unit_registry,
-            std::collections::HashMap::new(),
-        )
+        let mut output_handles: std::collections::HashMap<Url, snaq_lite_lang::StreamHandleId> =
+            std::collections::HashMap::new();
+        let mut last_value = None;
+        let mut last_db = None;
+        for (uri, source_entry) in order.iter().zip(sources.iter()) {
+            let source = &source_entry.1;
+            let stream_inputs: std::collections::HashMap<String, snaq_lite_lang::StreamHandleId> =
+                incoming_map
+                    .get(uri)
+                    .map(|incoming| {
+                        incoming
+                            .iter()
+                            .filter_map(|(name, source_uri)| {
+                                output_handles.get(source_uri).map(|&id| (name.clone(), id))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            let (value, db) =
+                snaq_lite_lang::run_with_stream_inputs(source, &unit_registry, stream_inputs)?;
+            if uri == sink_uri {
+                last_value = Some(value.clone());
+                last_db = Some(db.clone());
+            }
+            if uri != sink_uri {
+                if let snaq_lite_lang::Value::Vector(v) = &value {
+                    let (handle_id, sender) = snaq_lite_lang::create_stream_input();
+                    let stream = snaq_lite_lang::vector_into_stream(&db, v.inner.clone());
+                    let mut stream_pinned = std::pin::pin!(stream);
+                    let mut items = Vec::new();
+                    let waker = unsafe {
+                        const VTABLE: RawWakerVTable =
+                            RawWakerVTable::new(|_| RawWaker::new(std::ptr::null(), &VTABLE), |_| {}, |_| {}, |_| {});
+                        Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE))
+                    };
+                    let mut cx = Context::from_waker(&waker);
+                    loop {
+                        match stream_pinned.as_mut().poll_next(&mut cx) {
+                            Poll::Ready(Some(item)) => items.push(item),
+                            Poll::Ready(None) => break,
+                            Poll::Pending => {}
+                        }
+                    }
+                    let _ = sender.unbounded_send(items);
+                    drop(sender);
+                    output_handles.insert(uri.clone(), handle_id);
+                } else {
+                    let (handle_id, sender) = snaq_lite_lang::create_stream_input();
+                    let _ = sender.unbounded_send(vec![Ok(Some(value.clone()))]);
+                    drop(sender);
+                    output_handles.insert(uri.clone(), handle_id);
+                }
+            }
+        }
+        Ok((
+            last_value.expect("sink in order"),
+            last_db.expect("sink in order"),
+        ))
     }
 }
 
@@ -1196,6 +1379,21 @@ mod tests {
     }
 
     #[test]
+    fn graph_targets_from_source() {
+        let mut graph = graph::GraphState::new();
+        let a = Url::parse("snaq://graph/a.sl").unwrap();
+        let b = Url::parse("snaq://graph/b.sl").unwrap();
+        let c = Url::parse("snaq://graph/c.sl").unwrap();
+        graph.connect(a.clone(), b.clone(), "x".to_string());
+        graph.connect(a.clone(), c.clone(), "y".to_string());
+        let targets = graph.targets_from_source(&a);
+        assert_eq!(targets.len(), 2);
+        assert!(targets.contains(&b));
+        assert!(targets.contains(&c));
+        assert!(graph.targets_from_source(&b).is_empty());
+    }
+
+    #[test]
     fn graph_topological_order_linear() {
         let mut graph = graph::GraphState::new();
         let a = Url::parse("snaq://graph/a.sl").unwrap();
@@ -1239,10 +1437,14 @@ mod tests {
         let mut reg = widget_registry::WidgetRegistry::new();
         let uri = Url::parse("file:///doc.snaq").unwrap();
         let (tx, _rx) = futures::channel::oneshot::channel();
-        reg.insert("w1".to_string(), uri, tx);
+        reg.insert("w1".to_string(), uri.clone(), tx);
         let removed = reg.remove("w1");
-        assert!(removed.is_some());
+        assert!(removed.as_ref().and_then(|x| x.as_ref()).is_some());
         assert!(reg.remove("w1").is_none());
+        reg.insert_scalar("w2".to_string(), uri);
+        let removed2 = reg.remove("w2");
+        assert!(removed2.is_some());
+        assert!(removed2.unwrap().is_none());
     }
 
     #[test]

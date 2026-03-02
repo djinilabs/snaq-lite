@@ -26,7 +26,7 @@ impl WasmMessageReader {
 
 impl AsyncRead for WasmMessageReader {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<std::io::Result<usize>> {
@@ -67,11 +67,12 @@ impl WasmMessageWriter {
 
 impl AsyncWrite for WasmMessageWriter {
     fn poll_write(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        self.get_mut().buffer.extend_from_slice(buf);
+        self.as_mut().get_mut().buffer.extend_from_slice(buf);
+        let _ = self.as_mut().poll_flush(cx);
         Poll::Ready(Ok(buf.len()))
     }
 

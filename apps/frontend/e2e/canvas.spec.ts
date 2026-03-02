@@ -295,6 +295,82 @@ test.describe('canvas', () => {
     await expect(page.getByText("Type mismatch: source output type 'Numeric' does not match target input 'x' type 'Vector'")).not.toBeVisible()
   })
 
+  test('after wiring computation to presentation, changing computation output updates presentation', async ({
+    page,
+  }) => {
+    test.setTimeout(60_000)
+    await page.addInitScript(() => {
+      ;(window as unknown as { __E2E_WIDGET_LOG__?: unknown[] }).__E2E_WIDGET_LOG__ = []
+    })
+    await gotoCanvas(page)
+    await page.getByTestId('add-computation-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
+    const editorZone = page.getByTestId('computation-editor-zone').first()
+    await expect(editorZone).toBeVisible({ timeout: 15_000 })
+    await editorZone.click()
+    await page.waitForTimeout(400)
+    await page.keyboard.type('7')
+    await page.waitForTimeout(600)
+
+    await page.getByTestId('add-presentation-btn').click()
+    await expect(page.getByTestId('presentation-node')).toHaveCount(1)
+    const sourceHandle = page.getByTestId('computation-output-handle').first()
+    const targetHandle = page.getByTestId('presentation-input-handle').first()
+    await sourceHandle.scrollIntoViewIfNeeded()
+    await targetHandle.scrollIntoViewIfNeeded()
+    const sourceBox = await sourceHandle.boundingBox()
+    const targetBox = await targetHandle.boundingBox()
+    expect(sourceBox).toBeTruthy()
+    expect(targetBox).toBeTruthy()
+    const startX = sourceBox!.x + sourceBox!.width / 2
+    const startY = sourceBox!.y + sourceBox!.height / 2
+    const endX = targetBox!.x + targetBox!.width / 2
+    const endY = targetBox!.y + targetBox!.height / 2
+    await page.mouse.move(startX, startY)
+    await page.mouse.down()
+    await page.mouse.move(endX, endY, { steps: 10 })
+    await page.mouse.up()
+    await page.waitForTimeout(2000)
+
+    const presentationContent = page.getByTestId('presentation-content').first()
+    await expect(presentationContent.getByText('7')).toBeVisible({ timeout: 20_000 })
+
+    const editorInput = page.getByRole('textbox', { name: 'Editor content' }).first()
+    await editorInput.scrollIntoViewIfNeeded()
+    await page.waitForTimeout(200)
+    await editorInput.click({ force: true })
+    await page.waitForTimeout(200)
+    await editorInput.evaluate((el: HTMLElement) => el.focus())
+    await page.waitForTimeout(100)
+    const selectAllKey = process.platform === 'darwin' ? 'Meta+a' : 'Control+a'
+    await page.keyboard.press(selectAllKey)
+    await page.keyboard.type('100')
+    await page.waitForTimeout(3000)
+
+    let widgetLog: Array<{ widgetId: string; status: string; display?: string }> = []
+    try {
+      await expect(presentationContent.getByText('100')).toBeVisible({ timeout: 30_000 })
+    } catch (e) {
+      widgetLog = await page.evaluate(
+        () => (window as unknown as { __E2E_WIDGET_LOG__?: Array<{ widgetId: string; status: string; display?: string }> }).__E2E_WIDGET_LOG__ ?? [],
+      )
+      test.info().annotations.push({
+        type: 'widget-updates',
+        description: JSON.stringify(widgetLog, null, 2),
+      })
+      const fs = await import('fs')
+      const path = await import('path')
+      const outDir = path.join(process.cwd(), 'test-results', 'e2e-widget-log')
+      fs.mkdirSync(outDir, { recursive: true })
+      fs.writeFileSync(
+        path.join(outDir, 'widget-updates.json'),
+        JSON.stringify(widgetLog, null, 2),
+        'utf-8',
+      )
+      throw e
+    }
+  })
+
   test('Delete selected removes selected node from canvas', async ({ page }) => {
     await gotoCanvas(page)
     await page.getByTestId('add-computation-btn').click()

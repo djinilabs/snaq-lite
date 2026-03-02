@@ -2,6 +2,7 @@
  * When wired (sourceUri non-empty): subscribes via subscribeWidget on mount, unsubscribes on unmount.
  * When not wired (sourceUri empty): does not subscribe; shows placeholder.
  * Consumes widgetDataUpdate for this widgetId via widget store; renders WidgetDataView when wired.
+ * The LSP pushes updated results when the source computation changes (no re-subscribe).
  */
 
 import { useRef } from 'react'

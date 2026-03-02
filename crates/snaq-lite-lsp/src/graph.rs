@@ -33,6 +33,16 @@ impl GraphState {
             .collect()
     }
 
+    /// Target URIs that have an edge from this source (downstream nodes). Used to invalidate
+    /// their widget subscriptions when the source document changes.
+    pub fn targets_from_source(&self, source_uri: &Url) -> Vec<Url> {
+        self.edges
+            .iter()
+            .filter(|e| e.source_uri == *source_uri)
+            .map(|e| e.target_uri.clone())
+            .collect()
+    }
+
     /// Add or replace edge: at most one source per (target_uri, target_input_name).
     pub fn connect(&mut self, source_uri: Url, target_uri: Url, target_input_name: String) {
         self.disconnect(&target_uri, &target_input_name);

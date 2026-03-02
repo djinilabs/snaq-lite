@@ -419,7 +419,8 @@ impl SnaqLiteBackend {
         .ok()
         .and_then(|(value, _)| snaq_lite_lang::value_type_name(&value))
         .unwrap_or_else(|| "Unknown".to_string());
-        if source_output_type != target_input_type {
+        // Target input type "Undefined" means accept any (e.g. presentation boxes).
+        if target_input_type != "Undefined" && source_output_type != target_input_type {
             return Err(tower_lsp::jsonrpc::Error {
                 code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32001),
                 message: format!(

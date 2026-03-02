@@ -13,6 +13,9 @@ export const LSP_METHOD_UNSUBSCRIBE_WIDGET = 'snaqlite/graph/unsubscribeWidget'
 
 /** LSP textDocument/didOpen (shared by computation-box-editor and computation-box-node). */
 export const LSP_METHOD_DID_OPEN = 'textDocument/didOpen'
+
+/** Default document content for presentation nodes so LSP has target document open for graph_connect. Input type Undefined = accept any (no type check); name must match Handle id. */
+export const DEFAULT_PRESENTATION_DOCUMENT_CONTENT = 'input x: Undefined\n$x'
 /** LSP textDocument/didChange (used by computation-box-editor). */
 export const LSP_METHOD_DID_CHANGE = 'textDocument/didChange'
 

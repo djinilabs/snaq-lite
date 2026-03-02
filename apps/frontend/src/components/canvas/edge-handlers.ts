@@ -2,10 +2,21 @@
  * Logic to send snaqlite/graph/connect and disconnect via LSP client and update graph store.
  */
 
+import {
+  DEFAULT_PRESENTATION_DOCUMENT_CONTENT,
+  LSP_METHOD_DID_OPEN,
+  LSP_METHOD_GRAPH_CONNECT,
+  LSP_METHOD_GRAPH_DISCONNECT,
+  LSP_SUBSCRIBE_AFTER_DID_OPEN_MS,
+} from '~/lib/constants'
 import { waitForLanguageClient } from '~/lsp/language-client-singleton'
-import { LSP_METHOD_GRAPH_CONNECT, LSP_METHOD_GRAPH_DISCONNECT } from '~/lib/constants'
 import { useGraphStore } from '~/store'
 import { useUIStore } from '~/store'
+
+function presentationDocumentContent(inputs: { name: string; type: string }[] | undefined): string {
+  if (!inputs?.length) return DEFAULT_PRESENTATION_DOCUMENT_CONTENT
+  return inputs.map((i) => `input ${i.name}: ${i.type}\n$${i.name}`).join('\n')
+}
 
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
@@ -33,6 +44,16 @@ export async function connectEdge(
   if (!sourceId || !targetId) return false
 
   useGraphStore.getState().addEdge({ sourceId, targetId, targetInputName })
+
+  const targetNode = useGraphStore.getState().nodes.find((n) => n.id === targetId)
+  if (targetNode?.type === 'presentation') {
+    const content = presentationDocumentContent(targetNode.inputs)
+    langClient.sendNotification(LSP_METHOD_DID_OPEN, {
+      textDocument: { uri: targetUri, version: 1, languageId: 'snaq', text: content },
+    })
+    await new Promise((r) => setTimeout(r, LSP_SUBSCRIBE_AFTER_DID_OPEN_MS))
+  }
+
   try {
     await langClient.sendRequest(LSP_METHOD_GRAPH_CONNECT, {
       sourceUri,

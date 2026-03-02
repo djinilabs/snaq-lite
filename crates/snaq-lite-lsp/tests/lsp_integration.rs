@@ -811,6 +811,64 @@ async fn native_graph_connect_success() {
     let _ = server_handle.await;
 }
 
+/// Graph connect: target input type "Undefined" accepts any source type (e.g. Numeric → presentation).
+#[tokio::test]
+async fn native_graph_connect_target_undefined_accepts_any() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+
+    let server_handle = tokio::spawn(async move {
+        snaq_lite_lsp::run_native(server_r, server_w).await
+    });
+
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/source.sl", "42", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/target.sl",
+        "input x: Undefined\n$x",
+        1,
+    )
+    .await;
+
+    let connect_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "snaqlite/graph/connect",
+        "params": {
+            "sourceUri": "snaq://graph/source.sl",
+            "targetUri": "snaq://graph/target.sl",
+            "targetInputName": "x"
+        }
+    });
+    client_w.write_all(&lsp_message(&connect_request.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+
+    let body = timeout(
+        Duration::from_secs(5),
+        async {
+            loop {
+                let b = read_one_lsp_message_async(&mut client_r).await.unwrap();
+                let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+                if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
+                    return b;
+                }
+            }
+        },
+    )
+    .await
+    .expect("timeout on connect response");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "connect Numeric→Undefined should succeed: {}", body);
+    assert!(v.get("result").is_some());
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
 /// Graph connect: type mismatch (e.g. Numeric source → Vector input) returns -32001.
 #[tokio::test]
 async fn native_graph_connect_type_mismatch_returns_error() {

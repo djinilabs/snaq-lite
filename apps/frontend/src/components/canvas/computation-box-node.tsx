@@ -276,7 +276,7 @@ export function ComputationBoxNode({
             />
           ) : null,
       )}
-      <Handle type="source" position={Position.Right} id="output" />
+      <Handle type="source" position={Position.Right} id="output" data-testid="computation-output-handle" />
       <NodeContentZone
         ref={editorWrapRef}
         nowheel

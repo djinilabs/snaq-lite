@@ -19,6 +19,7 @@ import {
   INPUT_PORT_TYPES,
   AUTO_SAVE_DEBOUNCE_MS,
   UNDO_STACK_MAX,
+  DEFAULT_PRESENTATION_DOCUMENT_CONTENT,
 } from './constants'
 
 describe('constants', () => {
@@ -63,5 +64,10 @@ describe('constants', () => {
   it('AUTO_SAVE_DEBOUNCE_MS and UNDO_STACK_MAX are positive', () => {
     expect(AUTO_SAVE_DEBOUNCE_MS).toBe(600)
     expect(UNDO_STACK_MAX).toBe(10)
+  })
+
+  it('DEFAULT_PRESENTATION_DOCUMENT_CONTENT declares input x as Undefined (accept any)', () => {
+    expect(DEFAULT_PRESENTATION_DOCUMENT_CONTENT).toContain('input x: Undefined')
+    expect(DEFAULT_PRESENTATION_DOCUMENT_CONTENT).toContain('$x')
   })
 })

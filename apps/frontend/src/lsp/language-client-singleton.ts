@@ -15,6 +15,9 @@ const clientPromise = new Promise<LanguageClientLike>((resolve) => {
   resolveClient = resolve
 })
 
+/** Callbacks to run once when the client is set (e.g. pending graph sync after load). */
+const whenReadyCallbacks: Array<() => void> = []
+
 export function setLanguageClient(c: LanguageClientLike | null): void {
   client = c
   if (typeof window !== 'undefined') {
@@ -24,6 +27,23 @@ export function setLanguageClient(c: LanguageClientLike | null): void {
     resolveClient(c)
     resolveClient = null
   }
+  if (c != null && whenReadyCallbacks.length > 0) {
+    const fns = [...whenReadyCallbacks]
+    whenReadyCallbacks.length = 0
+    for (const fn of fns) fn()
+  }
+}
+
+/**
+ * Runs the callback when the client is available: immediately if already set,
+ * otherwise once when setLanguageClient is next called with a non-null client.
+ */
+export function whenClientReady(cb: () => void): void {
+  if (client != null) {
+    cb()
+    return
+  }
+  whenReadyCallbacks.push(cb)
 }
 
 export function getLanguageClient(): LanguageClientLike {

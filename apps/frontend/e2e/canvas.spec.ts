@@ -476,6 +476,9 @@ test.describe('canvas', () => {
     await expect(page.getByTestId('canvas-toolbar')).toBeVisible({ timeout: 15_000 })
     await expect(page.getByTestId('computation-node')).toHaveCount(1, { timeout: 25_000 })
     await expect(page.getByTestId('presentation-node')).toHaveCount(1, { timeout: 25_000 })
+    const presentationAfterRefresh = page.getByTestId('presentation-content').first()
+    await expect(presentationAfterRefresh.getByText('7')).toBeVisible({ timeout: 25_000 })
+    await expect(presentationAfterRefresh.getByText(/unbound stream input/i)).not.toBeVisible()
   })
 
   test('after wiring computation to presentation, changing computation output updates presentation', async ({

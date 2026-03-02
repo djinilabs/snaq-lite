@@ -238,74 +238,55 @@ impl SnaqLiteBackend {
         }
     }
 
-    /// Refresh downstream widgets: re-run each target document and push new result to subscribed widgets.
-    /// No Cancelled is sent; the client keeps the same subscription and receives the updated result.
-    async fn refresh_downstream_widgets(&self, source_uri: &Url) {
-        let downstream: Vec<Url> = {
-            let graph = self.graph_state.lock().await;
-            graph.targets_from_source(source_uri)
+    /// Refresh all widgets subscribed to this URI: re-run the node with current graph and push result.
+    /// Used when an edge is added (graph/connect) so a presentation that already subscribed gets the bound stream.
+    /// On WASM the client receives the updated value immediately. On native, scalar-fed streams are consumed
+    /// in a background thread (receiver is thread-local), so this path is most reliable in the browser.
+    async fn refresh_widgets_for_uri(&self, uri: &Url) {
+        let entries = {
+            let mut w = self.widgets.lock().await;
+            w.take_entries_for_uri(uri)
         };
-        for target_uri in downstream {
-            let entries = {
-                let mut w = self.widgets.lock().await;
-                w.take_entries_for_uri(&target_uri)
-            };
-            for (widget_id, cancel_tx) in entries {
-                if let Some(tx) = cancel_tx {
-                    let _ = tx.send(());
+        for (widget_id, cancel_tx) in entries {
+            if let Some(tx) = cancel_tx {
+                let _ = tx.send(());
+            }
+            match self.run_node_with_graph_inputs(uri).await {
+                Err(e) => {
+                    self.client
+                        .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                            widget_id: widget_id.clone(),
+                            status: WidgetDataStatus::Error,
+                            payload: Some(serde_json::json!({ "message": e.to_string() })),
+                        })
+                        .await;
+                    self.widgets
+                        .lock()
+                        .await
+                        .insert_scalar(widget_id, uri.clone());
                 }
-                match self.run_node_with_graph_inputs(&target_uri).await {
-                    Err(e) => {
-                        self.client
-                            .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
-                                widget_id: widget_id.clone(),
-                                status: WidgetDataStatus::Error,
-                                payload: Some(serde_json::json!({ "message": e.to_string() })),
-                            })
-                            .await;
-                        self.widgets
-                            .lock()
-                            .await
-                            .insert_scalar(widget_id, target_uri.clone());
-                    }
-                    Ok((value, db)) => {
-                        match &value {
-                            snaq_lite_lang::Value::Vector(v) => {
-                                let inner = v.inner.clone();
-                                let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
-                                self.widgets.lock().await.insert(
-                                    widget_id.clone(),
-                                    target_uri.clone(),
-                                    cancel_tx,
-                                );
-                                #[cfg(not(target_arch = "wasm32"))]
-                                {
-                                    let widget_tx = self.widget_notification_tx.clone();
-                                    std::thread::spawn(move || {
-                                        run_stream_consumer_for_widget(db, inner, widget_id, widget_tx, cancel_rx);
-                                    });
-                                }
-                                #[cfg(target_arch = "wasm32")]
-                                {
-                                    let display = snaq_lite_lang::format_vector_for_widget_display(&db, v)
-                                        .unwrap_or_else(|_| "<vector>".to_string());
-                                    let _ = (inner, cancel_rx);
-                                    self.client
-                                        .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
-                                            widget_id: widget_id.clone(),
-                                            status: WidgetDataStatus::Completed,
-                                            payload: Some(serde_json::json!({ "display": display })),
-                                        })
-                                        .await;
-                                    self.widgets
-                                        .lock()
-                                        .await
-                                        .insert_scalar(widget_id, target_uri.clone());
-                                }
+                Ok((value, db)) => {
+                    match &value {
+                        snaq_lite_lang::Value::Vector(v) => {
+                            let inner = v.inner.clone();
+                            let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
+                            self.widgets.lock().await.insert(
+                                widget_id.clone(),
+                                uri.clone(),
+                                cancel_tx,
+                            );
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                let widget_tx = self.widget_notification_tx.clone();
+                                std::thread::spawn(move || {
+                                    run_stream_consumer_for_widget(db, inner, widget_id, widget_tx, cancel_rx);
+                                });
                             }
-                            _ => {
-                                let display = snaq_lite_lang::format_value_for_display(&db, &value)
-                                    .unwrap_or_else(|_| "<error>".to_string());
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                let display = snaq_lite_lang::format_vector_for_widget_display(&db, v)
+                                    .unwrap_or_else(|_| "<vector>".to_string());
+                                let _ = (inner, cancel_rx);
                                 self.client
                                     .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
                                         widget_id: widget_id.clone(),
@@ -316,12 +297,39 @@ impl SnaqLiteBackend {
                                 self.widgets
                                     .lock()
                                     .await
-                                    .insert_scalar(widget_id, target_uri.clone());
+                                    .insert_scalar(widget_id, uri.clone());
                             }
+                        }
+                        _ => {
+                            let display = snaq_lite_lang::format_value_for_display(&db, &value)
+                                .unwrap_or_else(|_| "<error>".to_string());
+                            self.client
+                                .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                                    widget_id: widget_id.clone(),
+                                    status: WidgetDataStatus::Completed,
+                                    payload: Some(serde_json::json!({ "display": display })),
+                                })
+                                .await;
+                            self.widgets
+                                .lock()
+                                .await
+                                .insert_scalar(widget_id, uri.clone());
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Refresh downstream widgets: re-run each target document and push new result to subscribed widgets.
+    /// No Cancelled is sent; the client keeps the same subscription and receives the updated result.
+    async fn refresh_downstream_widgets(&self, source_uri: &Url) {
+        let downstream: Vec<Url> = {
+            let graph = self.graph_state.lock().await;
+            graph.targets_from_source(source_uri)
+        };
+        for target_uri in downstream {
+            self.refresh_widgets_for_uri(&target_uri).await;
         }
     }
 
@@ -520,8 +528,12 @@ impl SnaqLiteBackend {
                 data: None,
             });
         }
-        let mut graph = self.graph_state.lock().await;
-        graph.connect(source_uri, target_uri, params.target_input_name);
+        {
+            let mut graph = self.graph_state.lock().await;
+            graph.connect(source_uri, target_uri.clone(), params.target_input_name);
+        }
+        self.refresh_widgets_for_uri(&target_uri).await;
+        self.drain_widget_notifications().await;
         Ok(())
     }
 

@@ -1511,3 +1511,120 @@ async fn native_downstream_widget_receives_push_update_when_source_changes() {
     server_handle.abort();
     let _ = server_handle.await;
 }
+
+/// Reproduce load race: subscribe to presentation before graph/connect; get Error (unbound).
+/// Then graph/connect succeeds; LSP refreshes widgets for target (refresh_widgets_for_uri).
+/// Full flow (client receives Completed "7") is exercised in E2E with WASM LSP.
+#[tokio::test]
+async fn native_subscribe_then_connect_refreshes_widget_with_result() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+
+    let server_handle = tokio::spawn(async move {
+        snaq_lite_lsp::run_native(server_r, server_w).await
+    });
+
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/comp.sl", "7", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/pres.sl",
+        "input x: Undefined\n$x",
+        1,
+    )
+    .await;
+
+    // Subscribe to presentation *before* connect: no edge yet, so $x is unbound → Error.
+    let subscribe_widget = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "snaqlite/graph/subscribeWidget",
+        "params": { "widgetId": "w-pres", "sourceUri": "snaq://graph/pres.sl" }
+    });
+    client_w.write_all(&lsp_message(&subscribe_widget.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut got_error_notification = false;
+    for _ in 0..15 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout reading subscribe response or Error notification")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
+            assert!(v.get("error").is_none(), "subscribeWidget returns Ok(()) and sends Error via notification: {}", body);
+        }
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
+            let params = v.get("params").and_then(|p| p.as_object()).unwrap();
+            if params.get("status").and_then(|s| s.as_str()) == Some("Error") {
+                let msg = params.get("payload").and_then(|p| p.get("message")).and_then(|s| s.as_str()).unwrap_or("");
+                assert!(msg.contains("unbound") || msg.contains("stream"), "Error payload should mention unbound stream: {}", msg);
+                got_error_notification = true;
+                break;
+            }
+        }
+    }
+    assert!(got_error_notification, "client should receive widgetDataUpdate Error (unbound) before connect");
+
+    // Connect: LSP adds edge and calls refresh_widgets_for_uri(pres). Connect must succeed.
+    let connect_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "snaqlite/graph/connect",
+        "params": {
+            "sourceUri": "snaq://graph/comp.sl",
+            "targetUri": "snaq://graph/pres.sl",
+            "targetInputName": "x"
+        }
+    });
+    client_w.write_all(&lsp_message(&connect_req.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+
+    let connect_body = read_until_response_id(&mut client_r, 4).await;
+    let connect_v: serde_json::Value = serde_json::from_str(&connect_body).unwrap();
+    assert!(connect_v.get("error").is_none(), "graph/connect should succeed (refresh_widgets_for_uri runs after adding edge): {}", connect_body);
+
+    // Trigger drain so we receive any widgetDataUpdate from refresh_widgets_for_uri.
+    tokio::time::sleep(Duration::from_millis(WIDGET_DRAIN_DELAY_MS)).await;
+    let hover_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "textDocument/hover",
+        "params": {
+            "textDocument": { "uri": "snaq://graph/pres.sl" },
+            "position": { "line": 0, "character": 0 }
+        }
+    });
+    client_w.write_all(&lsp_message(&hover_req.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut got_widget_update_after_connect = false;
+    for _ in 0..15 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout reading widgetDataUpdate or hover response after connect")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("id").and_then(|i| i.as_u64()) == Some(5) {
+            continue;
+        }
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
+            let params = v.get("params").and_then(|p| p.as_object()).unwrap();
+            let status = params.get("status").and_then(|s| s.as_str());
+            if status == Some("Completed") || status == Some("Error") {
+                got_widget_update_after_connect = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        got_widget_update_after_connect,
+        "after graph/connect, refresh_widgets_for_uri should push a widgetDataUpdate (Completed or Error); hover drains it"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}

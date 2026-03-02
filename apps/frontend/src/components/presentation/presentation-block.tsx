@@ -21,6 +21,8 @@ interface PresentationBlockProps {
   documentUri: string
   /** Optional: use when parent needs to pass a stable id (e.g. node id); otherwise a UUID is generated. */
   widgetId?: string
+  /** Called immediately before subscribeWidget so the LSP has the document open (avoids "source document not open" after refresh). */
+  onBeforeSubscribe?: () => void
 }
 
 const PLACEHOLDER_UNWIRED = 'Connect a computation box'
@@ -29,6 +31,7 @@ export function PresentationBlock({
   sourceUri,
   documentUri,
   widgetId: widgetIdProp,
+  onBeforeSubscribe,
 }: PresentationBlockProps) {
   const generatedId = useRef<string>(generateWidgetId()).current
   const widgetId = widgetIdProp ?? generatedId
@@ -39,6 +42,7 @@ export function PresentationBlock({
     widgetId,
     sourceUri: documentUri,
     enabled: isWired,
+    onBeforeSubscribe,
   })
 
   return (

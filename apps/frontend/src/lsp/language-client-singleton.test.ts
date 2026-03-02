@@ -3,6 +3,7 @@ import {
   setLanguageClient,
   getLanguageClient,
   hasLanguageClient,
+  whenClientReady,
 } from './language-client-singleton'
 
 describe('language-client-singleton', () => {
@@ -33,5 +34,25 @@ describe('language-client-singleton', () => {
     setLanguageClient(null)
     expect(hasLanguageClient()).toBe(false)
     expect(() => getLanguageClient()).toThrow('Language client not initialized')
+  })
+
+  it('whenClientReady runs callback immediately when client already set', () => {
+    const client = { sendRequest: () => Promise.resolve(), sendNotification: () => {} }
+    setLanguageClient(client)
+    let ran = false
+    whenClientReady(() => {
+      ran = true
+    })
+    expect(ran).toBe(true)
+  })
+
+  it('whenClientReady runs callback when setLanguageClient is called later', () => {
+    let ran = false
+    whenClientReady(() => {
+      ran = true
+    })
+    expect(ran).toBe(false)
+    setLanguageClient({ sendRequest: () => Promise.resolve(), sendNotification: () => {} })
+    expect(ran).toBe(true)
   })
 })

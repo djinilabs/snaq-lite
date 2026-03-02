@@ -2,9 +2,10 @@
  * Presentation Block node: placeholder for chart/grid. Subscribes on mount (subscribeWidget),
  * unsubscribes on unmount (unsubscribeWidget); consumes widgetDataUpdate for this widgetId.
  * Sends didOpen for this node's URI so LSP has the target document open for graph_connect when wiring.
+ * Passes onBeforeSubscribe so subscribeWidget is sent only after didOpen (avoids "source document not open").
  */
 
-import { useEffect } from 'react'
+import { useCallback, useEffect } from 'react'
 import type { Node, NodeProps } from '@xyflow/react'
 import { Handle, Position } from '@xyflow/react'
 import { DEFAULT_PRESENTATION_DOCUMENT_CONTENT, LSP_METHOD_DID_OPEN } from '~/lib/constants'
@@ -41,6 +42,14 @@ export function PresentationBlockNode({
     })
   }, [data.uri, node?.inputs])
 
+  const onBeforeSubscribe = useCallback(() => {
+    if (!hasLanguageClient()) return
+    const content = presentationDocumentContent(node?.inputs)
+    getLanguageClient().sendNotification(LSP_METHOD_DID_OPEN, {
+      textDocument: { uri: data.uri, version: 1, languageId: 'snaq', text: content },
+    })
+  }, [data.uri, node?.inputs])
+
   return (
     <NodeFrame
       kind="presentation"
@@ -52,7 +61,11 @@ export function PresentationBlockNode({
     >
       <Handle type="target" position={Position.Left} id="x" data-testid="presentation-input-handle" />
       <NodeContentZone data-testid="presentation-content">
-        <PresentationBlock sourceUri={data.sourceUri} documentUri={data.uri} />
+        <PresentationBlock
+          sourceUri={data.sourceUri}
+          documentUri={data.uri}
+          onBeforeSubscribe={onBeforeSubscribe}
+        />
       </NodeContentZone>
     </NodeFrame>
   )

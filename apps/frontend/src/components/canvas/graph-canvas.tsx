@@ -21,6 +21,7 @@ import {
 import { connectEdge, disconnectEdge } from './edge-handlers'
 import { getDisconnectParamsForDeletedEdges } from './edge-delete-params'
 import { getDragHandleSelector } from './graph-drag-handle'
+import { applyNodePositionChanges } from './graph-node-position-changes'
 import { getFlowNodeData } from './graph-node-data'
 import { ComputationBoxNode } from './computation-box-node'
 import { PresentationBlockNode } from './presentation-block-node'
@@ -137,11 +138,7 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
-      for (const ch of changes) {
-        if (ch.type === 'position' && ch.dragging === false && ch.position) {
-          moveNode(ch.id, ch.position)
-        }
-      }
+      applyNodePositionChanges(changes, moveNode, setLivePositions)
     },
     [moveNode],
   )

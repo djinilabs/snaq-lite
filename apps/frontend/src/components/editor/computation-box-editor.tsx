@@ -9,11 +9,10 @@ import { useEffect, useRef } from 'react'
 import { useAutoSave } from '~/contexts/auto-save-context'
 import { nodeIdToUri } from '~/editor/virtual-uri'
 import { getOrCreateModel } from '~/editor/text-model-registry'
+import { ensureMonacoEnvironment } from '~/monaco-environment'
+import { LSP_METHOD_DID_OPEN, LSP_METHOD_DID_CHANGE } from '~/lib/constants'
 import { hasLanguageClient, getLanguageClient } from '~/lsp/language-client-singleton'
 import { useGraphStore } from '~/store'
-
-const LSP_METHOD_DID_OPEN = 'textDocument/didOpen'
-const LSP_METHOD_DID_CHANGE = 'textDocument/didChange'
 
 interface ComputationBoxEditorProps {
   nodeId: string
@@ -21,6 +20,8 @@ interface ComputationBoxEditorProps {
   width: number
   height: number
   initialContent?: string
+  /** Called when the user edits content (used to trigger re-subscribe for result). */
+  onContentChange?: () => void
 }
 
 export function ComputationBoxEditor({
@@ -29,6 +30,7 @@ export function ComputationBoxEditor({
   width,
   height,
   initialContent = '',
+  onContentChange,
 }: ComputationBoxEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const editorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null)
@@ -36,11 +38,14 @@ export function ComputationBoxEditor({
   const autoSave = useAutoSave()
   const requestSaveRef = useRef(autoSave?.requestSave ?? (() => {}))
   requestSaveRef.current = autoSave?.requestSave ?? (() => {})
+  const onContentChangeRef = useRef(onContentChange)
+  onContentChangeRef.current = onContentChange
 
   const uri = nodeIdToUri(nodeId)
 
   useEffect(() => {
     if (!visible || !containerRef.current) return
+    ensureMonacoEnvironment()
     const runId = ++effectRunIdRef.current
     import('monaco-editor').then((monaco) => {
       // Only create an editor if this effect run is still current (avoids duplicate editors
@@ -55,10 +60,19 @@ export function ComputationBoxEditor({
       const model = getOrCreateModel(uri, monaco, initialContent)
       const editor = monaco.editor.create(containerRef.current, {
         model,
+        lineNumbers: 'off',
+        lineNumbersMinChars: 0,
+        glyphMargin: false,
+        folding: false,
+        lineDecorationsWidth: 0,
         minimap: { enabled: false },
+        overviewRulerLanes: 0,
+        overviewRulerBorder: false,
+        scrollbar: { vertical: 'hidden' },
         scrollBeyondLastLine: false,
         language: 'snaq',
       })
+      editor.updateOptions({ minimap: { enabled: false } })
       if (runId !== effectRunIdRef.current) {
         editor.dispose()
         return
@@ -81,6 +95,7 @@ export function ComputationBoxEditor({
           })
         }
         requestSaveRef.current()
+        onContentChangeRef.current?.()
       })
     })
     return () => {
@@ -96,5 +111,11 @@ export function ComputationBoxEditor({
   }, [width, height])
 
   if (!visible) return null
-  return <div ref={containerRef} style={{ width, height, minHeight: 60 }} />
+  return (
+    <div
+      ref={containerRef}
+      className="computation-box-editor-root"
+      style={{ width, height, minHeight: 60 }}
+    />
+  )
 }

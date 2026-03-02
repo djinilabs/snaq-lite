@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 import '../app.css'
+import '@xyflow/react/dist/style.css'
 import { useEffect } from 'react'
 import type { ReactNode } from 'react'
 import {

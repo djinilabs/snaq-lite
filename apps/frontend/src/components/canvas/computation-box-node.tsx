@@ -6,13 +6,15 @@
  * only when in view (placeholder when not).
  */
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import type { Node, NodeProps } from '@xyflow/react'
 import { Handle, Position } from '@xyflow/react'
-import { INPUT_PORT_TYPES } from '~/lib/constants'
+import { getModel } from '~/editor/text-model-registry'
+import { INPUT_PORT_TYPES, LSP_METHOD_DID_OPEN } from '~/lib/constants'
 import type { NodeInputPort } from '~/lsp/types'
 import { useSubscribeWidget } from '~/hooks/use-subscribe-widget'
 import { useGraphStore, useWidgetStore } from '~/store'
+import { getLanguageClient } from '~/lsp/language-client-singleton'
 import { ComputationBoxEditor } from '~/components/editor/computation-box-editor'
 import { WidgetDataView } from '~/components/presentation/widget-data-view'
 import { NodeContentZone, NodeFrame } from './node-interaction-shell'
@@ -30,6 +32,7 @@ type ComputationFlowNode = Node<ComputationBoxData, 'computation'>
 
 const PLACEHOLDER_MIN_HEIGHT = 60
 const RESULT_WIDGET_ID_PREFIX = 'computation-result-'
+const CONTENT_CHANGE_DEBOUNCE_MS = 300
 
 export function ComputationBoxNode({
   id,
@@ -42,8 +45,43 @@ export function ComputationBoxNode({
   const inputs = node?.inputs ?? []
   const widgetId = `${RESULT_WIDGET_ID_PREFIX}${id}`
   const resultState = useWidgetStore((s) => s.byId[widgetId])
+  const [contentVersion, setContentVersion] = useState(0)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  useSubscribeWidget({ widgetId, sourceUri: data.uri, enabled: true })
+  const onBeforeSubscribe = useCallback(() => {
+    try {
+      // getModel(uri) only needs uri for map lookup; second param is for type compatibility
+      const text =
+        getModel(data.uri, undefined as never)?.getValue() ?? node?.initialContent ?? ''
+      getLanguageClient().sendNotification(LSP_METHOD_DID_OPEN, {
+        textDocument: { uri: data.uri, version: 1, languageId: 'snaq', text },
+      })
+    } catch (e) {
+      console.error('[ComputationBoxNode] didOpen before subscribe failed:', e)
+    }
+  }, [data.uri, node?.initialContent])
+
+  const onContentChange = useCallback(() => {
+    if (debounceRef.current != null) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => {
+      debounceRef.current = null
+      setContentVersion((v) => v + 1)
+    }, CONTENT_CHANGE_DEBOUNCE_MS)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current != null) clearTimeout(debounceRef.current)
+    }
+  }, [])
+
+  useSubscribeWidget({
+    widgetId,
+    sourceUri: data.uri,
+    enabled: true,
+    onBeforeSubscribe,
+    subscribeKey: contentVersion,
+  })
 
   const minHeight = computationNodeMinHeight(inputs.length)
   const editorWrapRef = useRef<HTMLDivElement>(null)
@@ -234,6 +272,7 @@ export function ComputationBoxNode({
             width={editorSize.width}
             height={editorSize.height}
             initialContent={node?.initialContent ?? ''}
+            onContentChange={onContentChange}
           />
         ) : (
           <div

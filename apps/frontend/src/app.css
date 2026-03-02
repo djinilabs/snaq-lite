@@ -101,3 +101,8 @@ a:hover {
   color: var(--accent-hover);
   text-decoration: underline;
 }
+
+/* Computation block Monaco: hide minimap (option can be ignored in some setups) */
+.computation-box-editor-root .minimap {
+  display: none !important;
+}

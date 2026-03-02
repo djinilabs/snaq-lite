@@ -25,13 +25,7 @@ import { applyNodePositionChanges } from './graph-node-position-changes'
 import { getFlowNodeData } from './graph-node-data'
 import { ComputationBoxNode } from './computation-box-node'
 import { PresentationBlockNode } from './presentation-block-node'
-import '@xyflow/react/dist/style.css'
 import { useGraphStore } from '~/store'
-
-const nodeTypes = {
-  computation: ComputationBoxNode,
-  presentation: PresentationBlockNode,
-} as const
 
 function graphNodeToFlowNode(
   n: import('~/store').GraphNode,
@@ -98,6 +92,14 @@ function ViewportCenterRef({
 export function GraphCanvas(props: GraphCanvasProps = {}) {
   const { onSelectionChange, selectedNodeIds = [] } = props
   const viewportRef = useRef<HTMLDivElement>(null)
+  const nodeTypes = useMemo(
+    () =>
+      ({
+        computation: ComputationBoxNode,
+        presentation: PresentationBlockNode,
+      }) as const,
+    [],
+  )
   const storeNodes = useGraphStore((s) => s.nodes)
   const storeEdges = useGraphStore((s) => s.edges)
   const moveNode = useGraphStore((s) => s.moveNode)

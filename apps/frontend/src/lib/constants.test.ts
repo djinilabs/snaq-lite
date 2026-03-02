@@ -8,6 +8,8 @@ import {
   LSP_METHOD_GRAPH_DISCONNECT,
   LSP_METHOD_SUBSCRIBE_WIDGET,
   LSP_METHOD_UNSUBSCRIBE_WIDGET,
+  LSP_METHOD_DID_OPEN,
+  LSP_METHOD_DID_CHANGE,
   LSP_SUBSCRIBE_RETRY_INTERVAL_MS,
   LSP_SUBSCRIBE_MAX_WAIT_MS,
   DRAG_HANDLE_CLASS_COMPUTATION,
@@ -36,6 +38,8 @@ describe('constants', () => {
     expect(LSP_METHOD_GRAPH_DISCONNECT).toBe('snaqlite/graph/disconnect')
     expect(LSP_METHOD_SUBSCRIBE_WIDGET).toBe('snaqlite/graph/subscribeWidget')
     expect(LSP_METHOD_UNSUBSCRIBE_WIDGET).toBe('snaqlite/graph/unsubscribeWidget')
+    expect(LSP_METHOD_DID_OPEN).toBe('textDocument/didOpen')
+    expect(LSP_METHOD_DID_CHANGE).toBe('textDocument/didChange')
   })
 
   it('LSP subscribe retry and drag handle constants are positive/non-empty', () => {

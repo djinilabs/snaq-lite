@@ -1,8 +1,9 @@
 /**
  * Loads a project when entering /project/$projectId. Disposes current models,
  * loads snapshot from storage, setGraph with initialContent, clears widgets.
- * When the snapshot has edges, syncs them to the LSP (didOpen + graph/connect) before
- * setGraph so the presentation block does not see "unbound stream input" when it subscribes.
+ * When the snapshot has edges, syncs them to the LSP in the background (didOpen + graph/connect)
+ * so the presentation block can subscribe; the graph is set synchronously so blocks always appear
+ * even if sync fails or is slow.
  * Handles invalid/missing projectId (redirect to /) and race conditions.
  */
 
@@ -51,24 +52,16 @@ export function useProjectLoader(projectId: string): void {
     if (snapshot) {
       const nodes = snapshotToGraphNodes(snapshot)
       const edges = snapshot.edges
-
-      if (edges.length > 0) {
-        let cancelled = false
-        syncLoadedGraphToLsp(nodes, edges).then(() => {
-          if (!cancelled) {
-            useGraphStore.getState().setGraph(nodes, edges, { clearHistory: true })
-            useWidgetStore.getState().clearAll()
-          }
-        })
-        return () => {
-          cancelled = true
-        }
-      }
-
       useGraphStore.getState().setGraph(nodes, edges, { clearHistory: true })
+      useWidgetStore.getState().clearAll()
+      if (edges.length > 0) {
+        void syncLoadedGraphToLsp(nodes, edges).catch(() => {
+          // Sync failed (e.g. LSP not ready); graph is already set so blocks remain visible
+        })
+      }
     } else {
       useGraphStore.getState().setGraph([], [], { clearHistory: true })
+      useWidgetStore.getState().clearAll()
     }
-    useWidgetStore.getState().clearAll()
   }, [projectId, navigate])
 }

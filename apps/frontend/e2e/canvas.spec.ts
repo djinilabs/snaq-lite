@@ -435,6 +435,49 @@ test.describe('canvas', () => {
     await expect(presentationAfterReload.getByText(/unbound stream input/i)).not.toBeVisible()
   })
 
+  test('after full page refresh, connected computation and presentation blocks both reappear', async ({
+    page,
+  }) => {
+    test.setTimeout(70_000)
+    await gotoCanvas(page)
+    await page.getByTestId('add-computation-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
+    const editorZone = page.getByTestId('computation-editor-zone').first()
+    await expect(editorZone).toBeVisible({ timeout: 15_000 })
+    await editorZone.click()
+    await page.waitForTimeout(300)
+    await page.keyboard.type('7')
+    await page.waitForTimeout(500)
+
+    await page.getByTestId('add-presentation-btn').click()
+    await expect(page.getByTestId('presentation-node')).toHaveCount(1)
+    const sourceHandle = page.getByTestId('computation-output-handle').first()
+    const targetHandle = page.getByTestId('presentation-input-handle').first()
+    await sourceHandle.scrollIntoViewIfNeeded()
+    await targetHandle.scrollIntoViewIfNeeded()
+    const sourceBox = await sourceHandle.boundingBox()
+    const targetBox = await targetHandle.boundingBox()
+    expect(sourceBox).toBeTruthy()
+    expect(targetBox).toBeTruthy()
+    const startX = sourceBox!.x + sourceBox!.width / 2
+    const startY = sourceBox!.y + sourceBox!.height / 2
+    const endX = targetBox!.x + targetBox!.width / 2
+    const endY = targetBox!.y + targetBox!.height / 2
+    await page.mouse.move(startX, startY)
+    await page.mouse.down()
+    await page.mouse.move(endX, endY, { steps: 10 })
+    await page.mouse.up()
+    await page.waitForTimeout(2500)
+
+    const presentationContent = page.getByTestId('presentation-content').first()
+    await expect(presentationContent.getByText('7')).toBeVisible({ timeout: 15_000 })
+
+    await page.reload()
+    await expect(page.getByTestId('canvas-toolbar')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('computation-node')).toHaveCount(1, { timeout: 25_000 })
+    await expect(page.getByTestId('presentation-node')).toHaveCount(1, { timeout: 25_000 })
+  })
+
   test('after wiring computation to presentation, changing computation output updates presentation', async ({
     page,
   }) => {

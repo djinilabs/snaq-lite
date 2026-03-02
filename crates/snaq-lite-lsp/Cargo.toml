@@ -3,10 +3,6 @@ name = "snaq-lite-lsp"
 version = "0.1.0"
 edition = "2021"
 
-# Skip wasm-opt so build never fails on wasm-opt errors (e.g. binaryen config/version).
-[package.metadata.wasm-pack.profile.release]
-wasm-opt = false
-
 [lints]
 workspace = true
 

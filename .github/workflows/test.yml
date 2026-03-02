@@ -57,6 +57,9 @@ jobs:
       - name: Test frontend
         run: pnpm run test:frontend
 
+      - name: Install binaryen (wasm-opt for LSP WASM build)
+        run: sudo apt-get update && sudo apt-get install -y binaryen
+
       - name: Install Playwright browsers (E2E)
         run: pnpm -C apps/frontend exec playwright install --with-deps chromium
 

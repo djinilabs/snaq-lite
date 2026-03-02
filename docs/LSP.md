@@ -102,6 +102,8 @@ The server can run inside a Web Worker so the IDE (e.g. in the browser) does not
    pnpm run build:lsp-wasm
    ```
 
+   The release build runs `wasm-opt` (from [Binaryen](https://github.com/WebAssembly/binaryen)) to optimize the WASM. Install it if needed: **macOS** `brew install binaryen`, **Ubuntu/Debian** `apt install binaryen`.
+
    Or manually (from repo root; wasm-pack resolves `--out-dir` relative to the crate):
 
    ```bash

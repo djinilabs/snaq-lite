@@ -19,7 +19,7 @@
     "dev:frontend": "pnpm -C apps/frontend run dev",
     "preview": "pnpm run preview:frontend",
     "preview:frontend": "pnpm -C apps/frontend run preview",
-    "smoketest": "pnpm run bootstrap && pnpm run build:frontend && pnpm -C apps/frontend run smoketest",
+    "smoketest": "pnpm run bootstrap && pnpm run build:lsp-wasm && pnpm run build:frontend && pnpm -C apps/frontend run smoketest",
     "smoketest:dev": "pnpm -C apps/frontend run smoketest:dev",
     "bootstrap": "pnpm run install:frontend && pnpm -C apps/frontend exec playwright install --with-deps chromium"
   }

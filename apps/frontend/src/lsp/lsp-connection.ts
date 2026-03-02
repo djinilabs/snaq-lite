@@ -43,7 +43,15 @@ class PushMessageReader extends AbstractMessageReader {
 }
 
 /**
- * Message writer that sends each message as a JSON string via the given send function (e.g. sendToWorker).
+ * LSP transport framing: "Content-Length: N\r\n\r\n" + body (tower-lsp / stdio format).
+ * The WASM LSP expects framed input; it sends framed output which we strip in the message router.
+ */
+function frameLspMessage(body: string): string {
+  return `Content-Length: ${body.length}\r\n\r\n${body}`
+}
+
+/**
+ * Message writer that sends each message as LSP-framed string via the given send function (e.g. sendToWorker).
  */
 class WorkerMessageWriter extends AbstractMessageWriter {
   constructor(private readonly send: (msg: string) => void) {
@@ -52,7 +60,8 @@ class WorkerMessageWriter extends AbstractMessageWriter {
 
   async write(msg: Message): Promise<void> {
     try {
-      this.send(JSON.stringify(msg))
+      const body = JSON.stringify(msg)
+      this.send(frameLspMessage(body))
     } catch (error) {
       this.fireError(error as Error, msg, 1)
       throw error

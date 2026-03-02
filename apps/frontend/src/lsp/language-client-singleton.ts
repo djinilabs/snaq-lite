@@ -17,6 +17,9 @@ const clientPromise = new Promise<LanguageClientLike>((resolve) => {
 
 export function setLanguageClient(c: LanguageClientLike | null): void {
   client = c
+  if (typeof window !== 'undefined') {
+    ;(window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ = c != null
+  }
   if (c != null && resolveClient != null) {
     resolveClient(c)
     resolveClient = null

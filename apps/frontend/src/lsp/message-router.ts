@@ -9,12 +9,16 @@ import { routeMessage } from './route-message'
 let worker: Worker | null = null
 let workerReady = false
 let readyResolve: (() => void) | null = null
-const readyPromise = new Promise<void>((resolve) => {
+let readyReject: ((reason: unknown) => void) | null = null
+const readyPromise = new Promise<void>((resolve, reject) => {
   readyResolve = resolve
+  readyReject = reject
 })
 
 /** Callback to push raw LSP JSON-RPC messages to the language client reader (e.g. for createMessageConnection). */
 let incomingLspPush: ((raw: string) => void) | null = null
+/** Response IDs already delivered to the connection (avoid duplicate/error overwriting a prior result). */
+const deliveredResponseIds = new Set<string | number>()
 
 export function getWorker(): Worker | null {
   return worker
@@ -62,7 +66,15 @@ export function processIncomingWorkerMessage(data: string): boolean {
       }
       if (parsed.type === WORKER_MSG_ERROR) {
         workerReady = false
-        console.error('[LSP Worker]', parsed.error ?? 'Unknown error')
+        const errMsg = parsed.error ?? 'Unknown error'
+        console.error('[LSP Worker]', errMsg)
+        if (typeof window !== 'undefined') {
+          ;(window as unknown as { __E2E_LSP_WORKER_ERROR__?: string }).__E2E_LSP_WORKER_ERROR__ = errMsg
+        }
+        if (readyReject) {
+          readyReject(new Error(errMsg))
+          readyReject = null
+        }
         return true
       }
     }
@@ -72,25 +84,113 @@ export function processIncomingWorkerMessage(data: string): boolean {
   return false
 }
 
+const LSP_HEADER_RE = /Content-Length:\s*(\d+)\s*\r?\n\r?\n/s
+
+/**
+ * Strip one LSP Content-Length frame from the start; returns the JSON body and any remainder.
+ */
+function takeOneLspFrame(raw: string): { body: string; rest: string } {
+  const match = LSP_HEADER_RE.exec(raw)
+  if (!match) return { body: raw, rest: '' }
+  const len = parseInt(match[1], 10)
+  const start = (match.index as number) + (match[0] as string).length
+  const body = raw.slice(start, start + len)
+  const rest = raw.slice(start + len)
+  return { body, rest }
+}
+
+/**
+ * Strip LSP Content-Length framing if present (e.g. "Content-Length: 75\r\n\r\n{...}").
+ * Returns the JSON body so the connection reader can parse it.
+ * If multiple frames are concatenated, only the first is returned (use splitLspFrames for full split).
+ */
+function stripLspFraming(raw: string): string {
+  const { body } = takeOneLspFrame(raw)
+  return body
+}
+
+/** Split concatenated LSP frames into separate JSON bodies. */
+function splitLspFrames(raw: string): string[] {
+  const out: string[] = []
+  let rest = raw
+  while (rest.length > 0) {
+    const { body, rest: next } = takeOneLspFrame(rest)
+    if (body.length > 0) out.push(body)
+    if (next.length === 0) break
+    rest = next
+  }
+  return out
+}
+
+/**
+ * Process one JSON-RPC body (after stripping LSP framing): route and optionally push to connection.
+ */
+function processOneLspBody(body: string): void {
+  try {
+    const parsed = JSON.parse(body) as { method?: string; id?: string | number; params?: unknown }
+    if (parsed && typeof parsed.method === 'string' && parsed.id === undefined) {
+      pushE2ELspLogIn(parsed.method, parsed.params)
+    }
+  } catch {
+    // not JSON or not a notification
+  }
+  routeMessage(body)
+  try {
+    const parsed = JSON.parse(body) as { id?: string | number; result?: unknown; error?: unknown }
+    if (parsed && typeof parsed.id !== 'undefined') {
+      const id = parsed.id
+      if (deliveredResponseIds.has(id)) {
+        return
+      }
+      deliveredResponseIds.add(id)
+    }
+    incomingLspPush?.(body)
+  } catch (e) {
+    console.error('[LSP] Incoming push error (e.g. duplicate response):', e)
+  }
+}
+
 /**
  * Process one raw message as if received from the worker: run processIncomingWorkerMessage,
- * then routeMessage and incomingLspPush for LSP messages. Used by the worker onmessage and by tests.
+ * then split by LSP frames and process each body (routeMessage + incomingLspPush). Used by the worker onmessage and by tests.
  */
 export function processIncomingMessage(raw: string): void {
   if (processIncomingWorkerMessage(raw)) return
-  routeMessage(raw)
-  incomingLspPush?.(raw)
+  const bodies = splitLspFrames(raw)
+  if (bodies.length === 0) {
+    const body = stripLspFraming(raw)
+    if (body.length > 0) processOneLspBody(body)
+    return
+  }
+  for (const body of bodies) {
+    processOneLspBody(body)
+  }
 }
 
-export function initMessageRouter(workerUrl: URL, wasmUrl?: string): void {
+export function initMessageRouter(workerUrl: string | URL, wasmUrl?: string): void {
   if (worker) return
-  worker = new Worker(workerUrl, { type: 'module' })
+  const url = typeof workerUrl === 'string' ? workerUrl : workerUrl.href
+  worker = new Worker(url, { type: 'module' })
   worker.onmessage = (event: MessageEvent<string>) => {
     if (typeof event.data !== 'string') return
+    pushE2EWorkerMessage(event.data)
     processIncomingMessage(event.data)
   }
-  worker.onerror = (e) => {
-    console.error('[LSP Worker]', e)
+  worker.onerror = (e: ErrorEvent) => {
+    const detail = {
+      message: e.message,
+      filename: e.filename,
+      lineno: e.lineno,
+      colno: e.colno,
+      type: e.type,
+      errorString: e.error != null ? String(e.error) : undefined,
+    }
+    console.error('[LSP Worker]', detail)
+    if (typeof window !== 'undefined') {
+      const w = window as unknown as { __E2E_LSP_WORKER_ERROR_EVENT__?: unknown; __E2E_WORKER_ERROR_LAST__?: string }
+      w.__E2E_LSP_WORKER_ERROR_EVENT__ = detail
+      w.__E2E_WORKER_ERROR_LAST__ = JSON.stringify(detail)
+    }
   }
   if (wasmUrl) {
     sendToWorker(JSON.stringify({ type: WORKER_MSG_INIT, wasmUrl }))
@@ -103,10 +203,42 @@ export function initMessageRouter(workerUrl: URL, wasmUrl?: string): void {
   }
 }
 
+function pushE2EWorkerMessage(raw: string): void {
+  if (typeof window === 'undefined') return
+  const arr = (window as unknown as { __E2E_WORKER_MESSAGES__?: string[] }).__E2E_WORKER_MESSAGES__
+  if (!Array.isArray(arr)) return
+  arr.push(raw)
+}
+
+function pushE2ELspLogOut(method: string): void {
+  if (typeof window === 'undefined') return
+  const log = (window as unknown as { __E2E_LSP_LOG__?: Array<{ dir: string; method: string; params?: unknown }> })
+    .__E2E_LSP_LOG__
+  if (!Array.isArray(log)) return
+  log.push({ dir: 'out', method })
+}
+
+function pushE2ELspLogIn(method: string, params?: unknown): void {
+  if (typeof window === 'undefined') return
+  const log = (window as unknown as { __E2E_LSP_LOG__?: Array<{ dir: string; method: string; params?: unknown }> })
+    .__E2E_LSP_LOG__
+  if (!Array.isArray(log)) return
+  log.push({ dir: 'in', method, params })
+}
+
 export function sendToWorker(message: string): void {
   if (!worker) {
     console.warn('[LSP] Worker not initialized')
     return
+  }
+  try {
+    const body = stripLspFraming(message)
+    const parsed = JSON.parse(body) as { method?: string; type?: string }
+    if (parsed && typeof parsed.method === 'string') {
+      pushE2ELspLogOut(parsed.method)
+    }
+  } catch {
+    // not JSON or control message (e.g. init has type, no method)
   }
   worker.postMessage(message)
 }

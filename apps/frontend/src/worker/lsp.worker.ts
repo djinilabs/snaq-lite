@@ -4,7 +4,7 @@
  * All other messages are raw LSP JSON-RPC strings, forwarded to push_lsp_message after WASM is ready.
  */
 
-import { WORKER_MSG_INIT, WORKER_MSG_READY, WORKER_MSG_ERROR } from '~/lib/constants'
+import { WORKER_MSG_INIT, WORKER_MSG_READY, WORKER_MSG_ERROR } from '../lib/constants'
 
 const postMessageCallback = (response: string) => {
   self.postMessage(response)

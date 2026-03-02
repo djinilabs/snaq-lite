@@ -15,6 +15,8 @@ import {
   setIncomingLspPush,
 } from '~/lsp'
 import { setLanguageClient } from '~/lsp/language-client-singleton'
+// Vite bundles the worker and resolves this to a URL that works in dev and production
+import lspWorkerUrl from '../worker/lsp.worker.ts?worker&url'
 import { disposeModel } from '~/editor/text-model-registry'
 import { nodeIdToUri } from '~/editor/virtual-uri'
 import { getRemovedNodeIds } from '~/editor/model-lifecycle'
@@ -31,10 +33,9 @@ const INITIALIZE_PARAMS = {
 
 export function LspProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
-    const workerUrl = new URL('../worker/lsp.worker.ts', import.meta.url)
     const base = (import.meta.env.BASE_URL ?? '/').replace(/\/?$/, '/')
     const wasmUrl = `${window.location.origin}${base}lsp-wasm/snaq_lite_lsp.js`
-    initLspClient(workerUrl, wasmUrl)
+    initLspClient(lspWorkerUrl, wasmUrl)
     setMessageRouterHandlers({
       onNodeSignatureUpdated: (params) => {
         useGraphStore.getState().applyNodeSignature(
@@ -57,9 +58,9 @@ export function LspProvider({ children }: { children: React.ReactNode }) {
         await waitForWorkerReady()
         const { connection, push } = createLspConnection(sendToWorker)
         connection.listen()
+        setIncomingLspPush(push)
         await connection.sendRequest('initialize', INITIALIZE_PARAMS)
         connection.sendNotification('initialized', {})
-        setIncomingLspPush(push)
         setLanguageClient({
           sendRequest: (method, params) => connection.sendRequest(method, params),
           sendNotification: (method, params) => {

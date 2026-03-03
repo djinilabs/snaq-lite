@@ -55,6 +55,8 @@ export interface GraphCanvasProps {
   onSelectionChange?: OnSelectionChangeFunc
   /** Synced into node.selected so React Flow selection matches app state (e.g. toolbar Delete). */
   selectedNodeIds?: string[]
+  /** Synced into edge.selected and edge style so selected edges show accent color (match node border). */
+  selectedEdgeIds?: string[]
   /** Ref to get viewport center (flow coords) for placing new nodes. */
   viewportRef?: Ref<GraphCanvasViewportRef | null>
 }
@@ -90,7 +92,7 @@ function ViewportCenterRef({
 }
 
 export function GraphCanvas(props: GraphCanvasProps = {}) {
-  const { onSelectionChange, selectedNodeIds = [] } = props
+  const { onSelectionChange, selectedNodeIds = [], selectedEdgeIds = [] } = props
   const viewportRef = useRef<HTMLDivElement>(null)
   const nodeTypes = useMemo(
     () =>
@@ -118,10 +120,20 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
       }
     })
   }, [storeNodes, storeEdges, selectedNodeIds, livePositions])
-  const edges = useMemo(
-    () => storeEdges.map(graphEdgeToFlowEdge),
-    [storeEdges],
-  )
+  const selectedEdgeIdSet = useMemo(() => new Set(selectedEdgeIds), [selectedEdgeIds])
+  const edges = useMemo(() => {
+    return storeEdges.map((e) => {
+      const edge = graphEdgeToFlowEdge(e)
+      const selected = selectedEdgeIdSet.has(edge.id)
+      return {
+        ...edge,
+        selected,
+        style: selected
+          ? { stroke: 'var(--accent)', strokeWidth: 2 }
+          : undefined,
+      }
+    })
+  }, [storeEdges, selectedEdgeIdSet])
 
   const onConnect = useCallback(
     async (connection: Connection) => {
@@ -171,6 +183,14 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
     onSelectionChange?.({ nodes: [], edges: [] })
   }, [onSelectionChange])
 
+  /** When an edge is clicked, sync selection to parent so Delete/Backspace can remove it. */
+  const onEdgeClick = useCallback(
+    (_: MouseEvent, edge: Edge) => {
+      onSelectionChange?.({ nodes: [], edges: [edge] })
+    },
+    [onSelectionChange],
+  )
+
   return (
     <div
       ref={viewportRef}
@@ -184,6 +204,7 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
         onEdgesDelete={onEdgesDelete}
         onSelectionChange={onSelectionChange}
         onNodeClick={onNodeClick}
+        onEdgeClick={onEdgeClick}
         onPaneClick={onPaneClick}
         nodeTypes={nodeTypes}
         nodesDraggable

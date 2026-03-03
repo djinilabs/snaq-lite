@@ -78,6 +78,12 @@ button {
   cursor: not-allowed;
 }
 
+/* React Flow: selected edge same color as selected node border */
+.react-flow__edge.selected path {
+  stroke: var(--accent);
+  stroke-width: 2px;
+}
+
 /* React Flow controls (zoom, fit view) – dark theme */
 .react-flow__controls button {
   background: var(--bg-elevated) !important;

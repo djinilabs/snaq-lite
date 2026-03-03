@@ -24,7 +24,9 @@ function ProjectCanvasPage() {
   useProjectLoader(projectId)
   const canvasViewportRef = useRef<GraphCanvasViewportRef | null>(null)
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([])
-  const [selectedEdges, setSelectedEdges] = useState<SelectedEdgeLike[]>([])
+  /** Selected edge IDs for visual highlight; ref used by keydown so Delete works before state update. */
+  const [selectedEdgeIds, setSelectedEdgeIds] = useState<string[]>([])
+  const selectedEdgesRef = useRef<SelectedEdgeLike[]>([])
   const nodes = useGraphStore((s) => s.nodes)
   const edges = useGraphStore((s) => s.edges)
   const addNode = useGraphStore((s) => s.addNode)
@@ -113,26 +115,30 @@ function ProjectCanvasPage() {
   }, [selectedNodeIds, removeNode])
 
   const handleSelectionChange = useCallback(
-    (params: { nodes: { id: string }[]; edges: { target: string; targetHandle?: string | null }[] }) => {
+    (params: { nodes: { id: string }[]; edges?: { id: string; target: string; targetHandle?: string | null }[] }) => {
       setSelectedNodeIds(params.nodes.map((n) => n.id))
-      setSelectedEdges(params.edges.map((e) => ({ target: e.target, targetHandle: e.targetHandle })))
+      const edgeList = params.edges ?? []
+      setSelectedEdgeIds(edgeList.map((e) => e.id))
+      selectedEdgesRef.current = edgeList.map((e) => ({ target: e.target, targetHandle: e.targetHandle }))
     },
     [],
   )
 
-  const handleDeleteSelectedEdges = useCallback(() => {
+  const handleDeleteSelectedEdges = useCallback((edgesToDelete: SelectedEdgeLike[]) => {
     const storeNodes = useGraphStore.getState().nodes
     const nodeLike = storeNodes.map((n) => ({ id: n.id, uri: n.uri }))
-    applyDisconnectForDeletedEdges(selectedEdges, nodeLike, (uri, index) => void disconnectEdge(uri, index))
-    setSelectedEdges([])
-  }, [selectedEdges])
+    applyDisconnectForDeletedEdges(edgesToDelete, nodeLike, (uri, index) => void disconnectEdge(uri, index))
+    setSelectedEdgeIds([])
+    selectedEdgesRef.current = []
+  }, [])
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Delete' && e.key !== 'Backspace') return
-      if (selectedEdges.length > 0) {
+      const edges = selectedEdgesRef.current
+      if (edges.length > 0) {
         e.preventDefault()
-        handleDeleteSelectedEdges()
+        handleDeleteSelectedEdges(edges)
         return
       }
       if (selectedNodeIds.length > 0) {
@@ -142,7 +148,7 @@ function ProjectCanvasPage() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [selectedEdges, selectedNodeIds.length, handleDeleteSelectedEdges, handleDeleteSelected])
+  }, [selectedNodeIds.length, handleDeleteSelectedEdges, handleDeleteSelected])
 
   return (
     <AutoSaveContext.Provider value={autoSaveValue}>
@@ -166,6 +172,7 @@ function ProjectCanvasPage() {
           <GraphCanvas
             viewportRef={canvasViewportRef}
             selectedNodeIds={selectedNodeIds}
+            selectedEdgeIds={selectedEdgeIds}
             onSelectionChange={handleSelectionChange}
           />
         </div>

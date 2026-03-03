@@ -231,8 +231,22 @@ describe('graph-store', () => {
     useGraphStore.getState().setGraph(nodes, edges)
     expect(useGraphStore.getState().nodes).toHaveLength(1)
     expect(useGraphStore.getState().nodes[0]).toMatchObject({ id: 'a', position: { x: 10, y: 20 } })
-    expect(useGraphStore.getState().edges).toEqual(edges)
+    expect(useGraphStore.getState().edges).toHaveLength(1)
+    expect(useGraphStore.getState().edges[0]).toMatchObject({ sourceId: 'a', targetId: 'b', targetInputIndex: 0 })
     expect(useGraphStore.getState().pendingEdge).toBeNull()
+  })
+
+  it('addEdge defaults sourceHandle to output and stores custom sourceHandle', () => {
+    useGraphStore.getState().addEdge({ sourceId: 'a', targetId: 'b', targetInputIndex: 0 })
+    expect(useGraphStore.getState().edges[0].sourceHandle).toBe('output')
+    useGraphStore.getState().addEdge({
+      sourceId: 'c',
+      targetId: 'd',
+      targetInputIndex: 0,
+      sourceHandle: 'output-top',
+    })
+    expect(useGraphStore.getState().edges).toHaveLength(2)
+    expect(useGraphStore.getState().edges[1].sourceHandle).toBe('output-top')
   })
 
   it('setGraph preserves initialContent on nodes', () => {

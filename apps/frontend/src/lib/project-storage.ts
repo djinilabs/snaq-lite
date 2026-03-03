@@ -5,6 +5,7 @@
 
 import { getModel } from '~/editor/text-model-registry'
 import { nodeIdToUri } from '~/editor/virtual-uri'
+import { COMPUTATION_OUTPUT_HANDLE_RIGHT } from '~/lib/constants'
 import type { GraphEdge, GraphNode } from '~/store'
 import type { ProjectSnapshot } from '~/types/project'
 import { parseProjectSnapshot } from '~/types/project'
@@ -88,6 +89,9 @@ export function buildSnapshotFromGraph(
       sourceId: e.sourceId,
       targetId: e.targetId,
       targetInputIndex: e.targetInputIndex,
+      ...(e.sourceHandle != null && e.sourceHandle !== COMPUTATION_OUTPUT_HANDLE_RIGHT
+        ? { sourceHandle: e.sourceHandle }
+        : {}),
     })),
   }
 }

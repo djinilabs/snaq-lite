@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import {
+  COMPUTATION_OUTPUT_HANDLE_BOTTOM,
+  COMPUTATION_OUTPUT_HANDLE_RIGHT,
+  COMPUTATION_OUTPUT_HANDLE_TOP,
+  COMPUTATION_OUTPUT_HANDLES,
   VIRTUAL_URI_PREFIX,
   WORKER_MSG_INIT,
   WORKER_MSG_READY,
@@ -69,5 +73,15 @@ describe('constants', () => {
   it('DEFAULT_PRESENTATION_DOCUMENT_CONTENT declares input x as Undefined (accept any)', () => {
     expect(DEFAULT_PRESENTATION_DOCUMENT_CONTENT).toContain('input x: Undefined')
     expect(DEFAULT_PRESENTATION_DOCUMENT_CONTENT).toContain('$x')
+  })
+
+  it('computation output handle ids are distinct and COMPUTATION_OUTPUT_HANDLES contains all three', () => {
+    expect(COMPUTATION_OUTPUT_HANDLE_RIGHT).toBe('output')
+    expect(COMPUTATION_OUTPUT_HANDLE_TOP).toBe('output-top')
+    expect(COMPUTATION_OUTPUT_HANDLE_BOTTOM).toBe('output-bottom')
+    expect(COMPUTATION_OUTPUT_HANDLES).toHaveLength(3)
+    expect(COMPUTATION_OUTPUT_HANDLES).toContain(COMPUTATION_OUTPUT_HANDLE_RIGHT)
+    expect(COMPUTATION_OUTPUT_HANDLES).toContain(COMPUTATION_OUTPUT_HANDLE_TOP)
+    expect(COMPUTATION_OUTPUT_HANDLES).toContain(COMPUTATION_OUTPUT_HANDLE_BOTTOM)
   })
 })

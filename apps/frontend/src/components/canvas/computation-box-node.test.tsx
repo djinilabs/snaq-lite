@@ -10,6 +10,19 @@ import { join } from 'node:path'
 const NODE_PATH = join(__dirname, 'computation-box-node.tsx')
 
 describe('ComputationBoxNode', () => {
+  it('renders three output handles: top, right, and bottom with distinct ids and testids', () => {
+    const source = readFileSync(NODE_PATH, 'utf-8')
+    expect(source).toMatch(/COMPUTATION_OUTPUT_HANDLE_TOP/)
+    expect(source).toMatch(/data-testid="computation-output-handle-top"/)
+    expect(source).toMatch(/position=\{Position\.Top\}/)
+    expect(source).toMatch(/COMPUTATION_OUTPUT_HANDLE_RIGHT/)
+    expect(source).toMatch(/data-testid="computation-output-handle"/)
+    expect(source).toMatch(/position=\{Position\.Right\}/)
+    expect(source).toMatch(/COMPUTATION_OUTPUT_HANDLE_BOTTOM/)
+    expect(source).toMatch(/data-testid="computation-output-handle-bottom"/)
+    expect(source).toMatch(/position=\{Position\.Bottom\}/)
+  })
+
   it('widget store subscription is in ComputationResultBlock so result updates do not re-render node (preserves editor focus)', () => {
     const source = readFileSync(NODE_PATH, 'utf-8')
     // The main node must not subscribe to useWidgetStore((s) => s.byId[...]) so that when the result

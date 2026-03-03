@@ -94,6 +94,18 @@ describe('parseProjectSnapshot', () => {
     ])
   })
 
+  it('parses edges with sourceHandle', () => {
+    const snapshot = parseProjectSnapshot({
+      id: 'p',
+      nodes: [],
+      edges: [
+        { sourceId: 'a', targetId: 'b', targetInputIndex: 0, sourceHandle: 'output-top' },
+      ],
+    })
+    expect(snapshot?.edges).toHaveLength(1)
+    expect(snapshot?.edges[0].sourceHandle).toBe('output-top')
+  })
+
   it('returns null for invalid node type', () => {
     expect(
       parseProjectSnapshot({

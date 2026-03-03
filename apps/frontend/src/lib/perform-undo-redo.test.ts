@@ -67,7 +67,8 @@ describe('perform-undo-redo', () => {
       const [nodes, edges] = vi.mocked(syncLoadedGraphToLsp).mock.calls[0]!
       expect(nodes).toHaveLength(2)
       expect(edges).toHaveLength(1)
-      expect(edges[0]).toEqual({ sourceId: 'a', targetId: 'b', targetInputIndex: 0 })
+      expect(edges[0]).toMatchObject({ sourceId: 'a', targetId: 'b', targetInputIndex: 0 })
+      expect(edges[0].sourceHandle).toBe('output')
     })
 
     it('when undo stack is empty leaves state unchanged and still calls sync with current state', () => {

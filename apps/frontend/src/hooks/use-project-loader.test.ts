@@ -56,10 +56,11 @@ describe('useProjectLoader (sync load path)', () => {
     expect(useGraphStore.getState().edges).toHaveLength(1)
     expect(useGraphStore.getState().nodes[0].id).toBe('comp-1')
     expect(useGraphStore.getState().nodes[1].id).toBe('pres-1')
-    expect(useGraphStore.getState().edges[0]).toEqual({
+    expect(useGraphStore.getState().edges[0]).toMatchObject({
       sourceId: 'comp-1',
       targetId: 'pres-1',
       targetInputIndex: 0,
     })
+    expect(useGraphStore.getState().edges[0].sourceHandle).toBe('output')
   })
 })

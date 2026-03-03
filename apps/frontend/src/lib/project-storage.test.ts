@@ -122,7 +122,34 @@ describe('project-storage', () => {
         type: 'presentation',
       })
       expect(snapshot.nodes[1].content).toBeUndefined()
-      expect(snapshot.edges).toEqual(edges)
+      expect(snapshot.edges).toHaveLength(1)
+      expect(snapshot.edges[0]).toMatchObject({ sourceId: 'n1', targetId: 'n2', targetInputIndex: 0 })
+      expect(snapshot.edges[0].sourceHandle).toBeUndefined()
+    })
+
+    it('omits sourceHandle from snapshot when default output (backward compat)', () => {
+      const nodes = [
+        { id: 'n1', position: { x: 0, y: 0 }, type: 'computation' as const, uri: 'snaq://graph/n1.sl' },
+        { id: 'n2', position: { x: 100, y: 0 }, type: 'computation' as const, uri: 'snaq://graph/n2.sl' },
+      ]
+      const edges = [
+        { sourceId: 'n1', targetId: 'n2', targetInputIndex: 0, sourceHandle: 'output' },
+      ]
+      const snapshot = buildSnapshotFromGraph('p', nodes, edges)
+      expect(snapshot.edges[0]).toMatchObject({ sourceId: 'n1', targetId: 'n2', targetInputIndex: 0 })
+      expect(snapshot.edges[0].sourceHandle).toBeUndefined()
+    })
+
+    it('includes sourceHandle in edges when not default output', () => {
+      const nodes = [
+        { id: 'n1', position: { x: 0, y: 0 }, type: 'computation' as const, uri: 'snaq://graph/n1.sl' },
+        { id: 'n2', position: { x: 100, y: 0 }, type: 'computation' as const, uri: 'snaq://graph/n2.sl' },
+      ]
+      const edges = [
+        { sourceId: 'n1', targetId: 'n2', targetInputIndex: 0, sourceHandle: 'output-top' },
+      ]
+      const snapshot = buildSnapshotFromGraph('p', nodes, edges)
+      expect(snapshot.edges[0].sourceHandle).toBe('output-top')
     })
 
     it('uses empty string for computation node when initialContent missing', () => {

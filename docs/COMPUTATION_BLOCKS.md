@@ -12,6 +12,10 @@ Inputs are **properties of the block**, not part of the block text. You edit the
 
 You can add several inputs; each gets a port on the left side of the block. You can remove an input with the × button. The type is used for wiring: the app checks that the source block’s output type matches the input type (e.g. Vector → Vector).
 
+## Output ports
+
+A computation block has **one output** (the block’s result). You can draw an edge from any of three output ports: on the **right**, **top**, or **bottom** of the box. All three carry the same value; choose the port that keeps the diagram clearest.
+
 ## Moving blocks
 
 To move a computation block, drag by its **title bar** (the “Computation” label at the top). The editor and input controls (name, type, + Add input) are clickable without moving the block.
@@ -34,6 +38,7 @@ To remove a connection between blocks, click the **edge** (the line between the 
 - **Inputs are block properties** — add and edit them in the Inputs UI on the block, not in the code.
 - **Use `$name` in the script** — the block text refers to inputs by name (e.g. `$x`, `$scale`).
 - **Handles appear for each input** — input ports show on the left; you connect other blocks to them.
+- **Output ports** — one result, three connection points (right, top, bottom); use whichever keeps the graph tidy.
 - **Types must match** — when connecting, the source output type (e.g. Vector) must match the target input type.
 - **To remove a connection** — click the edge to select it, then press Delete or Backspace.
 

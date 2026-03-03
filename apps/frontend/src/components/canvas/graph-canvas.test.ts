@@ -1,7 +1,46 @@
 import { describe, it, expect, vi } from 'vitest'
+import { graphEdgeToFlowEdge } from './graph-edge-utils'
 import { getFlowNodeData } from './graph-node-data'
 import { applyNodePositionChanges } from './graph-node-position-changes'
 import type { GraphNode, GraphEdge } from '~/store'
+
+describe('graphEdgeToFlowEdge', () => {
+  it('uses sourceHandle from edge when present', () => {
+    const edge: GraphEdge = {
+      sourceId: 'a',
+      targetId: 'b',
+      targetInputIndex: 0,
+      sourceHandle: 'output-top',
+    }
+    const flow = graphEdgeToFlowEdge(edge)
+    expect(flow.sourceHandle).toBe('output-top')
+    expect(flow.id).toBe('a-b-0')
+    expect(flow.source).toBe('a')
+    expect(flow.target).toBe('b')
+    expect(flow.targetHandle).toBe('0')
+  })
+
+  it('defaults sourceHandle to output when absent', () => {
+    const edge: GraphEdge = {
+      sourceId: 'n1',
+      targetId: 'n2',
+      targetInputIndex: 1,
+    }
+    const flow = graphEdgeToFlowEdge(edge)
+    expect(flow.sourceHandle).toBe('output')
+  })
+
+  it('preserves output-bottom sourceHandle', () => {
+    const edge: GraphEdge = {
+      sourceId: 'x',
+      targetId: 'y',
+      targetInputIndex: 0,
+      sourceHandle: 'output-bottom',
+    }
+    const flow = graphEdgeToFlowEdge(edge)
+    expect(flow.sourceHandle).toBe('output-bottom')
+  })
+})
 
 describe('getFlowNodeData', () => {
   const compNode: GraphNode = {

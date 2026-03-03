@@ -19,9 +19,11 @@ import {
   type OnSelectionChangeFunc,
 } from '@xyflow/react'
 import { connectEdge, disconnectEdge } from './edge-handlers'
+import { COMPUTATION_OUTPUT_HANDLE_RIGHT } from '~/lib/constants'
 import { applyDisconnectForDeletedEdges } from './edge-delete-params'
 import { getDragHandleSelector } from './graph-drag-handle'
 import { applyNodePositionChanges } from './graph-node-position-changes'
+import { graphEdgeToFlowEdge } from './graph-edge-utils'
 import { getFlowNodeData } from './graph-node-data'
 import { ComputationBoxNode } from './computation-box-node'
 import { PresentationBlockNode } from './presentation-block-node'
@@ -38,16 +40,6 @@ function graphNodeToFlowNode(
     type: n.type,
     position: n.position,
     data: data as unknown as Record<string, unknown>,
-  }
-}
-
-function graphEdgeToFlowEdge(e: import('~/store').GraphEdge): Edge {
-  return {
-    id: `${e.sourceId}-${e.targetId}-${e.targetInputIndex}`,
-    source: e.sourceId,
-    target: e.targetId,
-    sourceHandle: 'output',
-    targetHandle: String(e.targetInputIndex),
   }
 }
 
@@ -143,7 +135,12 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
       const sourceNode = useGraphStore.getState().nodes.find((n) => n.id === connection.source)
       const targetNode = useGraphStore.getState().nodes.find((n) => n.id === connection.target)
       if (!sourceNode || !targetNode) return
-      await connectEdge(sourceNode.uri, targetNode.uri, targetInputIndex)
+      await connectEdge(
+        sourceNode.uri,
+        targetNode.uri,
+        targetInputIndex,
+        connection.sourceHandle ?? COMPUTATION_OUTPUT_HANDLE_RIGHT,
+      )
     },
     [],
   )

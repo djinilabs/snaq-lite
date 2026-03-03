@@ -38,6 +38,17 @@ export const NOWHEEL_CLASS = 'nowheel'
 /** Allowed types for computation block input ports (use $name in script to reference). */
 export const INPUT_PORT_TYPES = ['Vector', 'Numeric', 'Symbolic', 'FuzzyBool', 'Undefined'] as const
 
+/** Computation block output handle ids (right, top, bottom). Same result; used for edge connection point. */
+export const COMPUTATION_OUTPUT_HANDLE_RIGHT = 'output'
+export const COMPUTATION_OUTPUT_HANDLE_TOP = 'output-top'
+export const COMPUTATION_OUTPUT_HANDLE_BOTTOM = 'output-bottom'
+export const COMPUTATION_OUTPUT_HANDLES = [
+  COMPUTATION_OUTPUT_HANDLE_RIGHT,
+  COMPUTATION_OUTPUT_HANDLE_TOP,
+  COMPUTATION_OUTPUT_HANDLE_BOTTOM,
+] as const
+export type ComputationOutputHandleId = (typeof COMPUTATION_OUTPUT_HANDLES)[number]
+
 /** Debounce delay (ms) before auto-saving after graph or editor content change. */
 export const AUTO_SAVE_DEBOUNCE_MS = 600
 

@@ -5,7 +5,11 @@
  */
 
 import { create } from 'zustand'
-import { UNDO_STACK_MAX } from '~/lib/constants'
+import {
+  type ComputationOutputHandleId,
+  COMPUTATION_OUTPUT_HANDLE_RIGHT,
+  UNDO_STACK_MAX,
+} from '~/lib/constants'
 import type { NodeInputPort } from '~/lsp/types'
 
 export type UndoSnapshot = { nodes: GraphNode[]; edges: GraphEdge[] }
@@ -44,6 +48,8 @@ export interface GraphEdge {
   targetId: string
   /** Index of the target node's input port (0-based). Connections survive input renames. */
   targetInputIndex: number
+  /** Which output handle the edge is drawn from: right, top, or bottom. Default right. */
+  sourceHandle?: ComputationOutputHandleId
 }
 
 export interface PendingEdge {
@@ -67,7 +73,7 @@ interface GraphState {
   addNode: (node: Omit<GraphNode, 'inputs' | 'outputType'>) => void
   moveNode: (id: string, position: { x: number; y: number }) => void
   removeNode: (id: string) => void
-  addEdge: (edge: GraphEdge) => void
+  addEdge: (edge: Omit<GraphEdge, 'sourceHandle'> & { sourceHandle?: string }) => void
   removeEdge: (targetId: string, targetInputIndex: number) => void
   setPendingEdge: (edge: PendingEdge | null) => void
   clearPendingEdge: () => void
@@ -129,10 +135,14 @@ export const useGraphStore = create<GraphState>((set) => ({
   addEdge: (edge) =>
     set((state) => {
       const undoStack = pushUndoAndClearRedo(state.undoSnapshotGetter, state.undoStack)
+      const fullEdge: GraphEdge = {
+        ...edge,
+        sourceHandle: edge.sourceHandle ?? COMPUTATION_OUTPUT_HANDLE_RIGHT,
+      }
       return {
         edges: state.edges.filter(
           (e) => !(e.targetId === edge.targetId && e.targetInputIndex === edge.targetInputIndex),
-        ).concat(edge),
+        ).concat(fullEdge),
         pendingEdge: null,
         undoStack,
         redoStack: [],

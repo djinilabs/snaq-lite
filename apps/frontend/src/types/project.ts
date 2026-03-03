@@ -28,6 +28,8 @@ export interface ProjectEdge {
   targetInputIndex?: number
   /** Legacy: used when loading old snapshots; resolved to targetInputIndex in loader. */
   targetInputName?: string
+  /** Which output handle the edge is drawn from: 'output', 'output-top', 'output-bottom'. Optional; default 'output'. */
+  sourceHandle?: string
 }
 
 export interface ProjectSnapshot {
@@ -87,12 +89,14 @@ export function parseProjectSnapshot(data: unknown): ProjectSnapshot | null {
     const hasIndex = typeof eo.targetInputIndex === 'number'
     const hasName = typeof eo.targetInputName === 'string'
     if (!hasIndex && !hasName) return null
-    parsedEdges.push({
+    const edge: ProjectEdge = {
       sourceId: eo.sourceId,
       targetId: eo.targetId,
       ...(hasIndex ? { targetInputIndex: eo.targetInputIndex as number } : {}),
       ...(hasName ? { targetInputName: eo.targetInputName as string } : {}),
-    })
+    }
+    if (typeof eo.sourceHandle === 'string') edge.sourceHandle = eo.sourceHandle
+    parsedEdges.push(edge)
   }
   return {
     id,

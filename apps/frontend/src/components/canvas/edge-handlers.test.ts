@@ -48,11 +48,66 @@ describe('edge-handlers', () => {
         targetInputName: 'x',
       })
       expect(useGraphStore.getState().edges).toHaveLength(1)
-      expect(useGraphStore.getState().edges[0]).toEqual({
+      expect(useGraphStore.getState().edges[0]).toMatchObject({
         sourceId: 'n1',
         targetId: 'n2',
         targetInputIndex: 0,
       })
+      expect(useGraphStore.getState().edges[0].sourceHandle).toBe('output')
+    })
+
+    it('stores sourceHandle when connecting from a specific output port', async () => {
+      useGraphStore.getState().addNode({
+        id: 'n1',
+        position: { x: 0, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n1.sl',
+      })
+      useGraphStore.getState().addNode({
+        id: 'n2',
+        position: { x: 100, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n2.sl',
+      })
+      useGraphStore.getState().setNodeInputs('n2', [{ name: 'x', type: 'Vector' }])
+      mockSendRequest.mockResolvedValue(undefined)
+
+      const result = await connectEdge(
+        'snaq://graph/n1.sl',
+        'snaq://graph/n2.sl',
+        0,
+        'output-top',
+      )
+
+      expect(result).toBe(true)
+      expect(useGraphStore.getState().edges[0].sourceHandle).toBe('output-top')
+    })
+
+    it('stores output-bottom sourceHandle when connecting from bottom port', async () => {
+      useGraphStore.getState().addNode({
+        id: 'n1',
+        position: { x: 0, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n1.sl',
+      })
+      useGraphStore.getState().addNode({
+        id: 'n2',
+        position: { x: 100, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n2.sl',
+      })
+      useGraphStore.getState().setNodeInputs('n2', [{ name: 'x', type: 'Vector' }])
+      mockSendRequest.mockResolvedValue(undefined)
+
+      const result = await connectEdge(
+        'snaq://graph/n1.sl',
+        'snaq://graph/n2.sl',
+        0,
+        'output-bottom',
+      )
+
+      expect(result).toBe(true)
+      expect(useGraphStore.getState().edges[0].sourceHandle).toBe('output-bottom')
     })
 
     it('on LSP error removes edge, clears pendingEdge, adds toast, and returns false', async () => {
@@ -327,11 +382,12 @@ describe('edge-handlers', () => {
       await disconnectEdge('snaq://graph/n2.sl', 0)
 
       expect(useGraphStore.getState().edges).toHaveLength(1)
-      expect(useGraphStore.getState().edges[0]).toEqual({
+      expect(useGraphStore.getState().edges[0]).toMatchObject({
         sourceId: 'n1',
         targetId: 'n2',
         targetInputIndex: 0,
       })
+      expect(useGraphStore.getState().edges[0].sourceHandle).toBe('output')
       expect(addToast).toHaveBeenCalledWith('LSP disconnect failed', 'error')
     })
 

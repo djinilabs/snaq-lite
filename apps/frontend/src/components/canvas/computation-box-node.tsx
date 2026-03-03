@@ -11,7 +11,13 @@ import type { Node, NodeProps } from '@xyflow/react'
 import { Handle, Position } from '@xyflow/react'
 import { getModel } from '~/editor/text-model-registry'
 import { buildComputationDocumentContent } from '~/lib/computation-document-content'
-import { INPUT_PORT_TYPES, LSP_METHOD_DID_OPEN } from '~/lib/constants'
+import {
+  COMPUTATION_OUTPUT_HANDLE_BOTTOM,
+  COMPUTATION_OUTPUT_HANDLE_RIGHT,
+  COMPUTATION_OUTPUT_HANDLE_TOP,
+  INPUT_PORT_TYPES,
+  LSP_METHOD_DID_OPEN,
+} from '~/lib/constants'
 import type { NodeInputPort } from '~/lsp/types'
 import { useSubscribeWidget } from '~/hooks/use-subscribe-widget'
 import { useGraphStore, useWidgetStore } from '~/store'
@@ -187,6 +193,12 @@ export function ComputationBoxNode({
       selected={selected}
       minHeight={minHeight}
     >
+      <Handle
+        type="source"
+        position={Position.Top}
+        id={COMPUTATION_OUTPUT_HANDLE_TOP}
+        data-testid="computation-output-handle-top"
+      />
       <NodeContentZone
         style={{
           fontSize: 11,
@@ -305,7 +317,18 @@ export function ComputationBoxNode({
             />
           ) : null,
       )}
-      <Handle type="source" position={Position.Right} id="output" data-testid="computation-output-handle" />
+      <Handle
+        type="source"
+        position={Position.Right}
+        id={COMPUTATION_OUTPUT_HANDLE_RIGHT}
+        data-testid="computation-output-handle"
+      />
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        id={COMPUTATION_OUTPUT_HANDLE_BOTTOM}
+        data-testid="computation-output-handle-bottom"
+      />
       <NodeContentZone
         ref={editorWrapRef}
         nowheel

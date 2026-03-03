@@ -5,6 +5,7 @@
 import { getModel } from '~/editor/text-model-registry'
 import { buildComputationDocumentContent } from '~/lib/computation-document-content'
 import {
+  COMPUTATION_OUTPUT_HANDLE_RIGHT,
   DEFAULT_PRESENTATION_DOCUMENT_CONTENT,
   LSP_METHOD_DID_OPEN,
   LSP_METHOD_GRAPH_CONNECT,
@@ -40,12 +41,14 @@ const LSP_WAIT_MS = 15_000
 /**
  * Optimistic connect: add edge to store and draw wire immediately, then send LSP connect.
  * targetInputIndex is the 0-based index of the target node's input port (connection survives renames).
+ * sourceHandle is which output port the edge is drawn from (right, top, or bottom).
  * LSP is called with the current input name at that index.
  */
 export async function connectEdge(
   sourceUri: string,
   targetUri: string,
   targetInputIndex: number,
+  sourceHandle?: string,
 ): Promise<boolean> {
   const langClient = await waitForLanguageClient(LSP_WAIT_MS)
   if (!langClient) {
@@ -89,7 +92,12 @@ export async function connectEdge(
       targetUri,
       targetInputName,
     })
-    useGraphStore.getState().addEdge({ sourceId, targetId, targetInputIndex })
+    useGraphStore.getState().addEdge({
+      sourceId,
+      targetId,
+      targetInputIndex,
+      sourceHandle: sourceHandle ?? COMPUTATION_OUTPUT_HANDLE_RIGHT,
+    })
     if (targetNode?.type === 'computation') {
       useWidgetContentVersionStore.getState().increment(`${COMPUTATION_RESULT_WIDGET_ID_PREFIX}${targetId}`)
     }

@@ -8,7 +8,8 @@ import { AutoSaveContext } from '~/contexts/auto-save-context'
 import { useProjectLoader } from '~/hooks/use-project-loader'
 import { nodeIdToUri } from '~/editor/virtual-uri'
 import { AUTO_SAVE_DEBOUNCE_MS } from '~/lib/constants'
-import { buildSnapshotFromGraph, getGraphStateForUndo, setProjectSnapshot, syncModelsToGraphNodes } from '~/lib/project-storage'
+import { buildSnapshotFromGraph, getGraphStateForUndo, setProjectSnapshot } from '~/lib/project-storage'
+import { performRedo, performUndo } from '~/lib/perform-undo-redo'
 import { useGraphStore } from '~/store'
 import { useProjectsIndexStore } from '~/store'
 
@@ -79,11 +80,9 @@ function ProjectCanvasPage() {
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
         e.preventDefault()
         if (e.shiftKey) {
-          useGraphStore.getState().redo()
-          syncModelsToGraphNodes(useGraphStore.getState().nodes)
+          performRedo()
         } else {
-          useGraphStore.getState().undo()
-          syncModelsToGraphNodes(useGraphStore.getState().nodes)
+          performUndo()
         }
       }
     }

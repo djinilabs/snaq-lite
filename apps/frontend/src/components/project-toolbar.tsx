@@ -4,7 +4,8 @@
 
 import { Link, useNavigate } from '@tanstack/react-router'
 import { downloadProjectSnapshot } from '~/lib/export-import'
-import { buildSnapshotFromGraph, syncModelsToGraphNodes } from '~/lib/project-storage'
+import { buildSnapshotFromGraph } from '~/lib/project-storage'
+import { performRedo, performUndo } from '~/lib/perform-undo-redo'
 import { useGraphStore } from '~/store'
 import { useProjectsIndexStore } from '~/store'
 
@@ -31,13 +32,11 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
   const redoStackLength = useGraphStore((s) => s.redoStack.length)
 
   const handleUndo = () => {
-    useGraphStore.getState().undo()
-    syncModelsToGraphNodes(useGraphStore.getState().nodes)
+    performUndo()
   }
 
   const handleRedo = () => {
-    useGraphStore.getState().redo()
-    syncModelsToGraphNodes(useGraphStore.getState().nodes)
+    performRedo()
   }
 
   const handleExport = () => {

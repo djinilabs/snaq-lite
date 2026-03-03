@@ -85,6 +85,7 @@ export function ComputationBoxNode({
 }: NodeProps<ComputationFlowNode>) {
   const nodes = useGraphStore((s) => s.nodes)
   const setNodeInputs = useGraphStore((s) => s.setNodeInputs)
+  const setNodeContent = useGraphStore((s) => s.setNodeContent)
   const node = nodes.find((n) => n.id === id)
   const inputs = node?.inputs ?? []
   const widgetId = `${RESULT_WIDGET_ID_PREFIX}${id}`
@@ -102,13 +103,24 @@ export function ComputationBoxNode({
     }
   }, [data.uri, node?.initialContent])
 
+  const flushContentToStore = useCallback(() => {
+    if (debounceRef.current != null) {
+      clearTimeout(debounceRef.current)
+      debounceRef.current = null
+    }
+    const content = getModel(data.uri, undefined as never)?.getValue() ?? ''
+    setNodeContent(id, content)
+  }, [id, data.uri, setNodeContent])
+
   const onContentChange = useCallback(() => {
     if (debounceRef.current != null) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => {
       debounceRef.current = null
+      const content = getModel(data.uri, undefined as never)?.getValue() ?? ''
+      setNodeContent(id, content)
       useWidgetContentVersionStore.getState().increment(widgetId)
     }, CONTENT_CHANGE_DEBOUNCE_MS)
-  }, [widgetId])
+  }, [widgetId, id, data.uri, setNodeContent])
 
   useEffect(() => {
     return () => {
@@ -135,6 +147,15 @@ export function ComputationBoxNode({
   }, [])
 
   const visible = inView
+
+  useEffect(() => {
+    if (visible) return
+    if (debounceRef.current == null) return
+    clearTimeout(debounceRef.current)
+    debounceRef.current = null
+    const content = getModel(data.uri, undefined as never)?.getValue() ?? ''
+    setNodeContent(id, content)
+  }, [visible, id, data.uri, setNodeContent])
 
   useEffect(() => {
     focusDebugNodeRender(id)
@@ -274,6 +295,7 @@ export function ComputationBoxNode({
               type="target"
               position={Position.Left}
               id={inp.name}
+              data-testid={`computation-input-handle-${inp.name}`}
               style={{ top: computationNodeHandleTop(i) }}
             />
           ) : null,
@@ -297,6 +319,7 @@ export function ComputationBoxNode({
             wrapperRef={editorWrapRef}
             initialContent={node?.initialContent ?? ''}
             onContentChange={onContentChange}
+            onBlur={flushContentToStore}
           />
         ) : (
           <div

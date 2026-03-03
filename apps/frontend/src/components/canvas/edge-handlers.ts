@@ -2,6 +2,7 @@
  * Logic to send snaqlite/graph/connect and disconnect via LSP client and update graph store.
  */
 
+import { getModel } from '~/editor/text-model-registry'
 import {
   DEFAULT_PRESENTATION_DOCUMENT_CONTENT,
   LSP_METHOD_DID_OPEN,
@@ -10,12 +11,31 @@ import {
   LSP_SUBSCRIBE_AFTER_DID_OPEN_MS,
 } from '~/lib/constants'
 import { waitForLanguageClient } from '~/lsp/language-client-singleton'
-import { useGraphStore } from '~/store'
+import { useGraphStore, useWidgetContentVersionStore } from '~/store'
 import { useUIStore } from '~/store'
+
+const COMPUTATION_RESULT_WIDGET_ID_PREFIX = 'computation-result-'
 
 function presentationDocumentContent(inputs: { name: string; type: string }[] | undefined): string {
   if (!inputs?.length) return DEFAULT_PRESENTATION_DOCUMENT_CONTENT
   return inputs.map((i) => `input ${i.name}: ${i.type}\n$${i.name}`).join('\n')
+}
+
+/** Build document content for a computation target so the LSP has input decls (from UI) + body (from editor/store). */
+function computationDocumentContent(
+  targetUri: string,
+  targetNode: { inputs?: { name: string; type: string }[]; initialContent?: string },
+): string {
+  const body = getModel(targetUri, undefined as never)?.getValue() ?? targetNode.initialContent ?? ''
+  const inputDecls =
+    targetNode.inputs
+      ?.filter((i) => i.name.trim().length > 0)
+      .map((i) => `input ${i.name}: ${i.type}`)
+      .join('\n') ?? ''
+  if (inputDecls.length === 0) return body
+  return body.trimStart().startsWith('input ')
+    ? body
+    : `${inputDecls}\n${body}`.trim()
 }
 
 function errorMessage(e: unknown): string {
@@ -50,6 +70,19 @@ export async function connectEdge(
       textDocument: { uri: targetUri, version: 1, languageId: 'snaq', text: content },
     })
     await new Promise((r) => setTimeout(r, LSP_SUBSCRIBE_AFTER_DID_OPEN_MS))
+  } else if (targetNode?.type === 'computation') {
+    let content = computationDocumentContent(targetUri, targetNode)
+    // Ensure LSP has the target input: if content is empty but store has the input (e.g. UI-only), send minimal decl
+    if (content.trim().length === 0) {
+      const decl = targetNode.inputs?.find((i) => i.name.trim() && i.name === targetInputName)
+      if (decl) content = `input ${decl.name}: ${decl.type}`
+    }
+    if (content.trim().length > 0) {
+      langClient.sendNotification(LSP_METHOD_DID_OPEN, {
+        textDocument: { uri: targetUri, version: 1, languageId: 'snaq', text: content },
+      })
+      await new Promise((r) => setTimeout(r, LSP_SUBSCRIBE_AFTER_DID_OPEN_MS))
+    }
   }
 
   try {
@@ -59,6 +92,9 @@ export async function connectEdge(
       targetInputName,
     })
     useGraphStore.getState().addEdge({ sourceId, targetId, targetInputName })
+    if (targetNode?.type === 'computation') {
+      useWidgetContentVersionStore.getState().increment(`${COMPUTATION_RESULT_WIDGET_ID_PREFIX}${targetId}`)
+    }
     return true
   } catch (e) {
     useGraphStore.getState().clearPendingEdge()

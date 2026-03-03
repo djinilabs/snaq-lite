@@ -26,6 +26,8 @@ interface ComputationBoxEditorProps {
   initialContent?: string
   /** Called when the user edits content (used to trigger re-subscribe for result). */
   onContentChange?: () => void
+  /** Called when the editor loses focus (e.g. to flush content to store before connecting). */
+  onBlur?: () => void
 }
 
 const DEFAULT_WIDTH = 224
@@ -39,6 +41,7 @@ export function ComputationBoxEditor({
   height: heightProp,
   initialContent = '',
   onContentChange,
+  onBlur: onBlurProp,
 }: ComputationBoxEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const editorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null)
@@ -53,6 +56,8 @@ export function ComputationBoxEditor({
   requestSaveRef.current = autoSave?.requestSave ?? (() => {})
   const onContentChangeRef = useRef(onContentChange)
   onContentChangeRef.current = onContentChange
+  const onBlurRef = useRef(onBlurProp)
+  onBlurRef.current = onBlurProp
 
   const uri = nodeIdToUri(nodeId)
 
@@ -97,6 +102,7 @@ export function ComputationBoxEditor({
       }
       const onFocusOut = (e: FocusEvent) => {
         focusDebugEditorFocusLost(nodeId, document.activeElement ?? undefined, e.relatedTarget)
+        onBlurRef.current?.()
       }
       container.addEventListener('focusin', onFocusIn)
       container.addEventListener('focusout', onFocusOut)

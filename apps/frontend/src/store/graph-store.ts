@@ -74,6 +74,8 @@ interface GraphState {
   /** Updates only outputType from LSP. Inputs are block properties edited in the UI, not from block text. */
   applyNodeSignature: (uri: string, _inputs: NodeInputPort[], outputType?: string | null) => void
   setNodeInputs: (nodeId: string, inputs: NodeInputPort[]) => void
+  /** Updates computation node's initialContent (e.g. when editor content changes). Used so connectEdge has latest content when target editor may be unmounted. Does not push undo. */
+  setNodeContent: (nodeId: string, content: string) => void
   /** Replace entire graph (e.g. when loading a project). Clears pendingEdge and focusEditorForNodeId. */
   setGraph: (nodes: GraphNode[], edges: GraphEdge[], options?: { clearHistory?: boolean }) => void
   setUndoSnapshotGetter: (getter: UndoSnapshotGetter) => void
@@ -175,6 +177,13 @@ export const useGraphStore = create<GraphState>((set) => ({
         redoStack: [],
       }
     }),
+
+  setNodeContent: (nodeId, content) =>
+    set((state) => ({
+      nodes: state.nodes.map((n) =>
+        n.id === nodeId && n.type === 'computation' ? { ...n, initialContent: content } : n,
+      ),
+    })),
 
   setGraph: (nodes, edges, options) =>
     set((_state) => ({

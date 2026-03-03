@@ -319,6 +319,73 @@ test.describe('canvas', () => {
     await expect(page.getByText("Type mismatch: source output type 'Numeric' does not match target input 'x' type 'Vector'")).not.toBeVisible()
   })
 
+  test('wiring computation output to another computation input shows combined result (420)', async ({
+    page,
+  }) => {
+    test.setTimeout(40_000)
+    await gotoCanvas(page)
+    await page.getByTestId('add-computation-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
+
+    const firstNode = page.getByTestId('computation-node').first()
+    await firstNode.getByTestId('computation-add-input').click()
+    await expect(firstNode.getByTestId('computation-input-name-0')).toBeAttached({ timeout: 5000 })
+    await firstNode.getByTestId('computation-input-name-0').click()
+    await page.keyboard.type('x')
+    await firstNode.getByTestId('computation-input-type-0').selectOption('Numeric')
+    await page.waitForTimeout(200)
+
+    const editorZone1 = page.getByTestId('computation-editor-zone').first()
+    await expect(editorZone1).toBeVisible({ timeout: 15_000 })
+    await editorZone1.click()
+    await page.waitForTimeout(200)
+    await page.keyboard.type('input x: Numeric', { delay: 30 })
+    await page.keyboard.press('Enter')
+    await page.keyboard.type('$x * 10', { delay: 30 })
+    await page.waitForTimeout(3500)
+    await expect(
+      page.getByTestId('computation-node').first().getByTestId('computation-result'),
+    ).toBeVisible({ timeout: 15_000 })
+
+    await page.getByTestId('add-computation-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(2)
+
+    const editorZone2 = page.getByTestId('computation-editor-zone').nth(1)
+    await editorZone2.scrollIntoViewIfNeeded()
+    await expect(editorZone2).toBeVisible({ timeout: 15_000 })
+    await editorZone2.click()
+    await page.waitForTimeout(400)
+    await page.keyboard.type('42')
+    await page.waitForTimeout(2500)
+
+    const sourceHandle = page.getByTestId('computation-output-handle').nth(1)
+    const targetHandle = page.getByTestId('computation-node').first().getByTestId('computation-input-handle-x')
+    await sourceHandle.scrollIntoViewIfNeeded()
+    await targetHandle.scrollIntoViewIfNeeded()
+    const sourceBox = await sourceHandle.boundingBox()
+    const targetBox = await targetHandle.boundingBox()
+    expect(sourceBox).toBeTruthy()
+    expect(targetBox).toBeTruthy()
+    const startX = sourceBox!.x + sourceBox!.width / 2
+    const startY = sourceBox!.y + sourceBox!.height / 2
+    const endX = targetBox!.x + targetBox!.width / 2
+    const endY = targetBox!.y + targetBox!.height / 2
+
+    await page.mouse.move(startX, startY)
+    await page.mouse.down()
+    await page.mouse.move(endX, endY, { steps: 10 })
+    await page.mouse.up()
+    await page.waitForTimeout(3000)
+
+    await expect(page.getByText("target has no input named 'x'")).not.toBeVisible()
+    await expect(
+      page.getByText(/Type mismatch: source output type .* does not match target input 'x' type/),
+    ).not.toBeVisible()
+    const firstResult = page.getByTestId('computation-node').first().getByTestId('computation-result')
+    await firstResult.scrollIntoViewIfNeeded()
+    await expect(firstResult.getByText('420')).toBeVisible({ timeout: 20_000 })
+  })
+
   test('wired presentation shows computation value and never shows unbound stream input', async ({
     page,
   }) => {

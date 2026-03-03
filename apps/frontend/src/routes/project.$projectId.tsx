@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
 import { GraphCanvas, type GraphCanvasViewportRef } from '~/components/canvas/graph-canvas'
+import { applyDisconnectForDeletedEdges } from '~/components/canvas/edge-delete-params'
+import { disconnectEdge } from '~/components/canvas/edge-handlers'
 import { ProjectToolbar } from '~/components/project-toolbar'
 import { AutoSaveContext } from '~/contexts/auto-save-context'
 import { useProjectLoader } from '~/hooks/use-project-loader'
@@ -9,6 +11,9 @@ import { AUTO_SAVE_DEBOUNCE_MS } from '~/lib/constants'
 import { buildSnapshotFromGraph, getGraphStateForUndo, setProjectSnapshot, syncModelsToGraphNodes } from '~/lib/project-storage'
 import { useGraphStore } from '~/store'
 import { useProjectsIndexStore } from '~/store'
+
+/** Selected edge shape for keyboard delete (target + targetHandle from React Flow). */
+type SelectedEdgeLike = { target: string; targetHandle?: string | null }
 
 export const Route = createFileRoute('/project/$projectId')({
   component: ProjectCanvasPage,
@@ -19,6 +24,7 @@ function ProjectCanvasPage() {
   useProjectLoader(projectId)
   const canvasViewportRef = useRef<GraphCanvasViewportRef | null>(null)
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([])
+  const [selectedEdges, setSelectedEdges] = useState<SelectedEdgeLike[]>([])
   const nodes = useGraphStore((s) => s.nodes)
   const edges = useGraphStore((s) => s.edges)
   const addNode = useGraphStore((s) => s.addNode)
@@ -107,23 +113,36 @@ function ProjectCanvasPage() {
   }, [selectedNodeIds, removeNode])
 
   const handleSelectionChange = useCallback(
-    (params: { nodes: { id: string }[] }) => {
+    (params: { nodes: { id: string }[]; edges: { target: string; targetHandle?: string | null }[] }) => {
       setSelectedNodeIds(params.nodes.map((n) => n.id))
+      setSelectedEdges(params.edges.map((e) => ({ target: e.target, targetHandle: e.targetHandle })))
     },
     [],
   )
 
+  const handleDeleteSelectedEdges = useCallback(() => {
+    const storeNodes = useGraphStore.getState().nodes
+    const nodeLike = storeNodes.map((n) => ({ id: n.id, uri: n.uri }))
+    applyDisconnectForDeletedEdges(selectedEdges, nodeLike, (uri, index) => void disconnectEdge(uri, index))
+    setSelectedEdges([])
+  }, [selectedEdges])
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (selectedNodeIds.length === 0) return
-      if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return
+      if (selectedEdges.length > 0) {
+        e.preventDefault()
+        handleDeleteSelectedEdges()
+        return
+      }
+      if (selectedNodeIds.length > 0) {
         e.preventDefault()
         handleDeleteSelected()
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [selectedNodeIds.length, handleDeleteSelected])
+  }, [selectedEdges, selectedNodeIds.length, handleDeleteSelectedEdges, handleDeleteSelected])
 
   return (
     <AutoSaveContext.Provider value={autoSaveValue}>

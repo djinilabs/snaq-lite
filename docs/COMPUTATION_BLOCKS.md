@@ -16,6 +16,10 @@ You can add several inputs; each gets a port on the left side of the block. You 
 
 To move a computation block, drag by its **title bar** (the “Computation” label at the top). The editor and input controls (name, type, + Add input) are clickable without moving the block.
 
+## Removing connections
+
+To remove a connection between blocks, click the **edge** (the line between the output and input ports) to select it, then press **Delete** or **Backspace**. The connection is removed and the target block's input is unplugged.
+
 ## Example
 
 1. Add a computation block.
@@ -31,6 +35,7 @@ To move a computation block, drag by its **title bar** (the “Computation” la
 - **Use `$name` in the script** — the block text refers to inputs by name (e.g. `$x`, `$scale`).
 - **Handles appear for each input** — input ports show on the left; you connect other blocks to them.
 - **Types must match** — when connecting, the source output type (e.g. Vector) must match the target input type.
+- **To remove a connection** — click the edge to select it, then press Delete or Backspace.
 
 ## See also
 

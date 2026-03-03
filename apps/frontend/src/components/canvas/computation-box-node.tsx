@@ -61,6 +61,7 @@ function WidgetSubscription({
   })
   return null
 }
+import { syncIncomingEdgesToLsp } from './edge-handlers'
 import { NodeContentZone, NodeFrame } from './node-interaction-shell'
 import { focusDebugNodeRender } from '~/lib/focus-debug'
 import {
@@ -166,12 +167,15 @@ export function ComputationBoxNode({
     const next = inputs.slice()
     next[index] = { ...next[index], ...patch }
     setNodeInputs(id, next)
+    void syncIncomingEdgesToLsp(id)
   }
   const addInput = () => {
     setNodeInputs(id, [...inputs, { name: '', type: 'Vector' }])
+    void syncIncomingEdgesToLsp(id)
   }
   const removeInput = (index: number) => {
     setNodeInputs(id, inputs.filter((_, i) => i !== index))
+    void syncIncomingEdgesToLsp(id)
   }
 
   return (

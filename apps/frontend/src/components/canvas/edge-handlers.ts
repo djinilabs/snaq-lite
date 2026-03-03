@@ -138,3 +138,63 @@ export async function disconnectEdge(
     useUIStore.getState().addToast(errorMessage(e), 'error')
   }
 }
+
+/**
+ * Re-syncs all incoming edges for a node to the LSP with the node's current input names.
+ * Call after setNodeInputs so the LSP graph binding updates (e.g. after renaming an input
+ * from "x" to "abc", the LSP must receive graph/connect with targetInputName "abc").
+ * Sends didOpen for the target so the LSP has the latest document, then graph/connect per edge.
+ */
+export async function syncIncomingEdgesToLsp(targetId: string): Promise<void> {
+  const langClient = await waitForLanguageClient(LSP_WAIT_MS)
+  if (!langClient) return
+
+  const state = useGraphStore.getState()
+  const incoming = state.edges.filter((e) => e.targetId === targetId)
+  if (incoming.length === 0) return
+
+  const targetNode = state.nodes.find((n) => n.id === targetId)
+  if (!targetNode?.uri) return
+
+  const targetUri = targetNode.uri
+  if (targetNode.type === 'presentation') {
+    const content = presentationDocumentContent(targetNode.inputs)
+    langClient.sendNotification(LSP_METHOD_DID_OPEN, {
+      textDocument: { uri: targetUri, version: 1, languageId: 'snaq', text: content },
+    })
+  } else if (targetNode.type === 'computation') {
+    const content = computationDocumentContent(targetUri, targetNode)
+    if (content.trim().length > 0) {
+      langClient.sendNotification(LSP_METHOD_DID_OPEN, {
+        textDocument: { uri: targetUri, version: 1, languageId: 'snaq', text: content },
+      })
+    }
+  }
+
+  await new Promise((r) => setTimeout(r, LSP_SUBSCRIBE_AFTER_DID_OPEN_MS))
+
+  const nodes = state.nodes
+  for (const edge of incoming) {
+    const sourceNode = nodes.find((n) => n.id === edge.sourceId)
+    const targetInputName = targetNode.inputs?.[edge.targetInputIndex]?.name
+    if (
+      sourceNode?.uri &&
+      targetInputName != null &&
+      targetInputName.trim() !== ''
+    ) {
+      try {
+        await langClient.sendRequest(LSP_METHOD_GRAPH_CONNECT, {
+          sourceUri: sourceNode.uri,
+          targetUri,
+          targetInputName,
+        })
+      } catch {
+        // Per-edge errors (e.g. type mismatch) not surfaced to user on re-sync
+      }
+    }
+  }
+
+  if (targetNode.type === 'computation') {
+    useWidgetContentVersionStore.getState().increment(`${COMPUTATION_RESULT_WIDGET_ID_PREFIX}${targetId}`)
+  }
+}

@@ -1,5 +1,5 @@
 /**
- * Pure helper: map deleted React Flow edges + current nodes to (targetUri, targetInputIndex) for disconnectEdge.
+ * Edge-delete helpers: map deleted React Flow edges + nodes to disconnect params, and apply disconnect for each.
  * targetHandle is the input index string (e.g. "0", "1"). Used by GraphCanvas onEdgesDelete.
  */
 
@@ -36,4 +36,19 @@ export function getDisconnectParamsForDeletedEdges(
     }
   }
   return result
+}
+
+/**
+ * Resolves disconnect params from deleted edges and nodes, then invokes disconnect for each (synchronously).
+ * Used by GraphCanvas onEdgesDelete; exported for unit tests.
+ */
+export function applyDisconnectForDeletedEdges(
+  deleted: DeletedEdgeLike[],
+  nodes: NodeLike[],
+  disconnect: (targetUri: string, targetInputIndex: number) => void,
+): void {
+  const params = getDisconnectParamsForDeletedEdges(deleted, nodes)
+  for (const { targetUri, targetInputIndex } of params) {
+    disconnect(targetUri, targetInputIndex)
+  }
 }

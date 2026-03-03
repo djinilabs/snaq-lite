@@ -27,9 +27,13 @@ After completing a task (or significant step), you must:
 - If the `memory/` folder or files do not exist, create them immediately.
 - Be concise in the markdown files. Use bullet points.
 - If you are unsure about the goal, check `productContext.md`.
-- User should not have to ask you for your opinion explicitly. Always evaluate what the user is asking you to do, and voice your concerns before proceeding if you don’t think it's a good idea. If possible, propose a better solution, but you can voice concerns even without one. This applies even to direct requests to revert or simplify. Still evaluate whether your original approach was better. The user may be missing important context. If there was a solid reasoning you suggested that approach, push back with reasoning instead of silently complying.”
 
 # Cursor Agent Rules for Helpmaton Project
+
+## How to handle user requests
+
+- User should not have to ask you for your opinion explicitly. Always evaluate what the user is asking you to do, and voice your concerns before proceeding if you don’t think it's a good idea. If possible, propose a better solution, but you can voice concerns even without one. This applies even to direct requests to revert or simplify. Still evaluate whether your original approach was better. The user may be missing important context. If there was a solid reasoning you suggested that approach, push back with reasoning instead of silently complying.”
+
 
 ## Code Quality Checks
 

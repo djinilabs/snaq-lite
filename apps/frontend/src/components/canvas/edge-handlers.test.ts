@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { connectEdge, disconnectEdge } from './edge-handlers'
+import { connectEdge, disconnectEdge, syncIncomingEdgesToLsp } from './edge-handlers'
 import { useGraphStore } from '~/store'
 import { useUIStore } from '~/store'
 import { LSP_METHOD_GRAPH_CONNECT, LSP_METHOD_GRAPH_DISCONNECT } from '~/lib/constants'
@@ -367,6 +367,93 @@ describe('edge-handlers', () => {
 
       expect(useGraphStore.getState().edges).toHaveLength(1)
       expect(addToast).toHaveBeenCalledWith('Network error', 'error')
+    })
+  })
+
+  describe('syncIncomingEdgesToLsp', () => {
+    it('sends didOpen and graph/connect with current input names for each incoming edge', async () => {
+      useGraphStore.getState().addNode({
+        id: 'n1',
+        position: { x: 0, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n1.sl',
+      })
+      useGraphStore.getState().addNode({
+        id: 'n2',
+        position: { x: 100, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n2.sl',
+      })
+      useGraphStore.getState().setNodeInputs('n2', [{ name: 'x', type: 'Numeric' }])
+      useGraphStore.getState().addEdge({
+        sourceId: 'n1',
+        targetId: 'n2',
+        targetInputIndex: 0,
+      })
+      mockSendRequest.mockResolvedValue(undefined)
+
+      await syncIncomingEdgesToLsp('n2')
+
+      expect(mockClient.sendNotification).toHaveBeenCalled()
+      expect(mockSendRequest).toHaveBeenCalledWith(LSP_METHOD_GRAPH_CONNECT, {
+        sourceUri: 'snaq://graph/n1.sl',
+        targetUri: 'snaq://graph/n2.sl',
+        targetInputName: 'x',
+      })
+    })
+
+    it('after renaming input, sends graph/connect with new name so LSP binding updates', async () => {
+      useGraphStore.getState().addNode({
+        id: 'n1',
+        position: { x: 0, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n1.sl',
+      })
+      useGraphStore.getState().addNode({
+        id: 'n2',
+        position: { x: 100, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n2.sl',
+      })
+      useGraphStore.getState().setNodeInputs('n2', [{ name: 'x', type: 'Numeric' }])
+      useGraphStore.getState().addEdge({
+        sourceId: 'n1',
+        targetId: 'n2',
+        targetInputIndex: 0,
+      })
+      mockSendRequest.mockResolvedValue(undefined)
+
+      await syncIncomingEdgesToLsp('n2')
+      expect(mockSendRequest).toHaveBeenLastCalledWith(LSP_METHOD_GRAPH_CONNECT, {
+        sourceUri: 'snaq://graph/n1.sl',
+        targetUri: 'snaq://graph/n2.sl',
+        targetInputName: 'x',
+      })
+
+      mockSendRequest.mockClear()
+      useGraphStore.getState().setNodeInputs('n2', [{ name: 'abc', type: 'Numeric' }])
+
+      await syncIncomingEdgesToLsp('n2')
+
+      expect(mockSendRequest).toHaveBeenCalledWith(LSP_METHOD_GRAPH_CONNECT, {
+        sourceUri: 'snaq://graph/n1.sl',
+        targetUri: 'snaq://graph/n2.sl',
+        targetInputName: 'abc',
+      })
+    })
+
+    it('does nothing when node has no incoming edges', async () => {
+      useGraphStore.getState().addNode({
+        id: 'n1',
+        position: { x: 0, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n1.sl',
+      })
+      mockSendRequest.mockResolvedValue(undefined)
+
+      await syncIncomingEdgesToLsp('n1')
+
+      expect(mockSendRequest).not.toHaveBeenCalled()
     })
   })
 })

@@ -1,6 +1,7 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   getDisconnectParamsForDeletedEdges,
+  applyDisconnectForDeletedEdges,
   type DeletedEdgeLike,
   type NodeLike,
 } from './edge-delete-params'
@@ -68,5 +69,45 @@ describe('getDisconnectParamsForDeletedEdges', () => {
   it('returns empty array when nodes is empty', () => {
     const deleted: DeletedEdgeLike[] = [{ target: 'n1', targetHandle: '0' }]
     expect(getDisconnectParamsForDeletedEdges(deleted, [])).toEqual([])
+  })
+})
+
+describe('applyDisconnectForDeletedEdges', () => {
+  const nodes: NodeLike[] = [
+    { id: 'n1', uri: 'snaq://graph/n1.sl' },
+    { id: 'n2', uri: 'snaq://graph/n2.sl' },
+  ]
+
+  it('calls disconnect for each deleted edge that has a matching node and valid targetHandle', () => {
+    const disconnect = vi.fn()
+    const deleted: DeletedEdgeLike[] = [
+      { target: 'n1', targetHandle: '0' },
+      { target: 'n2', targetHandle: '1' },
+    ]
+
+    applyDisconnectForDeletedEdges(deleted, nodes, disconnect)
+
+    expect(disconnect).toHaveBeenCalledTimes(2)
+    expect(disconnect).toHaveBeenNthCalledWith(1, 'snaq://graph/n1.sl', 0)
+    expect(disconnect).toHaveBeenNthCalledWith(2, 'snaq://graph/n2.sl', 1)
+  })
+
+  it('calls disconnect only for edges whose target node exists and targetHandle is numeric', () => {
+    const disconnect = vi.fn()
+    const deleted: DeletedEdgeLike[] = [
+      { target: 'missing', targetHandle: '0' },
+      { target: 'n1', targetHandle: '0' },
+    ]
+
+    applyDisconnectForDeletedEdges(deleted, nodes, disconnect)
+
+    expect(disconnect).toHaveBeenCalledTimes(1)
+    expect(disconnect).toHaveBeenCalledWith('snaq://graph/n1.sl', 0)
+  })
+
+  it('calls disconnect zero times when deleted is empty', () => {
+    const disconnect = vi.fn()
+    applyDisconnectForDeletedEdges([], nodes, disconnect)
+    expect(disconnect).not.toHaveBeenCalled()
   })
 })

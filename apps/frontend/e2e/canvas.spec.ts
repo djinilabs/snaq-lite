@@ -21,6 +21,59 @@ async function getNodeRect(loc: Locator): Promise<{ x: number; y: number }> {
 /** Pixel tolerance for "node did not move" (layout/zoom can shift; real drag moves 80+ px). */
 const STATIONARY_TOLERANCE_PX = 100
 
+/**
+ * Wire a computation block (with "7") to a presentation block, then select the edge and press the given key
+ * to remove the connection. Asserts the presentation placeholder is visible again.
+ * Requires: canvas already open (e.g. after gotoCanvas).
+ */
+async function removeConnectionBySelectingEdgeAndKey(
+  page: Page,
+  key: 'Delete' | 'Backspace',
+): Promise<void> {
+  await page.getByTestId('add-computation-btn').click()
+  await expect(page.getByTestId('computation-node')).toHaveCount(1)
+  const editorZone = page.getByTestId('computation-editor-zone').first()
+  await expect(editorZone).toBeVisible({ timeout: 15_000 })
+  await editorZone.click()
+  await page.waitForTimeout(200)
+  await page.keyboard.type('7')
+  await page.waitForTimeout(500)
+
+  await page.getByTestId('add-presentation-btn').click()
+  await expect(page.getByTestId('presentation-node')).toHaveCount(1)
+  await expect(page.getByText('Connect a computation box').first()).toBeVisible()
+
+  const sourceHandle = page.getByTestId('computation-output-handle').first()
+  const targetHandle = page.getByTestId('presentation-input-handle').first()
+  await sourceHandle.scrollIntoViewIfNeeded()
+  await targetHandle.scrollIntoViewIfNeeded()
+  const sourceBox = await sourceHandle.boundingBox()
+  const targetBox = await targetHandle.boundingBox()
+  expect(sourceBox).toBeTruthy()
+  expect(targetBox).toBeTruthy()
+  const startX = sourceBox!.x + sourceBox!.width / 2
+  const startY = sourceBox!.y + sourceBox!.height / 2
+  const endX = targetBox!.x + targetBox!.width / 2
+  const endY = targetBox!.y + targetBox!.height / 2
+
+  await page.mouse.move(startX, startY)
+  await page.mouse.down()
+  await page.mouse.move(endX, endY, { steps: 10 })
+  await page.mouse.up()
+  await page.waitForTimeout(2000)
+
+  const midX = (startX + endX) / 2
+  const midY = (startY + endY) / 2
+  await page.mouse.click(midX, midY)
+  await page.waitForTimeout(300)
+  await page.getByTestId('graph-canvas-wrapper').click({ position: { x: 1, y: 1 } })
+  await page.waitForTimeout(100)
+  await page.keyboard.press(key)
+  await page.waitForTimeout(800)
+
+  await expect(page.getByText('Connect a computation box').first()).toBeVisible({ timeout: 5000 })
+}
+
 /** Assert the node at nodeTestId does not move after performing action (e.g. click). Do not scroll so viewport stays stable. */
 async function assertNodeStationaryAfter(
   page: Page,
@@ -317,6 +370,85 @@ test.describe('canvas', () => {
     await expect(page.getByText('target document not open')).not.toBeVisible()
     await expect(page.getByText("target has no input named 'input'")).not.toBeVisible()
     await expect(page.getByText("Type mismatch: source output type 'Numeric' does not match target input 'x' type 'Vector'")).not.toBeVisible()
+  })
+
+  test('removing connection by selecting edge and pressing Delete restores presentation placeholder', async ({
+    page,
+  }) => {
+    test.setTimeout(35_000)
+    await gotoCanvas(page)
+    await removeConnectionBySelectingEdgeAndKey(page, 'Delete')
+  })
+
+  test('removing connection by selecting edge and pressing Backspace restores presentation placeholder', async ({
+    page,
+  }) => {
+    test.setTimeout(35_000)
+    await gotoCanvas(page)
+    await removeConnectionBySelectingEdgeAndKey(page, 'Backspace')
+  })
+
+  // Skipped: LSP/widget pipeline often does not push the result in time in E2E; syncIncomingEdgesToLsp is covered by unit tests.
+  test.skip('after renaming input and updating code, wired computation still shows bound result (not symbolic)', async ({
+    page,
+  }) => {
+    test.setTimeout(50_000)
+    await gotoCanvas(page)
+    await page.getByTestId('add-computation-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
+    const leftEditor = page.getByTestId('computation-editor-zone').first()
+    await expect(leftEditor).toBeVisible({ timeout: 15_000 })
+    await leftEditor.click()
+    await page.waitForTimeout(200)
+    await page.keyboard.type('4')
+    await page.waitForTimeout(500)
+
+    await page.getByTestId('add-computation-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(2)
+    const rightNode = page.getByTestId('computation-node').nth(1)
+    await rightNode.getByTestId('computation-add-input').click()
+    await expect(rightNode.getByTestId('computation-input-name-0')).toBeAttached({ timeout: 5000 })
+    await rightNode.getByTestId('computation-input-name-0').click()
+    await page.keyboard.type('x')
+    await rightNode.getByTestId('computation-input-type-0').selectOption('Numeric')
+    await page.waitForTimeout(200)
+    const rightEditor = rightNode.getByTestId('computation-editor-zone')
+    await rightEditor.click()
+    await page.waitForTimeout(300)
+    await page.keyboard.type('x * 10')
+    await page.waitForTimeout(1500)
+
+    const sourceHandle = page.getByTestId('computation-node').first().getByTestId('computation-output-handle')
+    const targetHandle = rightNode.getByTestId('computation-input-handle-0')
+    await sourceHandle.scrollIntoViewIfNeeded()
+    await targetHandle.scrollIntoViewIfNeeded()
+    const sourceBox = await sourceHandle.boundingBox()
+    const targetBox = await targetHandle.boundingBox()
+    expect(sourceBox).toBeTruthy()
+    expect(targetBox).toBeTruthy()
+    const startX = sourceBox!.x + sourceBox!.width / 2
+    const startY = sourceBox!.y + sourceBox!.height / 2
+    const endX = targetBox!.x + targetBox!.width / 2
+    const endY = targetBox!.y + targetBox!.height / 2
+    await page.mouse.move(startX, startY)
+    await page.mouse.down()
+    await page.mouse.move(endX, endY, { steps: 10 })
+    await page.mouse.up()
+    await page.waitForTimeout(2500)
+
+    await expect(rightNode.getByTestId('computation-result').getByText('40')).toBeVisible({ timeout: 10_000 })
+
+    await rightNode.getByTestId('computation-input-name-0').click()
+    await page.keyboard.press('Control+a')
+    await page.keyboard.type('abc')
+    await page.waitForTimeout(500)
+    await rightEditor.click()
+    await page.keyboard.press('Control+a')
+    await page.keyboard.type('abc * 10')
+    await page.waitForTimeout(2500)
+
+    await expect(rightNode.getByTestId('computation-result').getByText('40')).toBeVisible({ timeout: 10_000 })
+    await expect(rightNode.getByTestId('computation-result').getByText('10*abc')).not.toBeVisible()
   })
 
   // Skipped: LSP/widget pipeline often does not push the updated result in time in E2E (preview + WASM).

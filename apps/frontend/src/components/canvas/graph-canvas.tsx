@@ -19,7 +19,7 @@ import {
   type OnSelectionChangeFunc,
 } from '@xyflow/react'
 import { connectEdge, disconnectEdge } from './edge-handlers'
-import { getDisconnectParamsForDeletedEdges } from './edge-delete-params'
+import { applyDisconnectForDeletedEdges } from './edge-delete-params'
 import { getDragHandleSelector } from './graph-drag-handle'
 import { applyNodePositionChanges } from './graph-node-position-changes'
 import { getFlowNodeData } from './graph-node-data'
@@ -37,7 +37,7 @@ function graphNodeToFlowNode(
     id: n.id,
     type: n.type,
     position: n.position,
-    data,
+    data: data as unknown as Record<string, unknown>,
   }
 }
 
@@ -145,10 +145,11 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
 
   const onEdgesDelete = useCallback((deleted: Edge[]) => {
     const nodes = useGraphStore.getState().nodes
-    const params = getDisconnectParamsForDeletedEdges(deleted, nodes)
-    for (const { targetUri, targetInputIndex } of params) {
-      void disconnectEdge(targetUri, targetInputIndex)
-    }
+    applyDisconnectForDeletedEdges(
+      deleted.map((e) => ({ target: e.target, targetHandle: e.targetHandle })),
+      nodes.map((n) => ({ id: n.id, uri: n.uri })),
+      (uri, index) => void disconnectEdge(uri, index),
+    )
   }, [])
 
   /** When a node is clicked, set selection to that node so the parent state stays in sync. */
@@ -186,6 +187,7 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
         onPaneClick={onPaneClick}
         nodeTypes={nodeTypes}
         nodesDraggable
+        defaultEdgeOptions={{ selectable: true, deletable: true }}
         fitView
         fitViewOptions={{ padding: 0.2, maxZoom: 1.2 }}
       >

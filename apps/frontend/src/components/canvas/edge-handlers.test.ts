@@ -258,6 +258,34 @@ describe('edge-handlers', () => {
       expect(useGraphStore.getState().edges).toHaveLength(0)
       expect(addToast).toHaveBeenCalledWith('Server unavailable', 'error')
     })
+
+    it('when source is file node, adds edge to store but does not call LSP graph/connect', async () => {
+      useGraphStore.getState().addNode({
+        id: 'file1',
+        position: { x: 0, y: 0 },
+        type: 'file',
+        uri: 'snaq://graph/file1.sl',
+        url: 'blob:xxx',
+      })
+      useGraphStore.getState().addNode({
+        id: 'n2',
+        position: { x: 100, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n2.sl',
+      })
+      useGraphStore.getState().setNodeInputs('n2', [{ name: 'data', type: 'Vector' }])
+
+      const result = await connectEdge('snaq://graph/file1.sl', 'snaq://graph/n2.sl', 0)
+
+      expect(result).toBe(true)
+      expect(useGraphStore.getState().edges).toHaveLength(1)
+      expect(useGraphStore.getState().edges[0]).toMatchObject({
+        sourceId: 'file1',
+        targetId: 'n2',
+        targetInputIndex: 0,
+      })
+      expect(mockSendRequest).not.toHaveBeenCalled()
+    })
   })
 
   describe('disconnectEdge', () => {
@@ -424,6 +452,32 @@ describe('edge-handlers', () => {
       expect(useGraphStore.getState().edges).toHaveLength(1)
       expect(addToast).toHaveBeenCalledWith('Network error', 'error')
     })
+
+    it('when edge source is file node, only removes edge from store and does not call LSP disconnect', async () => {
+      useGraphStore.getState().addNode({
+        id: 'file1',
+        position: { x: 0, y: 0 },
+        type: 'file',
+        uri: 'snaq://graph/file1.sl',
+      })
+      useGraphStore.getState().addNode({
+        id: 'n2',
+        position: { x: 100, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n2.sl',
+      })
+      useGraphStore.getState().setNodeInputs('n2', [{ name: 'data', type: 'Vector' }])
+      useGraphStore.getState().addEdge({
+        sourceId: 'file1',
+        targetId: 'n2',
+        targetInputIndex: 0,
+      })
+
+      await disconnectEdge('snaq://graph/n2.sl', 0)
+
+      expect(useGraphStore.getState().edges).toHaveLength(0)
+      expect(mockSendRequest).not.toHaveBeenCalled()
+    })
   })
 
   describe('syncIncomingEdgesToLsp', () => {
@@ -508,6 +562,32 @@ describe('edge-handlers', () => {
       mockSendRequest.mockResolvedValue(undefined)
 
       await syncIncomingEdgesToLsp('n1')
+
+      expect(mockSendRequest).not.toHaveBeenCalled()
+    })
+
+    it('skips graph/connect for edges whose source node is file', async () => {
+      useGraphStore.getState().addNode({
+        id: 'file1',
+        position: { x: 0, y: 0 },
+        type: 'file',
+        uri: 'snaq://graph/file1.sl',
+      })
+      useGraphStore.getState().addNode({
+        id: 'n2',
+        position: { x: 100, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n2.sl',
+      })
+      useGraphStore.getState().setNodeInputs('n2', [{ name: 'data', type: 'Vector' }])
+      useGraphStore.getState().addEdge({
+        sourceId: 'file1',
+        targetId: 'n2',
+        targetInputIndex: 0,
+      })
+      mockSendRequest.mockResolvedValue(undefined)
+
+      await syncIncomingEdgesToLsp('n2')
 
       expect(mockSendRequest).not.toHaveBeenCalled()
     })

@@ -11,12 +11,13 @@ import {
 } from 'react'
 import {
   DRAG_HANDLE_CLASS_COMPUTATION,
+  DRAG_HANDLE_CLASS_FILE,
   DRAG_HANDLE_CLASS_PRESENTATION,
   NODRAG_CLASS,
   NOWHEEL_CLASS,
 } from '~/lib/constants'
 
-export type NodeKind = 'computation' | 'presentation'
+export type NodeKind = 'computation' | 'presentation' | 'file'
 
 const NODE_BASE_STYLE: CSSProperties = {
   background: 'var(--bg-card)',
@@ -37,9 +38,16 @@ const DRAG_ZONE_STYLE: CSSProperties = {
 }
 
 export function getNodeDragHandleClassName(kind: NodeKind): string {
-  return kind === 'computation'
-    ? DRAG_HANDLE_CLASS_COMPUTATION
-    : DRAG_HANDLE_CLASS_PRESENTATION
+  switch (kind) {
+    case 'computation':
+      return DRAG_HANDLE_CLASS_COMPUTATION
+    case 'presentation':
+      return DRAG_HANDLE_CLASS_PRESENTATION
+    case 'file':
+      return DRAG_HANDLE_CLASS_FILE
+    default:
+      return DRAG_HANDLE_CLASS_COMPUTATION
+  }
 }
 
 interface NodeFrameProps extends PropsWithChildren {

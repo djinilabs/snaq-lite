@@ -136,6 +136,41 @@ describe('syncLoadedGraphToLsp', () => {
     expect(mockSendRequest).not.toHaveBeenCalled()
   })
 
+  it('does not send didOpen for file nodes and skips graph/connect for edges whose source is file', async () => {
+    const nodes: GraphNode[] = [
+      {
+        id: 'file1',
+        position: { x: 0, y: 0 },
+        type: 'file',
+        uri: 'snaq://graph/file1.sl',
+        url: 'blob:xxx',
+      },
+      {
+        id: 'n2',
+        position: { x: 100, y: 0 },
+        type: 'computation',
+        uri: 'snaq://graph/n2.sl',
+        inputs: [{ name: 'data', type: 'Vector' }],
+      },
+    ]
+    const edges: GraphEdge[] = [
+      { sourceId: 'file1', targetId: 'n2', targetInputIndex: 0 },
+    ]
+
+    const syncPromise = syncLoadedGraphToLsp(nodes, edges)
+    await vi.advanceTimersByTimeAsync(LSP_SUBSCRIBE_AFTER_DID_OPEN_MS)
+    await syncPromise
+
+    expect(mockSendRequest).not.toHaveBeenCalled()
+    expect(mockSendNotification).toHaveBeenCalledTimes(1)
+    expect(mockSendNotification).toHaveBeenCalledWith(
+      LSP_METHOD_DID_OPEN,
+      expect.objectContaining({
+        textDocument: expect.objectContaining({ uri: 'snaq://graph/n2.sl' }),
+      }),
+    )
+  })
+
   it('sends correct targetInputName for each edge when multiple edges target same node at different indices', async () => {
     const nodes: GraphNode[] = [
       {

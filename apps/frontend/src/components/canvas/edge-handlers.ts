@@ -55,15 +55,30 @@ export async function connectEdge(
     useUIStore.getState().addToast('Editor is still loading. Please try again in a moment.', 'error')
     return false
   }
-  const sourceId = useGraphStore.getState().nodes.find((n) => n.uri === sourceUri)?.id
-  const targetId = useGraphStore.getState().nodes.find((n) => n.uri === targetUri)?.id
+  const state = useGraphStore.getState()
+  const sourceNode = state.nodes.find((n) => n.uri === sourceUri)
+  const sourceId = sourceNode?.id
+  const targetId = state.nodes.find((n) => n.uri === targetUri)?.id
   if (!sourceId || !targetId) return false
 
-  const targetNode = useGraphStore.getState().nodes.find((n) => n.id === targetId)
+  const targetNode = state.nodes.find((n) => n.id === targetId)
   const targetInputName = targetNode?.inputs?.[targetInputIndex]?.name
   if (targetInputName == null || targetInputName.trim() === '') {
     useUIStore.getState().addToast('Target input not found or has no name.', 'error')
     return false
+  }
+
+  if (sourceNode?.type === 'file') {
+    useGraphStore.getState().addEdge({
+      sourceId,
+      targetId,
+      targetInputIndex,
+      sourceHandle: sourceHandle ?? COMPUTATION_OUTPUT_HANDLE_RIGHT,
+    })
+    if (targetNode?.type === 'computation') {
+      useWidgetContentVersionStore.getState().increment(`${COMPUTATION_RESULT_WIDGET_ID_PREFIX}${targetId}`)
+    }
+    return true
   }
 
   if (targetNode?.type === 'presentation') {
@@ -130,8 +145,14 @@ export async function disconnectEdge(
     (e) => e.targetId === targetId && e.targetInputIndex === targetInputIndex,
   )
   const sourceId = edge?.sourceId
+  const sourceNode = sourceId != null ? state.nodes.find((n) => n.id === sourceId) : undefined
   const targetNode = state.nodes.find((n) => n.id === targetId)
   const targetInputName = targetNode?.inputs?.[targetInputIndex]?.name ?? ''
+
+  if (sourceNode?.type === 'file') {
+    state.removeEdge(targetId, targetInputIndex)
+    return
+  }
 
   state.removeEdge(targetId, targetInputIndex)
   try {
@@ -184,6 +205,7 @@ export async function syncIncomingEdgesToLsp(targetId: string): Promise<void> {
   const nodes = state.nodes
   for (const edge of incoming) {
     const sourceNode = nodes.find((n) => n.id === edge.sourceId)
+    if (sourceNode?.type === 'file') continue
     const targetInputName = targetNode.inputs?.[edge.targetInputIndex]?.name
     if (
       sourceNode?.uri &&

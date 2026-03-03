@@ -62,6 +62,10 @@ When the runtime runs as WebAssembly in the browser, the Host has no access to t
 3. **Feeder task:** For each stream that is backed by a byte source, call `startFeeder(streamIndex, readStream)` so the Host reads from the stream, parses in chunks, yields to the event loop, and pushes chunks. Alternatively, parse in JS and call `pushChunk(streamIndex, array)` in a loop; when done, call `closeStream(streamIndex)`.
 4. **Consumer task:** Call `consumeOutputStream(runIndex, onChunk, onDone, onError)`. The Host drives the output stream in an async task, yields periodically, and invokes the callbacks. Serialize or display results in JS (e.g. update the UI or trigger a download).
 
+### File blocks in the graph UI
+
+In the graph UI, **file blocks** are output-only nodes that hold a URL (e.g. a dropped file as a blob URL). When a file block is connected to a computation or presentation input, the UI binds that input via **external streams**: before subscribing the widget, the frontend builds a map from input name to stream index by creating streams (e.g. `createStreamInput`), feeding them from the file URL (fetch + parse), then passing that map as `externalStreams` in the subscribe request. The current browser implementation feeds data with **numeric-only** content: newline-delimited numbers (or a single column). Other formats would require parsing in JS and calling `pushChunk` with the appropriate chunk shape.
+
 ## CLI
 
 The native CLI can run expressions that use `$name` by binding stream names to files.

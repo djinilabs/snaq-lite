@@ -28,7 +28,7 @@ function pushUndoAndClearRedo(
   }
 }
 
-export type NodeType = 'computation' | 'presentation'
+export type NodeType = 'computation' | 'presentation' | 'file'
 
 export interface GraphNode {
   id: string
@@ -41,6 +41,8 @@ export interface GraphNode {
   outputType?: string | null
   /** Initial block content when loading a project; Monaco is source of truth after first edit. */
   initialContent?: string
+  /** URL for file nodes (blob URL, data URL, or https). Optional; used when type === 'file'. */
+  url?: string
 }
 
 export interface GraphEdge {
@@ -123,6 +125,14 @@ export const useGraphStore = create<GraphState>((set) => ({
 
   removeNode: (id) =>
     set((state) => {
+      const node = state.nodes.find((n) => n.id === id)
+      if (node?.type === 'file' && node.url?.startsWith('blob:')) {
+        try {
+          URL.revokeObjectURL(node.url)
+        } catch {
+          // ignore
+        }
+      }
       const undoStack = pushUndoAndClearRedo(state.undoSnapshotGetter, state.undoStack)
       return {
         nodes: state.nodes.filter((n) => n.id !== id),

@@ -1,10 +1,17 @@
 /**
  * LSP Web Worker entry. Loads WASM LSP and forwards messages.
  * First message from main must be { type: WORKER_MSG_INIT, wasmUrl: string }.
+ * Host stream API: { type: 'createStreamInput', id } → response { type: 'createStreamInputResponse', id, index };
+ * { type: 'pushChunk', index, chunk: number[] }; { type: 'closeStream', index }.
  * All other messages are raw LSP JSON-RPC strings, forwarded to push_lsp_message after WASM is ready.
  */
 
-import { WORKER_MSG_INIT, WORKER_MSG_READY, WORKER_MSG_ERROR } from '../lib/constants'
+import {
+  WORKER_MSG_INIT,
+  WORKER_MSG_READY,
+  WORKER_MSG_ERROR,
+  WORKER_MSG_CREATE_STREAM_RESPONSE,
+} from '../lib/constants'
 
 const postMessageCallback = (response: string) => {
   self.postMessage(response)
@@ -13,6 +20,9 @@ const postMessageCallback = (response: string) => {
 let wasmReady = false
 let wasmLoading = false
 let pushLspMessageRef: ((s: string) => void) | null = null
+let createStreamInputJs: (() => number) | null = null
+let pushChunkJs: ((index: number, chunk: number[]) => void) | null = null
+let closeStreamJs: ((index: number) => void) | null = null
 const buffer: string[] = []
 
 function sendReady(): void {
@@ -42,6 +52,9 @@ async function loadWasm(wasmUrl: string): Promise<void> {
     }
     startSnaqLiteLsp(postMessageCallback)
     pushLspMessageRef = pushLspMessage
+    createStreamInputJs = typeof mod.create_stream_input_js === 'function' ? mod.create_stream_input_js : null
+    pushChunkJs = typeof mod.push_chunk_js === 'function' ? mod.push_chunk_js : null
+    closeStreamJs = typeof mod.close_stream_js === 'function' ? mod.close_stream_js : null
     wasmReady = true
     sendReady()
     for (const s of buffer) {
@@ -56,6 +69,32 @@ async function loadWasm(wasmUrl: string): Promise<void> {
   }
 }
 
+function handleStreamHostMessage(parsed: { type?: string; id?: number; index?: number; chunk?: number[] }): boolean {
+  if (!parsed || typeof parsed.type !== 'string') return false
+  if (parsed.type === 'createStreamInput' && wasmReady && createStreamInputJs) {
+    const index = createStreamInputJs()
+    self.postMessage(JSON.stringify({ type: WORKER_MSG_CREATE_STREAM_RESPONSE, id: parsed.id, index }))
+    return true
+  }
+  if (parsed.type === 'pushChunk' && typeof parsed.index === 'number' && Array.isArray(parsed.chunk) && pushChunkJs) {
+    try {
+      pushChunkJs(parsed.index, parsed.chunk)
+    } catch {
+      // ignore
+    }
+    return true
+  }
+  if (parsed.type === 'closeStream' && typeof parsed.index === 'number' && closeStreamJs) {
+    try {
+      closeStreamJs(parsed.index)
+    } catch {
+      // ignore
+    }
+    return true
+  }
+  return false
+}
+
 self.onmessage = (event: MessageEvent<string>) => {
   const data = event.data
   if (typeof data !== 'string') return
@@ -66,8 +105,9 @@ self.onmessage = (event: MessageEvent<string>) => {
       loadWasm(parsed.wasmUrl)
       return
     }
+    if (handleStreamHostMessage(parsed)) return
   } catch {
-    // not init; treat as LSP message
+    // not init and not host message; treat as LSP message
   }
 
   if (wasmReady && pushLspMessageRef) {

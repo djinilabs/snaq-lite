@@ -91,7 +91,7 @@ function ProjectCanvasPage() {
   }, [])
 
   const handleAddNode = useCallback(
-    (type: 'computation' | 'presentation') => {
+    (type: 'computation' | 'presentation' | 'file') => {
       const id = crypto.randomUUID()
       const center = canvasViewportRef.current?.getViewportCenter()
       // Offset so node center (not top-left) is at viewport center; fallback if ref not ready

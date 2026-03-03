@@ -136,6 +136,9 @@ pub enum WidgetDataStatus {
 pub struct SubscribeWidgetParams {
     pub widget_id: String,
     pub source_uri: String,
+    /// Optional map from input name to host stream index (for file-block–fed inputs). Resolved to StreamHandleId in WASM via host getStreamHandleId(index).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_streams: Option<std::collections::HashMap<String, u32>>,
 }
 
 /// Params for snaqlite/graph/unsubscribeWidget request.

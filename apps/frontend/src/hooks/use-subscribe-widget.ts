@@ -21,6 +21,8 @@ export interface UseSubscribeWidgetParams {
   enabled: boolean
   /** Called immediately before each subscribeWidget request (e.g. to send didOpen). */
   onBeforeSubscribe?: () => void
+  /** When present, called before subscribeWidget to create/feed file-block streams; result passed as externalStreams. */
+  getExternalStreams?: () => Promise<Record<string, number>>
   /** When changed, effect re-runs: unsubscribe then subscribe (e.g. after content change). */
   subscribeKey?: number
 }
@@ -30,6 +32,7 @@ export function useSubscribeWidget({
   sourceUri,
   enabled,
   onBeforeSubscribe,
+  getExternalStreams,
   subscribeKey,
 }: UseSubscribeWidgetParams): void {
   const removeWidget = useWidgetStore((s) => s.removeWidget)
@@ -50,19 +53,27 @@ export function useSubscribeWidget({
       } catch (e) {
         console.error('[useSubscribeWidget] onBeforeSubscribe failed:', e)
       }
-      const doSubscribe = (): void => {
+      const doSubscribe = async (): Promise<void> => {
         deferTimeoutId = null
         if (!hasLanguageClient()) return
-        getLanguageClient()
-          .sendRequest(LSP_METHOD_SUBSCRIBE_WIDGET, { widgetId, sourceUri })
-          .catch((err) => {
-            console.error('[useSubscribeWidget] subscribeWidget failed:', err)
-          })
+        try {
+          const externalStreams = await getExternalStreams?.().then((m) => m ?? undefined)
+          const params: { widgetId: string; sourceUri: string; externalStreams?: Record<string, number> } = {
+            widgetId,
+            sourceUri,
+          }
+          if (externalStreams != null && Object.keys(externalStreams).length > 0) {
+            params.externalStreams = externalStreams
+          }
+          await getLanguageClient().sendRequest(LSP_METHOD_SUBSCRIBE_WIDGET, params)
+        } catch (err) {
+          console.error('[useSubscribeWidget] subscribeWidget failed:', err)
+        }
       }
       if (onBeforeSubscribe != null) {
-        deferTimeoutId = setTimeout(doSubscribe, LSP_SUBSCRIBE_AFTER_DID_OPEN_MS)
+        deferTimeoutId = setTimeout(() => void doSubscribe(), LSP_SUBSCRIBE_AFTER_DID_OPEN_MS)
       } else {
-        doSubscribe()
+        void doSubscribe()
       }
     }
 
@@ -89,5 +100,5 @@ export function useSubscribeWidget({
           .catch(() => {})
       }
     }
-  }, [widgetId, sourceUri, enabled, removeWidget, subscribeKey, onBeforeSubscribe])
+  }, [widgetId, sourceUri, enabled, removeWidget, subscribeKey, onBeforeSubscribe, getExternalStreams])
 }

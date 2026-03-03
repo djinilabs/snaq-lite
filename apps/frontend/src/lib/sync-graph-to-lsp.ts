@@ -38,6 +38,7 @@ function doSyncWithClient(
   edges: GraphEdge[],
 ): Promise<void> {
   for (const node of nodes) {
+    if (node.type === 'file') continue
     const content =
       node.type === 'computation'
         ? buildComputationDocumentContent(node.initialContent ?? '', node.inputs)
@@ -55,6 +56,7 @@ function doSyncWithClient(
     await new Promise((r) => setTimeout(r, LSP_SUBSCRIBE_AFTER_DID_OPEN_MS))
     for (const edge of edges) {
       const sourceNode = nodes.find((n) => n.id === edge.sourceId)
+      if (sourceNode?.type === 'file') continue
       const targetNode = nodes.find((n) => n.id === edge.targetId)
       const targetInputName = targetNode?.inputs?.[edge.targetInputIndex]?.name
       if (

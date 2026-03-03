@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { UNDO_STACK_MAX } from '~/lib/constants'
 import { useGraphStore } from './graph-store'
 
@@ -54,6 +54,23 @@ describe('graph-store', () => {
     expect(useGraphStore.getState().focusEditorForNodeId).toBeNull()
   })
 
+  it('addNode type file does not set focusEditorForNodeId and stores optional url', () => {
+    useGraphStore.setState({ focusEditorForNodeId: null })
+    useGraphStore.getState().addNode({
+      id: 'f1',
+      position: { x: 0, y: 0 },
+      type: 'file',
+      uri: 'snaq://graph/f1.sl',
+      url: 'blob:https://example.com/abc',
+    })
+    expect(useGraphStore.getState().focusEditorForNodeId).toBeNull()
+    expect(useGraphStore.getState().nodes[0]).toMatchObject({
+      id: 'f1',
+      type: 'file',
+      url: 'blob:https://example.com/abc',
+    })
+  })
+
   it('moveNode updates position for matching id', () => {
     useGraphStore.getState().addNode({
       id: 'n1',
@@ -82,6 +99,43 @@ describe('graph-store', () => {
     useGraphStore.getState().removeNode('n1')
     expect(useGraphStore.getState().nodes).toHaveLength(1)
     expect(useGraphStore.getState().edges).toHaveLength(0)
+  })
+
+  describe('removeNode and file nodes with blob URL', () => {
+    beforeEach(() => {
+      if (typeof URL.revokeObjectURL === 'undefined') {
+        ;(URL as unknown as { revokeObjectURL: () => void }).revokeObjectURL = vi.fn()
+      }
+    })
+
+    it('revokes blob URL when removing a file node with blob url', () => {
+      const revokeSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      useGraphStore.getState().addNode({
+        id: 'f1',
+        position: { x: 0, y: 0 },
+        type: 'file',
+        uri: 'snaq://graph/f1.sl',
+        url: 'blob:https://example.com/abc',
+      })
+      useGraphStore.getState().removeNode('f1')
+      expect(revokeSpy).toHaveBeenCalledTimes(1)
+      expect(revokeSpy).toHaveBeenCalledWith('blob:https://example.com/abc')
+      revokeSpy.mockRestore()
+    })
+
+    it('does not revoke when removing a file node without blob url', () => {
+      const revokeSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+      useGraphStore.getState().addNode({
+        id: 'f1',
+        position: { x: 0, y: 0 },
+        type: 'file',
+        uri: 'snaq://graph/f1.sl',
+        url: 'https://example.com/data.csv',
+      })
+      useGraphStore.getState().removeNode('f1')
+      expect(revokeSpy).not.toHaveBeenCalled()
+      revokeSpy.mockRestore()
+    })
   })
 
   it('addEdge replaces existing edge for same target and input', () => {

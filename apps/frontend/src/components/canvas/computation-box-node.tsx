@@ -6,7 +6,7 @@
  * only when in view (placeholder when not).
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import type { Node, NodeProps } from '@xyflow/react'
 import { Handle, Position } from '@xyflow/react'
 import { getModel } from '~/editor/text-model-registry'
@@ -52,10 +52,12 @@ function WidgetSubscription({
   widgetId,
   sourceUri,
   onBeforeSubscribe,
+  getExternalStreams,
 }: {
   widgetId: string
   sourceUri: string
   onBeforeSubscribe: () => void
+  getExternalStreams?: () => Promise<Record<string, number>>
 }) {
   const contentVersion = useWidgetContentVersionStore((s) => s.byWidgetId[widgetId] ?? 0)
   useSubscribeWidget({
@@ -63,10 +65,12 @@ function WidgetSubscription({
     sourceUri,
     enabled: true,
     onBeforeSubscribe,
+    getExternalStreams,
     subscribeKey: contentVersion,
   })
   return null
 }
+import { buildGetExternalStreams } from '~/lib/build-external-streams'
 import { syncIncomingEdgesToLsp } from './edge-handlers'
 import { NodeContentZone, NodeFrame } from './node-interaction-shell'
 import { focusDebugNodeRender } from '~/lib/focus-debug'
@@ -94,10 +98,20 @@ export function ComputationBoxNode({
   const nodes = useGraphStore((s) => s.nodes)
   const setNodeInputs = useGraphStore((s) => s.setNodeInputs)
   const setNodeContent = useGraphStore((s) => s.setNodeContent)
+  const edges = useGraphStore((s) => s.edges)
   const node = nodes.find((n) => n.id === id)
   const inputs = node?.inputs ?? []
   const widgetId = `${RESULT_WIDGET_ID_PREFIX}${id}`
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const getExternalStreams = useMemo(() => {
+    const hasFileInput = edges.some(
+      (e) => e.targetId === id && nodes.find((n) => n.id === e.sourceId)?.type === 'file',
+    )
+    return hasFileInput
+      ? buildGetExternalStreams(id, () => useGraphStore.getState().nodes, () => useGraphStore.getState().edges)
+      : undefined
+  }, [id, nodes, edges])
 
   const onBeforeSubscribe = useCallback(() => {
     try {
@@ -372,6 +386,7 @@ export function ComputationBoxNode({
         widgetId={widgetId}
         sourceUri={data.uri}
         onBeforeSubscribe={onBeforeSubscribe}
+        getExternalStreams={getExternalStreams}
       />
       <ComputationResultBlock widgetId={widgetId} />
     </NodeFrame>

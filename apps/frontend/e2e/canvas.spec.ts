@@ -172,6 +172,70 @@ test.describe('canvas', () => {
     await expect(page.getByTestId('presentation-node')).toHaveCount(1)
   })
 
+  test('Add file block adds a file node to the canvas', async ({ page }) => {
+    await gotoCanvas(page)
+    await expect(page.getByTestId('file-node')).toHaveCount(0)
+    await page.getByTestId('add-file-btn').click()
+    await expect(page.getByTestId('file-node')).toHaveCount(1)
+  })
+
+  test('drag-and-drop a file onto the canvas creates a file block at drop position', async ({ page }) => {
+    await gotoCanvas(page)
+    await expect(page.getByTestId('file-node')).toHaveCount(0)
+    const wrapper = page.getByTestId('graph-canvas-wrapper')
+    await wrapper.waitFor({ state: 'visible', timeout: 10_000 })
+    await page.evaluate(() => {
+      const pane = document.querySelector('.react-flow__pane') ?? document.querySelector('[data-testid="graph-canvas-wrapper"]')
+      if (!pane) return
+      const file = new File(['1\n2\n3'], 'numbers.txt', { type: 'text/plain' })
+      const dt = new DataTransfer()
+      dt.items.add(file)
+      const rect = pane.getBoundingClientRect()
+      const drop = new DragEvent('drop', {
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2,
+        dataTransfer: dt,
+        bubbles: true,
+      })
+      pane.dispatchEvent(drop)
+    })
+    await page.waitForTimeout(500)
+    await expect(page.getByTestId('file-node')).toHaveCount(1)
+  })
+
+  test('wiring file block output to presentation input shows an edge', async ({ page }) => {
+    test.setTimeout(60_000)
+    await gotoCanvas(page)
+    await expect(page.getByTestId('add-file-btn')).toBeVisible({ timeout: 15_000 })
+    await page.getByTestId('add-file-btn').click()
+    await expect(page.getByTestId('file-node')).toHaveCount(1)
+    await page.getByTestId('add-presentation-btn').click()
+    await expect(page.getByTestId('presentation-node')).toHaveCount(1)
+    // Wait for LSP to send nodeSignatureUpdated so presentation has inputs and connectEdge accepts the connection
+    await page.waitForTimeout(4000)
+
+    const sourceHandle = page.getByTestId('file-output-handle').first()
+    const targetHandle = page.getByTestId('presentation-input-handle').first()
+    await sourceHandle.scrollIntoViewIfNeeded()
+    await targetHandle.scrollIntoViewIfNeeded()
+    const sourceBox = await sourceHandle.boundingBox()
+    const targetBox = await targetHandle.boundingBox()
+    expect(sourceBox).toBeTruthy()
+    expect(targetBox).toBeTruthy()
+    const startX = sourceBox!.x + sourceBox!.width / 2
+    const startY = sourceBox!.y + sourceBox!.height / 2
+    const endX = targetBox!.x + targetBox!.width / 2
+    const endY = targetBox!.y + targetBox!.height / 2
+
+    await page.mouse.move(startX, startY)
+    await page.mouse.down()
+    await page.mouse.move(endX, endY, { steps: 10 })
+    await page.mouse.up()
+    await page.waitForTimeout(500)
+
+    await expect(page.locator('.react-flow__edge')).toHaveCount(1)
+  })
+
   test('Undo and Redo buttons are visible and Undo removes added node', async ({ page }) => {
     await gotoCanvas(page)
     await expect(page.getByTestId('computation-node')).toHaveCount(0)

@@ -75,6 +75,22 @@ describe('project-loader-utils', () => {
       expect(nodes[0].initialContent).toBeUndefined()
     })
 
+    it('maps file nodes with optional url', () => {
+      const snapshot = {
+        id: 'p',
+        nodes: [
+          { id: 'f1', position: { x: 0, y: 0 }, type: 'file' as const },
+          { id: 'f2', position: { x: 50, y: 0 }, type: 'file' as const, url: 'https://example.com/d.csv' },
+        ],
+        edges: [],
+      }
+      const nodes = snapshotToGraphNodes(snapshot)
+      expect(nodes).toHaveLength(2)
+      expect(nodes[0]).toMatchObject({ id: 'f1', type: 'file', uri: `${VIRTUAL_URI_PREFIX}f1.sl` })
+      expect(nodes[0].url).toBeUndefined()
+      expect(nodes[1]).toMatchObject({ id: 'f2', type: 'file', url: 'https://example.com/d.csv' })
+    })
+
     it('maps multiple nodes and preserves order', () => {
       const snapshot = {
         id: 'p',

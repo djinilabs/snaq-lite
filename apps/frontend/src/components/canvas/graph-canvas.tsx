@@ -5,8 +5,8 @@
  * Exposes getViewportCenter() via ref for placing new nodes at the visible center.
  */
 
-import type { Ref, RefObject, MouseEvent } from 'react'
-import { useCallback, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import type { Ref, RefObject, MouseEvent, MutableRefObject, DragEvent } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import {
   ReactFlow,
   Background,
@@ -26,7 +26,9 @@ import { applyNodePositionChanges } from './graph-node-position-changes'
 import { graphEdgeToFlowEdge } from './graph-edge-utils'
 import { getFlowNodeData } from './graph-node-data'
 import { ComputationBoxNode } from './computation-box-node'
+import { FileBlockNode } from './file-block-node'
 import { PresentationBlockNode } from './presentation-block-node'
+import { nodeIdToUri } from '~/editor/virtual-uri'
 import { useGraphStore } from '~/store'
 
 function graphNodeToFlowNode(
@@ -58,15 +60,25 @@ export interface GraphCanvasViewportRef {
   getViewportCenter: () => { x: number; y: number } | null
 }
 
-/** Must be rendered inside ReactFlow. Exposes getViewportCenter via the forwarded ref. */
+type ScreenToFlowPositionFn = (position: { x: number; y: number }) => { x: number; y: number }
+
+/** Must be rendered inside ReactFlow. Exposes getViewportCenter via the forwarded ref and keeps screenToFlowPositionRef for drop. */
 function ViewportCenterRef({
   viewportRef,
   forwardedRef,
+  screenToFlowPositionRef,
 }: {
   viewportRef: RefObject<HTMLDivElement | null>
   forwardedRef: Ref<GraphCanvasViewportRef | null>
+  screenToFlowPositionRef: MutableRefObject<ScreenToFlowPositionFn | null>
 }) {
   const { screenToFlowPosition } = useReactFlow()
+  useEffect(() => {
+    screenToFlowPositionRef.current = screenToFlowPosition
+    return () => {
+      screenToFlowPositionRef.current = null
+    }
+  }, [screenToFlowPosition, screenToFlowPositionRef])
   useImperativeHandle(
     forwardedRef,
     () => ({
@@ -86,11 +98,44 @@ function ViewportCenterRef({
 export function GraphCanvas(props: GraphCanvasProps = {}) {
   const { onSelectionChange, selectedNodeIds = [], selectedEdgeIds = [] } = props
   const viewportRef = useRef<HTMLDivElement>(null)
+  const screenToFlowPositionRef = useRef<ScreenToFlowPositionFn | null>(null) as MutableRefObject<ScreenToFlowPositionFn | null>
+  const addNode = useGraphStore((s) => s.addNode)
+  const onSelectionChangeRef = useRef(onSelectionChange)
+  onSelectionChangeRef.current = onSelectionChange
+
+  const onDragOver = useCallback((e: DragEvent<HTMLDivElement>) => {
+    if (e.dataTransfer.types.includes('Files')) {
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'copy'
+    }
+  }, [])
+
+  const onDrop = useCallback(
+    (e: DragEvent<HTMLDivElement>) => {
+      if (!e.dataTransfer.types.includes('Files')) return
+      e.preventDefault()
+      const files = e.dataTransfer.files
+      if (!files?.length) return
+      const position = screenToFlowPositionRef.current?.({ x: e.clientX, y: e.clientY })
+      if (!position) return
+      const id = crypto.randomUUID()
+      const file = files[0]
+      const url = URL.createObjectURL(file)
+      addNode({ id, position, type: 'file', uri: nodeIdToUri(id), url })
+      onSelectionChangeRef.current?.({
+        nodes: [{ id, position, data: {}, type: 'file' }],
+        edges: [],
+      })
+    },
+    [addNode],
+  )
+
   const nodeTypes = useMemo(
     () =>
       ({
         computation: ComputationBoxNode,
         presentation: PresentationBlockNode,
+        file: FileBlockNode,
       }) as const,
     [],
   )
@@ -203,13 +248,19 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
         onNodeClick={onNodeClick}
         onEdgeClick={onEdgeClick}
         onPaneClick={onPaneClick}
+        onDragOver={onDragOver}
+        onDrop={onDrop}
         nodeTypes={nodeTypes}
         nodesDraggable
         defaultEdgeOptions={{ selectable: true, deletable: true }}
         fitView
         fitViewOptions={{ padding: 0.2, maxZoom: 1.2 }}
       >
-        <ViewportCenterRef viewportRef={viewportRef} forwardedRef={props.viewportRef ?? null} />
+        <ViewportCenterRef
+          viewportRef={viewportRef}
+          forwardedRef={props.viewportRef ?? null}
+          screenToFlowPositionRef={screenToFlowPositionRef}
+        />
         <Background />
         <Controls />
       </ReactFlow>

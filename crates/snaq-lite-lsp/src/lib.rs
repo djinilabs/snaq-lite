@@ -8,6 +8,8 @@ pub mod state;
 pub mod subscription;
 
 #[cfg(target_arch = "wasm32")]
+pub mod stream_host;
+#[cfg(target_arch = "wasm32")]
 pub mod transport;
 
 use futures::lock::Mutex;
@@ -251,7 +253,7 @@ impl SnaqLiteBackend {
             if let Some(tx) = cancel_tx {
                 let _ = tx.send(());
             }
-            match self.run_node_with_graph_inputs(uri).await {
+            match self.run_node_with_graph_inputs(uri, None).await {
                 Err(e) => {
                     self.client
                         .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
@@ -360,7 +362,7 @@ impl SnaqLiteBackend {
             })
             .unwrap_or_default();
         let output_type = self
-            .run_node_with_graph_inputs(uri)
+            .run_node_with_graph_inputs(uri, None)
             .await
             .ok()
             .and_then(|(value, _)| snaq_lite_lang::value_type_name(&value));
@@ -568,7 +570,10 @@ impl SnaqLiteBackend {
                 return Err(tower_lsp::jsonrpc::Error::invalid_params("source document not open"));
             }
         }
-        let result = self.run_node_with_graph_inputs(&source_uri).await;
+        let external_streams = resolve_external_streams(params.external_streams.as_ref());
+        let result = self
+            .run_node_with_graph_inputs(&source_uri, external_streams)
+            .await;
         match result {
             Err(e) => {
                 self.client
@@ -666,9 +671,11 @@ impl SnaqLiteBackend {
 
     /// Run the graph up to sink_uri (topological order), filling stream inputs from upstream outputs.
     /// Returns (Value, Database) for the sink node. On cycle or missing docs returns Err.
+    /// When `external_streams` is `Some`, those handles are used as the sink's stream inputs (e.g. from file blocks); graph edges fill the rest.
     async fn run_node_with_graph_inputs(
         &self,
         sink_uri: &Url,
+        external_streams: Option<std::collections::HashMap<String, snaq_lite_lang::StreamHandleId>>,
     ) -> Result<
         (snaq_lite_lang::Value, salsa::DatabaseImpl),
         snaq_lite_lang::RunError,
@@ -700,17 +707,47 @@ impl SnaqLiteBackend {
                 incoming_map,
             )
         };
-        run_node_with_graph_inputs_impl(&order, &sources, &unit_registry, &incoming_map, sink_uri)
+        run_node_with_graph_inputs_impl(
+            &order,
+            &sources,
+            &unit_registry,
+            &incoming_map,
+            sink_uri,
+            external_streams.as_ref(),
+        )
+    }
+}
+
+/// Resolve external_streams (input name → stream index) to (input name → StreamHandleId).
+/// On WASM the host exposes get_stream_handle_id(index); on native returns None (no file-block streams).
+fn resolve_external_streams(
+    name_to_index: Option<&std::collections::HashMap<String, u32>>,
+) -> Option<std::collections::HashMap<String, snaq_lite_lang::StreamHandleId>> {
+    let name_to_index = name_to_index?;
+    if name_to_index.is_empty() {
+        return Some(std::collections::HashMap::new());
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::stream_host::resolve_external_streams(name_to_index)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = name_to_index;
+        None
     }
 }
 
 /// Shared implementation of graph run: one handle per edge, feed upstream value to each.
+/// When `external_streams` is `Some`, it is used only for the sink node to prefill stream_inputs
+/// (e.g. file-block–fed inputs); graph edges then fill any remaining inputs.
 fn run_node_with_graph_inputs_impl(
     order: &[Url],
     sources: &[(Url, String)],
     unit_registry: &snaq_lite_lang::UnitRegistry,
     incoming_map: &std::collections::HashMap<Url, Vec<(String, Url)>>,
     sink_uri: &Url,
+    external_streams: Option<&std::collections::HashMap<String, snaq_lite_lang::StreamHandleId>>,
 ) -> Result<
     (snaq_lite_lang::Value, salsa::DatabaseImpl),
     snaq_lite_lang::RunError,
@@ -724,13 +761,21 @@ fn run_node_with_graph_inputs_impl(
     for (uri, source_entry) in order.iter().zip(sources.iter()) {
         let source = &source_entry.1;
         let incoming = incoming_map.get(uri).map(|i| i.as_slice()).unwrap_or(&[]);
-        let mut stream_inputs =
-            std::collections::HashMap::<String, snaq_lite_lang::StreamHandleId>::new();
+        let is_sink = uri == sink_uri;
+        let mut stream_inputs: std::collections::HashMap<String, snaq_lite_lang::StreamHandleId> =
+            if is_sink {
+                external_streams.cloned().unwrap_or_default()
+            } else {
+                std::collections::HashMap::new()
+            };
         let mut senders_by_source: std::collections::HashMap<
             Url,
             Vec<futures::channel::mpsc::UnboundedSender<snaq_lite_lang::Chunk>>,
         > = std::collections::HashMap::new();
         for (name, source_uri) in incoming {
+            if stream_inputs.contains_key(name) {
+                continue;
+            }
             if !output_values.contains_key(source_uri) {
                 continue;
             }
@@ -1456,6 +1501,18 @@ mod tests {
         let params: pubsub::SubscribeWidgetParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.widget_id, "w1");
         assert_eq!(params.source_uri, "file:///n.snaq");
+        assert!(params.external_streams.is_none());
+    }
+
+    #[test]
+    fn subscribe_widget_params_deserializes_with_optional_external_streams() {
+        let json = r#"{"widgetId":"w2","sourceUri":"file:///p.snaq","externalStreams":{"x":0,"y":1}}"#;
+        let params: pubsub::SubscribeWidgetParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.widget_id, "w2");
+        assert_eq!(params.source_uri, "file:///p.snaq");
+        let ext = params.external_streams.as_ref().unwrap();
+        assert_eq!(ext.get("x"), Some(&0));
+        assert_eq!(ext.get("y"), Some(&1));
     }
 
     #[test]

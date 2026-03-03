@@ -11,7 +11,7 @@ import { useProjectsIndexStore } from '~/store'
 
 export interface ProjectToolbarProps {
   projectId: string
-  onAddNode?: (type: 'computation' | 'presentation') => void
+  onAddNode?: (type: 'computation' | 'presentation' | 'file') => void
   onDeleteSelected?: () => void
   hasSelection?: boolean
 }
@@ -107,6 +107,14 @@ export function ProjectToolbar({ projectId, onAddNode, onDeleteSelected, hasSele
         style={{ padding: '6px 12px', cursor: 'pointer', borderRadius: 'var(--radius-sm)' }}
       >
         Add presentation block
+      </button>
+      <button
+        type="button"
+        data-testid="add-file-btn"
+        onClick={() => onAddNode?.('file')}
+        style={{ padding: '6px 12px', cursor: 'pointer', borderRadius: 'var(--radius-sm)' }}
+      >
+        Add file block
       </button>
       {onDeleteSelected && (
         <button

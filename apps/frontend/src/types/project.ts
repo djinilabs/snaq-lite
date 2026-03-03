@@ -3,7 +3,7 @@
  * URIs are derived when loading via nodeIdToUri; not persisted.
  */
 
-export type ProjectNodeType = 'computation' | 'presentation'
+export type ProjectNodeType = 'computation' | 'presentation' | 'file'
 
 /** Input port for a computation block (name used as $name in script). */
 export interface ProjectNodeInput {
@@ -19,6 +19,8 @@ export interface ProjectNode {
   content?: string
   /** Input ports; only for computation nodes. Editable in UI, not in block text. */
   inputs?: ProjectNodeInput[]
+  /** URL for file nodes (blob, data, or https). Optional; used when type === 'file'. */
+  url?: string
 }
 
 export interface ProjectEdge {
@@ -54,7 +56,7 @@ export function parseProjectSnapshot(data: unknown): ProjectSnapshot | null {
     if (
       typeof no.id !== 'string' ||
       typeof no.type !== 'string' ||
-      (no.type !== 'computation' && no.type !== 'presentation')
+      (no.type !== 'computation' && no.type !== 'presentation' && no.type !== 'file')
     )
       return null
     const pos = no.position
@@ -79,6 +81,7 @@ export function parseProjectSnapshot(data: unknown): ProjectSnapshot | null {
       type: no.type as ProjectNodeType,
       content: typeof no.content === 'string' ? no.content : undefined,
       inputs: parsedInputs,
+      ...(no.type === 'file' && typeof no.url === 'string' ? { url: no.url } : {}),
     })
   }
   const parsedEdges: ProjectEdge[] = []

@@ -3,7 +3,12 @@
  * routes worker messages (LSP responses and custom notifications) to store and client.
  */
 
-import { WORKER_MSG_READY, WORKER_MSG_ERROR, WORKER_MSG_INIT } from '~/lib/constants'
+import {
+  WORKER_MSG_READY,
+  WORKER_MSG_ERROR,
+  WORKER_MSG_INIT,
+  WORKER_MSG_CREATE_STREAM_RESPONSE,
+} from '~/lib/constants'
 import { routeMessage } from './route-message'
 
 let worker: Worker | null = null
@@ -52,9 +57,16 @@ export function resetMessageRouterForTest(): void {
  * updates workerReady and returns true (caller should not pass to routeMessage).
  * Otherwise returns false and the caller should pass the raw string to routeMessage.
  */
+const pendingStreamResolvers = new Map<number, (index: number) => void>()
+
 export function processIncomingWorkerMessage(data: string): boolean {
   try {
-    const parsed = JSON.parse(data) as { type?: string; error?: string }
+    const parsed = JSON.parse(data) as {
+      type?: string
+      error?: string
+      id?: number
+      index?: number
+    }
     if (parsed && typeof parsed.type === 'string') {
       if (parsed.type === WORKER_MSG_READY) {
         workerReady = true
@@ -75,6 +87,12 @@ export function processIncomingWorkerMessage(data: string): boolean {
           readyReject(new Error(errMsg))
           readyReject = null
         }
+        return true
+      }
+      if (parsed.type === WORKER_MSG_CREATE_STREAM_RESPONSE && typeof parsed.id === 'number') {
+        const resolve = pendingStreamResolvers.get(parsed.id)
+        pendingStreamResolvers.delete(parsed.id)
+        if (resolve && typeof parsed.index === 'number') resolve(parsed.index)
         return true
       }
     }
@@ -251,6 +269,43 @@ export function sendRequest(method: string, params?: unknown, id?: string | numb
     params,
   }
   sendToWorker(JSON.stringify(msg))
+}
+
+let nextStreamRequestId = 0
+
+/** Request a new stream index from the LSP worker (for file-block external streams). Resolves when worker responds. */
+export function requestCreateStreamInput(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const id = nextStreamRequestId++
+    pendingStreamResolvers.set(id, resolve)
+    const w = getWorker()
+    if (!w) {
+      pendingStreamResolvers.delete(id)
+      reject(new Error('Worker not initialized'))
+      return
+    }
+    w.postMessage(JSON.stringify({ type: 'createStreamInput', id }))
+    setTimeout(() => {
+      if (pendingStreamResolvers.has(id)) {
+        pendingStreamResolvers.delete(id)
+        reject(new Error('createStreamInput response timeout'))
+      }
+    }, 10_000)
+  })
+}
+
+/** Push a chunk (array of numbers) to a stream by index. */
+export function sendStreamChunk(index: number, chunk: number[]): void {
+  const w = getWorker()
+  if (!w) return
+  w.postMessage(JSON.stringify({ type: 'pushChunk', index, chunk }))
+}
+
+/** Close a stream by index (signal EOF). */
+export function closeStream(index: number): void {
+  const w = getWorker()
+  if (!w) return
+  w.postMessage(JSON.stringify({ type: 'closeStream', index }))
 }
 
 export function sendNotification(method: string, params?: unknown): void {

@@ -5,6 +5,8 @@ export const VIRTUAL_URI_PREFIX = 'snaq://graph/'
 export const WORKER_MSG_INIT = 'init'
 export const WORKER_MSG_READY = 'snaqlite-worker-ready'
 export const WORKER_MSG_ERROR = 'snaqlite-worker-error'
+/** Worker response for createStreamInput (id + index). */
+export const WORKER_MSG_CREATE_STREAM_RESPONSE = 'createStreamInputResponse'
 
 export const LSP_METHOD_GRAPH_CONNECT = 'snaqlite/graph/connect'
 export const LSP_METHOD_GRAPH_DISCONNECT = 'snaqlite/graph/disconnect'
@@ -28,6 +30,7 @@ export const LSP_SUBSCRIBE_AFTER_DID_OPEN_MS = 150
 /** React Flow drag handle class names; only elements with this class start a node drag. */
 export const DRAG_HANDLE_CLASS_COMPUTATION = 'computation-drag-handle'
 export const DRAG_HANDLE_CLASS_PRESENTATION = 'presentation-drag-handle'
+export const DRAG_HANDLE_CLASS_FILE = 'file-drag-handle'
 
 /** React Flow utility class; elements with this class do not start a node drag (so inner UI is clickable). */
 export const NODRAG_CLASS = 'nodrag'

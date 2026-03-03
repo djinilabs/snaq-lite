@@ -5,10 +5,11 @@
  * Passes onBeforeSubscribe so subscribeWidget is sent only after didOpen (avoids "source document not open").
  */
 
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import type { Node, NodeProps } from '@xyflow/react'
 import { Handle, Position } from '@xyflow/react'
 import { DEFAULT_PRESENTATION_DOCUMENT_CONTENT, LSP_METHOD_DID_OPEN } from '~/lib/constants'
+import { buildGetExternalStreams } from '~/lib/build-external-streams'
 import { hasLanguageClient, getLanguageClient } from '~/lsp/language-client-singleton'
 import { useGraphStore } from '~/store'
 import { PresentationBlock } from '~/components/presentation/presentation-block'
@@ -40,7 +41,18 @@ export function PresentationBlockNode({
   data,
   selected,
 }: NodeProps<PresentationFlowNode>) {
-  const node = useGraphStore((s) => s.nodes.find((n) => n.id === id))
+  const nodes = useGraphStore((s) => s.nodes)
+  const edges = useGraphStore((s) => s.edges)
+  const node = nodes.find((n) => n.id === id)
+
+  const getExternalStreams = useMemo(() => {
+    const hasFileInput = edges.some(
+      (e) => e.targetId === id && nodes.find((n) => n.id === e.sourceId)?.type === 'file',
+    )
+    return hasFileInput
+      ? buildGetExternalStreams(id, () => useGraphStore.getState().nodes, () => useGraphStore.getState().edges)
+      : undefined
+  }, [id, nodes, edges])
 
   useEffect(() => {
     sendDidOpenForPresentation(data.uri, node?.inputs)
@@ -65,6 +77,7 @@ export function PresentationBlockNode({
           sourceUri={data.sourceUri}
           documentUri={data.uri}
           onBeforeSubscribe={onBeforeSubscribe}
+          getExternalStreams={getExternalStreams}
         />
       </NodeContentZone>
     </NodeFrame>

@@ -193,6 +193,28 @@ describe('project-storage', () => {
       const snapshot = buildSnapshotFromGraph('p', nodes, [])
       expect(snapshot.nodes[0].inputs).toEqual([{ name: 'x', type: 'Vector' }])
     })
+
+    it('includes url for file nodes when present', () => {
+      const nodes = [
+        {
+          id: 'f1',
+          position: { x: 0, y: 0 },
+          type: 'file' as const,
+          uri: 'snaq://graph/f1.sl',
+        },
+        {
+          id: 'f2',
+          position: { x: 50, y: 0 },
+          type: 'file' as const,
+          uri: 'snaq://graph/f2.sl',
+          url: 'https://example.com/data.csv',
+        },
+      ]
+      const snapshot = buildSnapshotFromGraph('p', nodes, [])
+      expect(snapshot.nodes[0]).toMatchObject({ id: 'f1', type: 'file' })
+      expect(snapshot.nodes[0].url).toBeUndefined()
+      expect(snapshot.nodes[1]).toMatchObject({ id: 'f2', type: 'file', url: 'https://example.com/data.csv' })
+    })
   })
 
   describe('getGraphStateForUndo', () => {

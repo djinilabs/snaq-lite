@@ -72,6 +72,21 @@ describe('parseProjectSnapshot', () => {
     ])
   })
 
+  it('parses file nodes with optional url', () => {
+    const snapshot = parseProjectSnapshot({
+      id: 'p',
+      nodes: [
+        { id: 'f1', position: { x: 0, y: 0 }, type: 'file' },
+        { id: 'f2', position: { x: 50, y: 0 }, type: 'file', url: 'https://example.com/data.csv' },
+      ],
+      edges: [],
+    })
+    expect(snapshot?.nodes).toHaveLength(2)
+    expect(snapshot?.nodes[0]).toMatchObject({ id: 'f1', type: 'file' })
+    expect(snapshot?.nodes[0].url).toBeUndefined()
+    expect(snapshot?.nodes[1]).toMatchObject({ id: 'f2', type: 'file', url: 'https://example.com/data.csv' })
+  })
+
   it('parses edges with targetInputIndex', () => {
     const snapshot = parseProjectSnapshot({
       id: 'p',

@@ -23,6 +23,8 @@ interface PresentationBlockProps {
   widgetId?: string
   /** Called immediately before subscribeWidget so the LSP has the document open (avoids "source document not open" after refresh). */
   onBeforeSubscribe?: () => void
+  /** When present, used to feed file-block streams before subscribeWidget. */
+  getExternalStreams?: () => Promise<Record<string, number>>
 }
 
 const PLACEHOLDER_UNWIRED = 'Connect a computation box'
@@ -32,6 +34,7 @@ export function PresentationBlock({
   documentUri,
   widgetId: widgetIdProp,
   onBeforeSubscribe,
+  getExternalStreams,
 }: PresentationBlockProps) {
   const generatedId = useRef<string>(generateWidgetId()).current
   const widgetId = widgetIdProp ?? generatedId
@@ -43,6 +46,7 @@ export function PresentationBlock({
     sourceUri: documentUri,
     enabled: isWired,
     onBeforeSubscribe,
+    getExternalStreams,
   })
 
   return (

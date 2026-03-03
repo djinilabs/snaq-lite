@@ -43,11 +43,11 @@ function graphNodeToFlowNode(
 
 function graphEdgeToFlowEdge(e: import('~/store').GraphEdge): Edge {
   return {
-    id: `${e.sourceId}-${e.targetId}-${e.targetInputName}`,
+    id: `${e.sourceId}-${e.targetId}-${e.targetInputIndex}`,
     source: e.sourceId,
     target: e.targetId,
     sourceHandle: 'output',
-    targetHandle: e.targetInputName,
+    targetHandle: String(e.targetInputIndex),
   }
 }
 
@@ -125,15 +125,13 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
 
   const onConnect = useCallback(
     async (connection: Connection) => {
-      if (!connection.source || !connection.target || !connection.targetHandle) return
+      if (!connection.source || !connection.target || connection.targetHandle == null) return
+      const targetInputIndex = Number(connection.targetHandle)
+      if (!Number.isInteger(targetInputIndex) || targetInputIndex < 0) return
       const sourceNode = useGraphStore.getState().nodes.find((n) => n.id === connection.source)
       const targetNode = useGraphStore.getState().nodes.find((n) => n.id === connection.target)
       if (!sourceNode || !targetNode) return
-      await connectEdge(
-        sourceNode.uri,
-        targetNode.uri,
-        connection.targetHandle,
-      )
+      await connectEdge(sourceNode.uri, targetNode.uri, targetInputIndex)
     },
     [],
   )
@@ -148,8 +146,8 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
   const onEdgesDelete = useCallback((deleted: Edge[]) => {
     const nodes = useGraphStore.getState().nodes
     const params = getDisconnectParamsForDeletedEdges(deleted, nodes)
-    for (const { targetUri, targetInputName } of params) {
-      void disconnectEdge(targetUri, targetInputName)
+    for (const { targetUri, targetInputIndex } of params) {
+      void disconnectEdge(targetUri, targetInputIndex)
     }
   }, [])
 

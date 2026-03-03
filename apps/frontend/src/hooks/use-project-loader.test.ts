@@ -12,7 +12,10 @@ import {
   getProjectSnapshot,
   PROJECTS_INDEX_KEY,
 } from '~/lib/project-storage'
-import { snapshotToGraphNodes } from '~/lib/project-loader-utils'
+import {
+  snapshotEdgesToGraphEdges,
+  snapshotToGraphNodes,
+} from '~/lib/project-loader-utils'
 import type { ProjectSnapshot } from '~/types/project'
 
 const PROJECT_ID = '11111111-2222-3333-4444-555555555555'
@@ -46,7 +49,7 @@ describe('useProjectLoader (sync load path)', () => {
     const snapshot = getProjectSnapshot(PROJECT_ID)
     expect(snapshot).not.toBeNull()
     const nodes = snapshotToGraphNodes(snapshot!)
-    const edges = snapshot!.edges
+    const edges = snapshotEdgesToGraphEdges(snapshot!.edges, nodes)
     useGraphStore.getState().setGraph(nodes, edges, { clearHistory: true })
 
     expect(useGraphStore.getState().nodes).toHaveLength(2)
@@ -56,7 +59,7 @@ describe('useProjectLoader (sync load path)', () => {
     expect(useGraphStore.getState().edges[0]).toEqual({
       sourceId: 'comp-1',
       targetId: 'pres-1',
-      targetInputName: 'input',
+      targetInputIndex: 0,
     })
   })
 })

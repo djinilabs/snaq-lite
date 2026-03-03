@@ -59,7 +59,7 @@ export function PresentationBlockNode({
       selected={selected}
       minHeight={120}
     >
-      <Handle type="target" position={Position.Left} id="x" data-testid="presentation-input-handle" />
+      <Handle type="target" position={Position.Left} id="0" data-testid="presentation-input-handle" />
       <NodeContentZone data-testid="presentation-content">
         <PresentationBlock
           sourceUri={data.sourceUri}

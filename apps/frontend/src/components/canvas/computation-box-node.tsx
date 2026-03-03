@@ -292,11 +292,11 @@ export function ComputationBoxNode({
         (inp, i) =>
           inp.name ? (
             <Handle
-              key={inp.name}
+              key={`${i}-${inp.name}`}
               type="target"
               position={Position.Left}
-              id={inp.name}
-              data-testid={`computation-input-handle-${inp.name}`}
+              id={String(i)}
+              data-testid={`computation-input-handle-${i}`}
               style={{ top: computationNodeHandleTop(i) }}
             />
           ) : null,

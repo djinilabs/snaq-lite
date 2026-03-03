@@ -72,13 +72,22 @@ describe('parseProjectSnapshot', () => {
     ])
   })
 
-  it('parses edges', () => {
+  it('parses edges with targetInputIndex', () => {
     const snapshot = parseProjectSnapshot({
       id: 'p',
       nodes: [],
-      edges: [
-        { sourceId: 'a', targetId: 'b', targetInputName: 'input' },
-      ],
+      edges: [{ sourceId: 'a', targetId: 'b', targetInputIndex: 0 }],
+    })
+    expect(snapshot?.edges).toEqual([
+      { sourceId: 'a', targetId: 'b', targetInputIndex: 0 },
+    ])
+  })
+
+  it('parses edges with legacy targetInputName', () => {
+    const snapshot = parseProjectSnapshot({
+      id: 'p',
+      nodes: [],
+      edges: [{ sourceId: 'a', targetId: 'b', targetInputName: 'input' }],
     })
     expect(snapshot?.edges).toEqual([
       { sourceId: 'a', targetId: 'b', targetInputName: 'input' },
@@ -105,7 +114,7 @@ describe('parseProjectSnapshot', () => {
     ).toBeNull()
   })
 
-  it('returns null for invalid edge shape', () => {
+  it('returns null for invalid edge shape (missing both targetInputIndex and targetInputName)', () => {
     expect(
       parseProjectSnapshot({
         id: 'p',

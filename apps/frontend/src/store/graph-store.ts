@@ -42,7 +42,8 @@ export interface GraphNode {
 export interface GraphEdge {
   sourceId: string
   targetId: string
-  targetInputName: string
+  /** Index of the target node's input port (0-based). Connections survive input renames. */
+  targetInputIndex: number
 }
 
 export interface PendingEdge {
@@ -67,7 +68,7 @@ interface GraphState {
   moveNode: (id: string, position: { x: number; y: number }) => void
   removeNode: (id: string) => void
   addEdge: (edge: GraphEdge) => void
-  removeEdge: (targetId: string, targetInputName: string) => void
+  removeEdge: (targetId: string, targetInputIndex: number) => void
   setPendingEdge: (edge: PendingEdge | null) => void
   clearPendingEdge: () => void
   setFocusEditorForNodeId: (id: string | null) => void
@@ -130,7 +131,7 @@ export const useGraphStore = create<GraphState>((set) => ({
       const undoStack = pushUndoAndClearRedo(state.undoSnapshotGetter, state.undoStack)
       return {
         edges: state.edges.filter(
-          (e) => !(e.targetId === edge.targetId && e.targetInputName === edge.targetInputName),
+          (e) => !(e.targetId === edge.targetId && e.targetInputIndex === edge.targetInputIndex),
         ).concat(edge),
         pendingEdge: null,
         undoStack,
@@ -138,12 +139,12 @@ export const useGraphStore = create<GraphState>((set) => ({
       }
     }),
 
-  removeEdge: (targetId, targetInputName) =>
+  removeEdge: (targetId, targetInputIndex) =>
     set((state) => {
       const undoStack = pushUndoAndClearRedo(state.undoSnapshotGetter, state.undoStack)
       return {
         edges: state.edges.filter(
-          (e) => !(e.targetId === targetId && e.targetInputName === targetInputName),
+          (e) => !(e.targetId === targetId && e.targetInputIndex === targetInputIndex),
         ),
         undoStack,
         redoStack: [],

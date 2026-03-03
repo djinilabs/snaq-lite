@@ -28,7 +28,7 @@ describe('getFlowNodeData', () => {
   it('sets sourceUri to source node uri for presentation node when edge connects computation to it', () => {
     const nodes: GraphNode[] = [compNode, presNode]
     const edges: GraphEdge[] = [
-      { sourceId: 'comp-1', targetId: 'pres-1', targetInputName: 'input' },
+      { sourceId: 'comp-1', targetId: 'pres-1', targetInputIndex: 0 },
     ]
     const data = getFlowNodeData(presNode, nodes, edges)
     expect(data.sourceUri).toBe('snaq://graph/comp-1.sl')
@@ -44,7 +44,7 @@ describe('getFlowNodeData', () => {
   it('sets sourceUri to empty for presentation node when edge exists but source node not in store', () => {
     const nodes: GraphNode[] = [presNode]
     const edges: GraphEdge[] = [
-      { sourceId: 'comp-missing', targetId: 'pres-1', targetInputName: 'input' },
+      { sourceId: 'comp-missing', targetId: 'pres-1', targetInputIndex: 0 },
     ]
     const data = getFlowNodeData(presNode, nodes, edges)
     expect(data.sourceUri).toBe('')

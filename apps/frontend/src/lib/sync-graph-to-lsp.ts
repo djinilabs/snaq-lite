@@ -56,12 +56,18 @@ function doSyncWithClient(
     for (const edge of edges) {
       const sourceNode = nodes.find((n) => n.id === edge.sourceId)
       const targetNode = nodes.find((n) => n.id === edge.targetId)
-      if (sourceNode?.uri && targetNode?.uri) {
+      const targetInputName = targetNode?.inputs?.[edge.targetInputIndex]?.name
+      if (
+        sourceNode?.uri &&
+        targetNode?.uri &&
+        targetInputName != null &&
+        targetInputName.trim() !== ''
+      ) {
         try {
           await client.sendRequest(LSP_METHOD_GRAPH_CONNECT, {
             sourceUri: sourceNode.uri,
             targetUri: targetNode.uri,
-            targetInputName: edge.targetInputName,
+            targetInputName,
           })
         } catch {
           // Ignore per-edge errors (e.g. type mismatch on load)

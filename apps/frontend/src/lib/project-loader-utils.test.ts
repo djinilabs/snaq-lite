@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { isValidUuid, snapshotToGraphNodes } from './project-loader-utils'
+import {
+  isValidUuid,
+  snapshotEdgesToGraphEdges,
+  snapshotToGraphNodes,
+} from './project-loader-utils'
 import { VIRTUAL_URI_PREFIX } from './constants'
 
 describe('project-loader-utils', () => {
@@ -100,6 +104,44 @@ describe('project-loader-utils', () => {
       }
       const nodes = snapshotToGraphNodes(snapshot)
       expect(nodes[0].inputs).toEqual([{ name: 'x', type: 'Vector' }])
+    })
+  })
+
+  describe('snapshotEdgesToGraphEdges', () => {
+    it('uses targetInputIndex when present', () => {
+      const nodes = [
+        { id: 'a', position: { x: 0, y: 0 }, type: 'computation' as const, uri: 'snaq://graph/a.sl' },
+        { id: 'b', position: { x: 10, y: 0 }, type: 'computation' as const, uri: 'snaq://graph/b.sl', inputs: [{ name: 'x', type: 'Vector' }] },
+      ]
+      const snapshotEdges = [{ sourceId: 'a', targetId: 'b', targetInputIndex: 0 }]
+      const result = snapshotEdgesToGraphEdges(snapshotEdges, nodes)
+      expect(result).toEqual([{ sourceId: 'a', targetId: 'b', targetInputIndex: 0 }])
+    })
+
+    it('resolves legacy targetInputName to index from target node inputs', () => {
+      const nodes = [
+        { id: 'a', position: { x: 0, y: 0 }, type: 'computation' as const, uri: 'snaq://graph/a.sl' },
+        {
+          id: 'b',
+          position: { x: 10, y: 0 },
+          type: 'computation' as const,
+          uri: 'snaq://graph/b.sl',
+          inputs: [{ name: 'y', type: 'Vector' }, { name: 'x', type: 'Numeric' }],
+        },
+      ]
+      const snapshotEdges = [{ sourceId: 'a', targetId: 'b', targetInputName: 'x' }]
+      const result = snapshotEdgesToGraphEdges(snapshotEdges, nodes)
+      expect(result).toEqual([{ sourceId: 'a', targetId: 'b', targetInputIndex: 1 }])
+    })
+
+    it('falls back to 0 when legacy targetInputName not found', () => {
+      const nodes = [
+        { id: 'a', position: { x: 0, y: 0 }, type: 'computation' as const, uri: 'snaq://graph/a.sl' },
+        { id: 'b', position: { x: 10, y: 0 }, type: 'computation' as const, uri: 'snaq://graph/b.sl', inputs: [{ name: 'z', type: 'Vector' }] },
+      ]
+      const snapshotEdges = [{ sourceId: 'a', targetId: 'b', targetInputName: 'missing' }]
+      const result = snapshotEdgesToGraphEdges(snapshotEdges, nodes)
+      expect(result).toEqual([{ sourceId: 'a', targetId: 'b', targetInputIndex: 0 }])
     })
   })
 })

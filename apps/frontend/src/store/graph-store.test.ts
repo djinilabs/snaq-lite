@@ -78,15 +78,15 @@ describe('graph-store', () => {
       type: 'computation',
       uri: 'snaq://graph/n2.sl',
     })
-    useGraphStore.getState().addEdge({ sourceId: 'n1', targetId: 'n2', targetInputName: 'x' })
+    useGraphStore.getState().addEdge({ sourceId: 'n1', targetId: 'n2', targetInputIndex: 0 })
     useGraphStore.getState().removeNode('n1')
     expect(useGraphStore.getState().nodes).toHaveLength(1)
     expect(useGraphStore.getState().edges).toHaveLength(0)
   })
 
   it('addEdge replaces existing edge for same target and input', () => {
-    useGraphStore.getState().addEdge({ sourceId: 'a', targetId: 'b', targetInputName: 'x' })
-    useGraphStore.getState().addEdge({ sourceId: 'c', targetId: 'b', targetInputName: 'x' })
+    useGraphStore.getState().addEdge({ sourceId: 'a', targetId: 'b', targetInputIndex: 0 })
+    useGraphStore.getState().addEdge({ sourceId: 'c', targetId: 'b', targetInputIndex: 0 })
     expect(useGraphStore.getState().edges).toHaveLength(1)
     expect(useGraphStore.getState().edges[0].sourceId).toBe('c')
   })
@@ -97,14 +97,37 @@ describe('graph-store', () => {
       sourceHandle: null,
       targetPosition: { x: 1, y: 1 },
     })
-    useGraphStore.getState().addEdge({ sourceId: 'a', targetId: 'b', targetInputName: 'x' })
+    useGraphStore.getState().addEdge({ sourceId: 'a', targetId: 'b', targetInputIndex: 0 })
     expect(useGraphStore.getState().pendingEdge).toBeNull()
   })
 
   it('removeEdge removes matching edge', () => {
-    useGraphStore.getState().addEdge({ sourceId: 'a', targetId: 'b', targetInputName: 'x' })
-    useGraphStore.getState().removeEdge('b', 'x')
+    useGraphStore.getState().addEdge({ sourceId: 'a', targetId: 'b', targetInputIndex: 0 })
+    useGraphStore.getState().removeEdge('b', 0)
     expect(useGraphStore.getState().edges).toHaveLength(0)
+  })
+
+  it('edge is keyed by targetInputIndex so connection survives input rename', () => {
+    useGraphStore.getState().addNode({
+      id: 'a',
+      position: { x: 0, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/a.sl',
+    })
+    useGraphStore.getState().addNode({
+      id: 'b',
+      position: { x: 100, y: 0 },
+      type: 'computation',
+      uri: 'snaq://graph/b.sl',
+    })
+    useGraphStore.getState().setNodeInputs('b', [{ name: 'oldName', type: 'Numeric' }])
+    useGraphStore.getState().addEdge({ sourceId: 'a', targetId: 'b', targetInputIndex: 0 })
+    expect(useGraphStore.getState().edges).toHaveLength(1)
+    expect(useGraphStore.getState().edges[0].targetInputIndex).toBe(0)
+    useGraphStore.getState().setNodeInputs('b', [{ name: 'newName', type: 'Numeric' }])
+    expect(useGraphStore.getState().edges).toHaveLength(1)
+    expect(useGraphStore.getState().edges[0].targetInputIndex).toBe(0)
+    expect(useGraphStore.getState().edges[0].targetId).toBe('b')
   })
 
   it('setPendingEdge and clearPendingEdge', () => {
@@ -204,7 +227,7 @@ describe('graph-store', () => {
         uri: 'snaq://graph/a.sl',
       },
     ]
-    const edges = [{ sourceId: 'a', targetId: 'b', targetInputName: 'x' }]
+    const edges = [{ sourceId: 'a', targetId: 'b', targetInputIndex: 0 }]
     useGraphStore.getState().setGraph(nodes, edges)
     expect(useGraphStore.getState().nodes).toHaveLength(1)
     expect(useGraphStore.getState().nodes[0]).toMatchObject({ id: 'a', position: { x: 10, y: 20 } })
@@ -354,9 +377,9 @@ describe('graph-store', () => {
       edges: [...useGraphStore.getState().edges],
     })
     useGraphStore.getState().setUndoSnapshotGetter(getter)
-    useGraphStore.getState().addEdge({ sourceId: 'a', targetId: 'b', targetInputName: 'x' })
+    useGraphStore.getState().addEdge({ sourceId: 'a', targetId: 'b', targetInputIndex: 0 })
     expect(useGraphStore.getState().undoStack).toHaveLength(1)
-    useGraphStore.getState().removeEdge('b', 'x')
+    useGraphStore.getState().removeEdge('b', 0)
     expect(useGraphStore.getState().undoStack).toHaveLength(2)
     useGraphStore.getState().undo()
     expect(useGraphStore.getState().edges).toHaveLength(1)
@@ -432,7 +455,7 @@ describe('graph-store', () => {
       type: 'computation',
       uri: 'snaq://graph/b.sl',
     })
-    useGraphStore.getState().addEdge({ sourceId: 'a', targetId: 'b', targetInputName: 'x' })
+    useGraphStore.getState().addEdge({ sourceId: 'a', targetId: 'b', targetInputIndex: 0 })
     expect(useGraphStore.getState().edges).toHaveLength(1)
     useGraphStore.getState().undo()
     expect(useGraphStore.getState().edges).toHaveLength(0)

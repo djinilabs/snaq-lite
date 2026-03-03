@@ -39,13 +39,13 @@ const LSP_WAIT_MS = 15_000
 
 /**
  * Optimistic connect: add edge to store and draw wire immediately, then send LSP connect.
- * If the LSP is not ready yet, waits up to LSP_WAIT_MS for it before connecting.
- * On LSP error, drop the pending wire from the store and show error toast.
+ * targetInputIndex is the 0-based index of the target node's input port (connection survives renames).
+ * LSP is called with the current input name at that index.
  */
 export async function connectEdge(
   sourceUri: string,
   targetUri: string,
-  targetInputName: string,
+  targetInputIndex: number,
 ): Promise<boolean> {
   const langClient = await waitForLanguageClient(LSP_WAIT_MS)
   if (!langClient) {
@@ -57,6 +57,12 @@ export async function connectEdge(
   if (!sourceId || !targetId) return false
 
   const targetNode = useGraphStore.getState().nodes.find((n) => n.id === targetId)
+  const targetInputName = targetNode?.inputs?.[targetInputIndex]?.name
+  if (targetInputName == null || targetInputName.trim() === '') {
+    useUIStore.getState().addToast('Target input not found or has no name.', 'error')
+    return false
+  }
+
   if (targetNode?.type === 'presentation') {
     const content = presentationDocumentContent(targetNode.inputs)
     langClient.sendNotification(LSP_METHOD_DID_OPEN, {
@@ -65,9 +71,8 @@ export async function connectEdge(
     await new Promise((r) => setTimeout(r, LSP_SUBSCRIBE_AFTER_DID_OPEN_MS))
   } else if (targetNode?.type === 'computation') {
     let content = computationDocumentContent(targetUri, targetNode)
-    // Ensure LSP has the target input: if content is empty but store has the input (e.g. UI-only), send minimal decl
     if (content.trim().length === 0) {
-      const decl = targetNode.inputs?.find((i) => i.name.trim() && i.name === targetInputName)
+      const decl = targetNode.inputs?.[targetInputIndex]
       if (decl) content = `input ${decl.name}: ${decl.type}`
     }
     if (content.trim().length > 0) {
@@ -84,7 +89,7 @@ export async function connectEdge(
       targetUri,
       targetInputName,
     })
-    useGraphStore.getState().addEdge({ sourceId, targetId, targetInputName })
+    useGraphStore.getState().addEdge({ sourceId, targetId, targetInputIndex })
     if (targetNode?.type === 'computation') {
       useWidgetContentVersionStore.getState().increment(`${COMPUTATION_RESULT_WIDGET_ID_PREFIX}${targetId}`)
     }
@@ -98,12 +103,11 @@ export async function connectEdge(
 
 /**
  * Optimistic disconnect: remove edge from store, then notify LSP.
- * If the LSP is not ready yet, waits up to LSP_WAIT_MS for it.
- * On LSP error, re-add the edge (rollback) and show error toast.
+ * targetInputIndex is the 0-based index of the target's input; LSP is called with current name at that index.
  */
 export async function disconnectEdge(
   targetUri: string,
-  targetInputName: string,
+  targetInputIndex: number,
 ): Promise<void> {
   const langClient = await waitForLanguageClient(LSP_WAIT_MS)
   if (!langClient) {
@@ -115,11 +119,13 @@ export async function disconnectEdge(
   if (!targetId) return
 
   const edge = state.edges.find(
-    (e) => e.targetId === targetId && e.targetInputName === targetInputName,
+    (e) => e.targetId === targetId && e.targetInputIndex === targetInputIndex,
   )
   const sourceId = edge?.sourceId
+  const targetNode = state.nodes.find((n) => n.id === targetId)
+  const targetInputName = targetNode?.inputs?.[targetInputIndex]?.name ?? ''
 
-  state.removeEdge(targetId, targetInputName)
+  state.removeEdge(targetId, targetInputIndex)
   try {
     await langClient.sendRequest(LSP_METHOD_GRAPH_DISCONNECT, {
       targetUri,
@@ -127,7 +133,7 @@ export async function disconnectEdge(
     })
   } catch (e) {
     if (sourceId != null) {
-      useGraphStore.getState().addEdge({ sourceId, targetId, targetInputName })
+      useGraphStore.getState().addEdge({ sourceId, targetId, targetInputIndex })
     }
     useUIStore.getState().addToast(errorMessage(e), 'error')
   }

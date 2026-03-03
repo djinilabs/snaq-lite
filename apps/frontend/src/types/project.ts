@@ -5,7 +5,7 @@
 
 export type ProjectNodeType = 'computation' | 'presentation'
 
-/** Input port for a computation block (name used as $name in script and as targetInputName for edges). */
+/** Input port for a computation block (name used as $name in script). */
 export interface ProjectNodeInput {
   name: string
   type: string
@@ -24,7 +24,10 @@ export interface ProjectNode {
 export interface ProjectEdge {
   sourceId: string
   targetId: string
-  targetInputName: string
+  /** Index of the target node's input port (0-based). Persisted in new format. */
+  targetInputIndex?: number
+  /** Legacy: used when loading old snapshots; resolved to targetInputIndex in loader. */
+  targetInputName?: string
 }
 
 export interface ProjectSnapshot {
@@ -80,16 +83,15 @@ export function parseProjectSnapshot(data: unknown): ProjectSnapshot | null {
   for (const e of edges) {
     if (e == null || typeof e !== 'object') return null
     const eo = e as Record<string, unknown>
-    if (
-      typeof eo.sourceId !== 'string' ||
-      typeof eo.targetId !== 'string' ||
-      typeof eo.targetInputName !== 'string'
-    )
-      return null
+    if (typeof eo.sourceId !== 'string' || typeof eo.targetId !== 'string') return null
+    const hasIndex = typeof eo.targetInputIndex === 'number'
+    const hasName = typeof eo.targetInputName === 'string'
+    if (!hasIndex && !hasName) return null
     parsedEdges.push({
       sourceId: eo.sourceId,
       targetId: eo.targetId,
-      targetInputName: eo.targetInputName,
+      ...(hasIndex ? { targetInputIndex: eo.targetInputIndex as number } : {}),
+      ...(hasName ? { targetInputName: eo.targetInputName as string } : {}),
     })
   }
   return {

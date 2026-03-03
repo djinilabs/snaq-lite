@@ -73,7 +73,7 @@ describe('project-storage', () => {
         id: 'proj-1',
         version: 1,
         nodes: [{ id: 'n1', position: { x: 0, y: 0 }, type: 'computation' as const, content: '1+1' }],
-        edges: [{ sourceId: 'n1', targetId: 'n2', targetInputName: 'input' }],
+        edges: [{ sourceId: 'n1', targetId: 'n2', targetInputIndex: 0 }],
       }
       setProjectSnapshot(snapshot)
       expect(getProjectSnapshot('proj-1')).toEqual(snapshot)
@@ -105,7 +105,7 @@ describe('project-storage', () => {
           uri: 'snaq://graph/n2.sl',
         },
       ]
-      const edges = [{ sourceId: 'n1', targetId: 'n2', targetInputName: 'input' }]
+      const edges = [{ sourceId: 'n1', targetId: 'n2', targetInputIndex: 0 }]
       const snapshot = buildSnapshotFromGraph(projectId, nodes, edges)
       expect(snapshot.id).toBe(projectId)
       expect(snapshot.version).toBe(1)
@@ -179,7 +179,7 @@ describe('project-storage', () => {
           initialContent: '2 * 2',
         },
       ]
-      const edges = [{ sourceId: 'n1', targetId: 'n2', targetInputName: 'x' }]
+      const edges = [{ sourceId: 'n1', targetId: 'n2', targetInputIndex: 0 }]
       const result = getGraphStateForUndo(nodes, edges)
       expect(result.nodes).toHaveLength(1)
       expect(result.nodes[0].initialContent).toBe('2 * 2')
@@ -197,12 +197,12 @@ describe('project-storage', () => {
           uri: 'snaq://graph/n1.sl',
         },
       ]
-      const edges = [{ sourceId: 'a', targetId: 'b', targetInputName: 'in' }]
+      const edges = [{ sourceId: 'a', targetId: 'b', targetInputIndex: 0 }]
       const result = getGraphStateForUndo(nodes, edges)
       result.nodes[0].position = { x: 999, y: 999 }
-      result.edges[0].targetInputName = 'other'
+      result.edges[0].targetInputIndex = 99
       expect(nodes[0].position).toEqual({ x: 0, y: 0 })
-      expect(edges[0].targetInputName).toBe('in')
+      expect(edges[0].targetInputIndex).toBe(0)
     })
 
     it('handles multiple nodes and edges', () => {
@@ -211,8 +211,8 @@ describe('project-storage', () => {
         { id: 'b', position: { x: 10, y: 10 }, type: 'presentation' as const, uri: 'snaq://graph/b.sl' },
       ]
       const edges = [
-        { sourceId: 'a', targetId: 'b', targetInputName: 'x' },
-        { sourceId: 'a', targetId: 'b', targetInputName: 'y' },
+        { sourceId: 'a', targetId: 'b', targetInputIndex: 0 },
+        { sourceId: 'a', targetId: 'b', targetInputIndex: 1 },
       ]
       const result = getGraphStateForUndo(nodes, edges)
       expect(result.nodes).toHaveLength(2)

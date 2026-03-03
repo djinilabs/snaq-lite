@@ -84,7 +84,11 @@ export function buildSnapshotFromGraph(
     id: projectId,
     version: 1,
     nodes: projectNodes,
-    edges: edges.map((e) => ({ sourceId: e.sourceId, targetId: e.targetId, targetInputName: e.targetInputName })),
+    edges: edges.map((e) => ({
+      sourceId: e.sourceId,
+      targetId: e.targetId,
+      targetInputIndex: e.targetInputIndex,
+    })),
   }
 }
 

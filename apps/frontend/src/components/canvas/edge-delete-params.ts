@@ -1,6 +1,6 @@
 /**
- * Pure helper: map deleted React Flow edges + current nodes to (targetUri, targetInputName) for disconnectEdge.
- * Used by GraphCanvas onEdgesDelete; tested in edge-delete-params.test.ts.
+ * Pure helper: map deleted React Flow edges + current nodes to (targetUri, targetInputIndex) for disconnectEdge.
+ * targetHandle is the input index string (e.g. "0", "1"). Used by GraphCanvas onEdgesDelete.
  */
 
 export interface DeletedEdgeLike {
@@ -15,11 +15,11 @@ export interface NodeLike {
 
 export interface DisconnectParams {
   targetUri: string
-  targetInputName: string
+  targetInputIndex: number
 }
 
 /**
- * Returns params for disconnectEdge for each deleted edge that has a matching node and a string targetHandle.
+ * Returns params for disconnectEdge for each deleted edge that has a matching node and a valid numeric targetHandle (input index).
  */
 export function getDisconnectParamsForDeletedEdges(
   deleted: DeletedEdgeLike[],
@@ -28,10 +28,11 @@ export function getDisconnectParamsForDeletedEdges(
   const result: DisconnectParams[] = []
   for (const edge of deleted) {
     const targetUri = nodes.find((n) => n.id === edge.target)?.uri
-    const targetInputName =
+    const raw =
       typeof edge.targetHandle === 'string' ? edge.targetHandle : undefined
-    if (targetUri && targetInputName) {
-      result.push({ targetUri, targetInputName })
+    const targetInputIndex = raw != null ? Number(raw) : NaN
+    if (targetUri != null && Number.isInteger(targetInputIndex) && targetInputIndex >= 0) {
+      result.push({ targetUri, targetInputIndex })
     }
   }
   return result

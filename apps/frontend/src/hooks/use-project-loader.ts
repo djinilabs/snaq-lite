@@ -11,7 +11,11 @@ import { useEffect, useRef } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { disposeAllGraphModels } from '~/editor/text-model-registry'
 import { getProjectSnapshot } from '~/lib/project-storage'
-import { isValidUuid, snapshotToGraphNodes } from '~/lib/project-loader-utils'
+import {
+  isValidUuid,
+  snapshotEdgesToGraphEdges,
+  snapshotToGraphNodes,
+} from '~/lib/project-loader-utils'
 import { syncLoadedGraphToLsp } from '~/lib/sync-graph-to-lsp'
 import { useGraphStore } from '~/store'
 import { useProjectsIndexStore } from '~/store'
@@ -51,7 +55,7 @@ export function useProjectLoader(projectId: string): void {
 
     if (snapshot) {
       const nodes = snapshotToGraphNodes(snapshot)
-      const edges = snapshot.edges
+      const edges = snapshotEdgesToGraphEdges(snapshot.edges, nodes)
       useGraphStore.getState().setGraph(nodes, edges, { clearHistory: true })
       useWidgetStore.getState().clearAll()
       if (edges.length > 0) {

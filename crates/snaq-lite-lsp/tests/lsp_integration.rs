@@ -1359,6 +1359,104 @@ async fn native_graph_wired_widget_gets_downstream_result() {
     let _ = server_handle.await;
 }
 
+/// Computation-to-computation wiring with identifier: source "42", target "input abc: Numeric\nabc * 10";
+/// connect source → target input "abc"; subscribe to target → get Completed with display "420".
+#[tokio::test]
+async fn native_computation_to_computation_wired_input_binds_identifier() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+
+    let server_handle = tokio::spawn(async move {
+        snaq_lite_lsp::run_native(server_r, server_w).await
+    });
+
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/upstream.sl", "42", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/downstream.sl",
+        "input abc: Numeric\nabc * 10",
+        1,
+    )
+    .await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "snaqlite/graph/connect",
+        "params": {
+            "sourceUri": "snaq://graph/upstream.sl",
+            "targetUri": "snaq://graph/downstream.sl",
+            "targetInputName": "abc"
+        }
+    });
+    client_w.write_all(&lsp_message(&connect_req.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 2).await;
+
+    let subscribe_widget = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "snaqlite/graph/subscribeWidget",
+        "params": { "widgetId": "w-cc", "sourceUri": "snaq://graph/downstream.sl" }
+    });
+    client_w.write_all(&lsp_message(&subscribe_widget.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(WIDGET_DRAIN_DELAY_MS)).await;
+
+    let hover_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "textDocument/hover",
+        "params": {
+            "textDocument": { "uri": "snaq://graph/downstream.sl" },
+            "position": { "line": 0, "character": 0 }
+        }
+    });
+    client_w.write_all(&lsp_message(&hover_req.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut got_completed_420 = false;
+    for _ in 0..25 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
+            assert!(v.get("error").is_none(), "subscribeWidget should succeed: {}", v);
+        }
+        if v.get("id").and_then(|i| i.as_u64()) == Some(4) {
+            continue;
+        }
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
+            let params = v
+                .get("params")
+                .and_then(|p| p.as_object())
+                .expect("widgetDataUpdate should have params");
+            if params.get("status").and_then(|s| s.as_str()) == Some("Completed") {
+                let payload = params.get("payload").and_then(|p| p.as_object());
+                let display = payload.and_then(|p| p.get("display")).and_then(|s| s.as_str());
+                if display == Some("420") {
+                    got_completed_420 = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        got_completed_420,
+        "wired computation (42 → abc) should yield result 420 in downstream widget"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
 /// Downstream widget receives push update when source changes: source "7", target "input x: Undefined\n$x";
 /// connect, subscribe to target → get Completed "7". didChange source to "100" → client receives
 /// a second widgetDataUpdate Completed "100" (no Cancelled; same subscription).

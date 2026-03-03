@@ -11,6 +11,7 @@ import { useAutoSave } from '~/contexts/auto-save-context'
 import { nodeIdToUri } from '~/editor/virtual-uri'
 import { getOrCreateModel } from '~/editor/text-model-registry'
 import { ensureMonacoEnvironment } from '~/monaco-environment'
+import { buildComputationDocumentContent } from '~/lib/computation-document-content'
 import { LSP_METHOD_DID_OPEN, LSP_METHOD_DID_CHANGE } from '~/lib/constants'
 import { hasLanguageClient, getLanguageClient } from '~/lsp/language-client-singleton'
 import { useGraphStore } from '~/store'
@@ -115,15 +116,21 @@ export function ComputationBoxEditor({
         useGraphStore.getState().setFocusEditorForNodeId(null)
       }
       if (hasLanguageClient()) {
+        const node = useGraphStore.getState().nodes.find((n) => n.id === nodeId)
+        const body = model.getValue()
+        const text = buildComputationDocumentContent(body, node?.inputs)
         getLanguageClient().sendNotification(LSP_METHOD_DID_OPEN, {
-          textDocument: { uri, version: 1, languageId: 'snaq', text: model.getValue() },
+          textDocument: { uri, version: 1, languageId: 'snaq', text },
         })
       }
       model.onDidChangeContent(() => {
         if (hasLanguageClient()) {
+          const node = useGraphStore.getState().nodes.find((n) => n.id === nodeId)
+          const body = model.getValue()
+          const text = buildComputationDocumentContent(body, node?.inputs)
           getLanguageClient().sendNotification(LSP_METHOD_DID_CHANGE, {
             textDocument: { uri, version: model.getVersionId() },
-            contentChanges: [{ text: model.getValue() }],
+            contentChanges: [{ text }],
           })
         }
         requestSaveRef.current()

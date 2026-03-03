@@ -10,6 +10,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import type { Node, NodeProps } from '@xyflow/react'
 import { Handle, Position } from '@xyflow/react'
 import { getModel } from '~/editor/text-model-registry'
+import { buildComputationDocumentContent } from '~/lib/computation-document-content'
 import { INPUT_PORT_TYPES, LSP_METHOD_DID_OPEN } from '~/lib/constants'
 import type { NodeInputPort } from '~/lsp/types'
 import { useSubscribeWidget } from '~/hooks/use-subscribe-widget'
@@ -93,15 +94,15 @@ export function ComputationBoxNode({
 
   const onBeforeSubscribe = useCallback(() => {
     try {
-      const text =
-        getModel(data.uri, undefined as never)?.getValue() ?? node?.initialContent ?? ''
+      const body = getModel(data.uri, undefined as never)?.getValue() ?? node?.initialContent ?? ''
+      const text = buildComputationDocumentContent(body, node?.inputs)
       getLanguageClient().sendNotification(LSP_METHOD_DID_OPEN, {
         textDocument: { uri: data.uri, version: 1, languageId: 'snaq', text },
       })
     } catch (e) {
       console.error('[ComputationBoxNode] didOpen before subscribe failed:', e)
     }
-  }, [data.uri, node?.initialContent])
+  }, [data.uri, node?.initialContent, node?.inputs])
 
   const flushContentToStore = useCallback(() => {
     if (debounceRef.current != null) {

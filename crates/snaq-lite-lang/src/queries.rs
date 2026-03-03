@@ -735,6 +735,28 @@ fn collect_vector_stream(
     futures::executor::block_on(async move { stream.collect().await })
 }
 
+/// Consume a stream input handle once and return its value (single element → that value; multiple → Vector).
+/// Used when binding a declared input (InputDecl) from the stream input registry during Block evaluation.
+fn stream_input_to_value(handle_id: crate::stream_handle::StreamHandleId) -> Result<Value, RunError> {
+    use futures::stream::StreamExt;
+    let receiver = take_receiver(handle_id)
+        .ok_or_else(|| RunError::new(RunErrorKind::StreamInputNotAvailable))?;
+    let stream = ChunkFlattenStream::new(receiver);
+    let results: Vec<Result<Option<Value>, RunError>> =
+        futures::executor::block_on(async move { stream.collect().await });
+    if let Some(Err(e)) = results.first() {
+        return Err(e.clone());
+    }
+    if results.len() == 1 {
+        match &results[0] {
+            Ok(Some(v)) => return Ok(v.clone()),
+            Ok(None) => return Ok(Value::Undefined),
+            Err(e) => return Err(e.clone()),
+        }
+    }
+    Ok(Value::Vector(VectorValue::column(LazyVector::from_evaluated(results))))
+}
+
 /// Parse bracket-key string as vector index: non-negative integer literal, or variable name (look up in scope).
 fn parse_index_key(
     env: &Env,
@@ -1811,8 +1833,21 @@ pub fn value<'db>(
                 let n = exprs.len();
                 for (i, e) in exprs.iter().enumerate() {
                     match e.data(db) {
-                        ExprData::InputDecl(_, _) => {
-                            // Metadata only; skip. If this is the last item, block value is Undefined.
+                        ExprData::InputDecl(name, _type_name) => {
+                            // If this input has a stream, consume it once and bind name in scope.
+                            let handle_id = STREAM_INPUT_REGISTRY.with(|r| {
+                                let reg = r.borrow();
+                                reg.as_ref().and_then(|registry| registry.inputs(db).get(name).copied())
+                            });
+                            if let Some(handle_id) = handle_id {
+                                let input_value = stream_input_to_value(handle_id)
+                                    .map_err(|err| with_span_if_missing(err, e.span(db)))?;
+                                let stored = StoredValue::from_value(&input_value)
+                                    .map_err(|err| with_span_if_missing(err, e.span(db)))?;
+                                let new_env = current_scope.env(db).clone().extend(name.clone(), stored);
+                                current_scope = Scope::new(db, new_env);
+                            }
+                            // Metadata only; skip for return value. If this is the last item, block value is Undefined.
                             if i == n - 1 {
                                 return Ok(Value::Undefined);
                             }

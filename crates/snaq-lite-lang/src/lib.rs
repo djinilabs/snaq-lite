@@ -3300,6 +3300,29 @@ mod tests {
         assert_eq!(inputs[0], ("x".to_string(), "Vector".to_string()));
     }
 
+    /// Wiring computation A (e.g. "42") to named argument "abc" in B ("input abc: Numeric\nabc * 10")
+    /// should bind abc to the wired value so the result is 420, not symbolic "10 * abc".
+    #[test]
+    fn run_input_decl_binds_stream_input_to_identifier() {
+        let program = "input abc: Numeric\nabc * 10";
+        let (handle_id, sender) = create_stream_input();
+        let q42 = Quantity::from_scalar(42.0);
+        let _ = sender.unbounded_send(vec![Ok(Some(Value::Numeric(q42)))]);
+        drop(sender);
+        let stream_inputs =
+            std::collections::HashMap::from([("abc".to_string(), handle_id)]);
+        let (value, _db) = run_with_stream_inputs(program, &default_si_registry(), stream_inputs)
+            .expect("run_with_stream_inputs should succeed");
+        let Value::Numeric(q) = value else {
+            panic!("expected numeric result 420, got {:?}", value);
+        };
+        assert!(
+            (q.value() - 420.0).abs() < 1e-10,
+            "expected 420, got {}",
+            q.value()
+        );
+    }
+
     #[test]
     fn value_type_name_all_variants() {
         use crate::graph::value_type_name;

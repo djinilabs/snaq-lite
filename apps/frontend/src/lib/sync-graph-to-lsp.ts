@@ -6,6 +6,7 @@
  * after refresh).
  */
 
+import { buildComputationDocumentContent } from '~/lib/computation-document-content'
 import {
   DEFAULT_PRESENTATION_DOCUMENT_CONTENT,
   LSP_METHOD_DID_OPEN,
@@ -39,7 +40,7 @@ function doSyncWithClient(
   for (const node of nodes) {
     const content =
       node.type === 'computation'
-        ? (node.initialContent ?? '')
+        ? buildComputationDocumentContent(node.initialContent ?? '', node.inputs)
         : presentationContent(node.inputs)
     client.sendNotification(LSP_METHOD_DID_OPEN, {
       textDocument: {

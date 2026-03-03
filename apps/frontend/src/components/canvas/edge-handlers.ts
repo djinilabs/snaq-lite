@@ -3,6 +3,7 @@
  */
 
 import { getModel } from '~/editor/text-model-registry'
+import { buildComputationDocumentContent } from '~/lib/computation-document-content'
 import {
   DEFAULT_PRESENTATION_DOCUMENT_CONTENT,
   LSP_METHOD_DID_OPEN,
@@ -21,21 +22,13 @@ function presentationDocumentContent(inputs: { name: string; type: string }[] | 
   return inputs.map((i) => `input ${i.name}: ${i.type}\n$${i.name}`).join('\n')
 }
 
-/** Build document content for a computation target so the LSP has input decls (from UI) + body (from editor/store). */
+/** Full document content for a computation target (input decls + body) for LSP didOpen. */
 function computationDocumentContent(
   targetUri: string,
   targetNode: { inputs?: { name: string; type: string }[]; initialContent?: string },
 ): string {
   const body = getModel(targetUri, undefined as never)?.getValue() ?? targetNode.initialContent ?? ''
-  const inputDecls =
-    targetNode.inputs
-      ?.filter((i) => i.name.trim().length > 0)
-      .map((i) => `input ${i.name}: ${i.type}`)
-      .join('\n') ?? ''
-  if (inputDecls.length === 0) return body
-  return body.trimStart().startsWith('input ')
-    ? body
-    : `${inputDecls}\n${body}`.trim()
+  return buildComputationDocumentContent(body, targetNode.inputs)
 }
 
 function errorMessage(e: unknown): string {

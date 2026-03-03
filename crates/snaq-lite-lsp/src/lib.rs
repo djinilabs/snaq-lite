@@ -666,7 +666,6 @@ impl SnaqLiteBackend {
 
     /// Run the graph up to sink_uri (topological order), filling stream inputs from upstream outputs.
     /// Returns (Value, Database) for the sink node. On cycle or missing docs returns Err.
-    #[cfg(not(target_arch = "wasm32"))]
     async fn run_node_with_graph_inputs(
         &self,
         sink_uri: &Url,
@@ -701,176 +700,91 @@ impl SnaqLiteBackend {
                 incoming_map,
             )
         };
-        let mut output_handles: std::collections::HashMap<Url, snaq_lite_lang::StreamHandleId> =
-            std::collections::HashMap::new();
-        let mut last_value = None;
-        let mut last_db = None;
-        for (uri, source_entry) in order.iter().zip(sources.iter()) {
-            let source = &source_entry.1;
-            let stream_inputs: std::collections::HashMap<String, snaq_lite_lang::StreamHandleId> =
-                incoming_map
-                    .get(uri)
-                    .map(|incoming| {
-                        incoming
-                            .iter()
-                            .filter_map(|(name, source_uri)| {
-                                output_handles.get(source_uri).map(|&id| (name.clone(), id))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-            let (value, db) =
-                snaq_lite_lang::run_with_stream_inputs(source, &unit_registry, stream_inputs)?;
-            if uri == sink_uri {
-                last_value = Some(value.clone());
-                last_db = Some(db.clone());
-            }
-            if uri != sink_uri {
-                if let snaq_lite_lang::Value::Vector(v) = &value {
-                    let (handle_id, sender) = snaq_lite_lang::create_stream_input();
-                    output_handles.insert(uri.clone(), handle_id);
-                    feed_vector_to_chunk_sender(db, v.inner.clone(), sender);
-                } else {
-                    let (handle_id, sender) = snaq_lite_lang::create_stream_input();
-                    let _ = sender.unbounded_send(vec![Ok(Some(value.clone()))]);
-                    drop(sender);
-                    output_handles.insert(uri.clone(), handle_id);
-                }
-            }
-        }
-        Ok((
-            last_value.expect("sink in order"),
-            last_db.expect("sink in order"),
-        ))
-    }
-
-    /// Run node with graph inputs (WASM: same logic as native but no threads; feed streams inline).
-    #[cfg(target_arch = "wasm32")]
-    async fn run_node_with_graph_inputs(
-        &self,
-        sink_uri: &Url,
-    ) -> Result<
-        (snaq_lite_lang::Value, salsa::DatabaseImpl),
-        snaq_lite_lang::RunError,
-    > {
-        use futures::stream::Stream;
-        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-        let (order, sources, unit_registry, incoming_map) = {
-            let state = self.state.lock().await;
-            let graph = self.graph_state.lock().await;
-            let docs = state.document_uris();
-            let order = match graph.topological_order(sink_uri, &docs) {
-                Some(o) => o,
-                None => {
-                    return Err(snaq_lite_lang::RunError::new(
-                        snaq_lite_lang::RunErrorKind::InvalidArgument(
-                            "graph cycle or node not in documents".to_string(),
-                        ),
-                    ));
-                }
-            };
-            let sources: Vec<(Url, String)> =
-                order.iter().map(|u| (u.clone(), state.source(u))).collect();
-            let incoming_map: std::collections::HashMap<Url, Vec<(String, Url)>> = order
-                .iter()
-                .map(|u| (u.clone(), graph.incoming(u)))
-                .collect();
-            (
-                order,
-                sources,
-                state.unit_registry().clone(),
-                incoming_map,
-            )
-        };
-        let mut output_handles: std::collections::HashMap<Url, snaq_lite_lang::StreamHandleId> =
-            std::collections::HashMap::new();
-        let mut last_value = None;
-        let mut last_db = None;
-        for (uri, source_entry) in order.iter().zip(sources.iter()) {
-            let source = &source_entry.1;
-            let stream_inputs: std::collections::HashMap<String, snaq_lite_lang::StreamHandleId> =
-                incoming_map
-                    .get(uri)
-                    .map(|incoming| {
-                        incoming
-                            .iter()
-                            .filter_map(|(name, source_uri)| {
-                                output_handles.get(source_uri).map(|&id| (name.clone(), id))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-            let (value, db) =
-                snaq_lite_lang::run_with_stream_inputs(source, &unit_registry, stream_inputs)?;
-            if uri == sink_uri {
-                last_value = Some(value.clone());
-                last_db = Some(db.clone());
-            }
-            if uri != sink_uri {
-                if let snaq_lite_lang::Value::Vector(v) = &value {
-                    let (handle_id, sender) = snaq_lite_lang::create_stream_input();
-                    let stream = snaq_lite_lang::vector_into_stream(&db, v.inner.clone());
-                    let mut stream_pinned = std::pin::pin!(stream);
-                    let mut items = Vec::new();
-                    let waker = unsafe {
-                        const VTABLE: RawWakerVTable =
-                            RawWakerVTable::new(|_| RawWaker::new(std::ptr::null(), &VTABLE), |_| {}, |_| {}, |_| {});
-                        Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE))
-                    };
-                    let mut cx = Context::from_waker(&waker);
-                    loop {
-                        match stream_pinned.as_mut().poll_next(&mut cx) {
-                            Poll::Ready(Some(item)) => items.push(item),
-                            Poll::Ready(None) => break,
-                            Poll::Pending => {}
-                        }
-                    }
-                    let _ = sender.unbounded_send(items);
-                    drop(sender);
-                    output_handles.insert(uri.clone(), handle_id);
-                } else {
-                    let (handle_id, sender) = snaq_lite_lang::create_stream_input();
-                    let _ = sender.unbounded_send(vec![Ok(Some(value.clone()))]);
-                    drop(sender);
-                    output_handles.insert(uri.clone(), handle_id);
-                }
-            }
-        }
-        Ok((
-            last_value.expect("sink in order"),
-            last_db.expect("sink in order"),
-        ))
+        run_node_with_graph_inputs_impl(&order, &sources, &unit_registry, &incoming_map, sink_uri)
     }
 }
 
-/// Native: feed a vector stream into a Chunk sender (for graph run: upstream node output → downstream input).
-#[cfg(not(target_arch = "wasm32"))]
-fn feed_vector_to_chunk_sender(
-    db: salsa::DatabaseImpl,
-    inner: snaq_lite_lang::LazyVector,
-    sender: futures::channel::mpsc::UnboundedSender<snaq_lite_lang::Chunk>,
+/// Shared implementation of graph run: one handle per edge, feed upstream value to each.
+fn run_node_with_graph_inputs_impl(
+    order: &[Url],
+    sources: &[(Url, String)],
+    unit_registry: &snaq_lite_lang::UnitRegistry,
+    incoming_map: &std::collections::HashMap<Url, Vec<(String, Url)>>,
+    sink_uri: &Url,
+) -> Result<
+    (snaq_lite_lang::Value, salsa::DatabaseImpl),
+    snaq_lite_lang::RunError,
+> {
+    let mut output_values: std::collections::HashMap<
+        Url,
+        (snaq_lite_lang::Value, salsa::DatabaseImpl),
+    > = std::collections::HashMap::new();
+    let mut last_value = None;
+    let mut last_db = None;
+    for (uri, source_entry) in order.iter().zip(sources.iter()) {
+        let source = &source_entry.1;
+        let incoming = incoming_map.get(uri).map(|i| i.as_slice()).unwrap_or(&[]);
+        let mut stream_inputs =
+            std::collections::HashMap::<String, snaq_lite_lang::StreamHandleId>::new();
+        let mut senders_by_source: std::collections::HashMap<
+            Url,
+            Vec<futures::channel::mpsc::UnboundedSender<snaq_lite_lang::Chunk>>,
+        > = std::collections::HashMap::new();
+        for (name, source_uri) in incoming {
+            if !output_values.contains_key(source_uri) {
+                continue;
+            }
+            let (handle_id, sender) = snaq_lite_lang::create_stream_input();
+            stream_inputs.insert(name.clone(), handle_id);
+            senders_by_source
+                .entry(source_uri.clone())
+                .or_default()
+                .push(sender);
+        }
+        for (source_uri, senders) in senders_by_source {
+            let Some((value, db)) = output_values.get(&source_uri) else {
+                continue;
+            };
+            feed_value_to_senders(value, db, senders);
+        }
+        let (value, db) =
+            snaq_lite_lang::run_with_stream_inputs(source, unit_registry, stream_inputs)?;
+        if uri == sink_uri {
+            last_value = Some(value.clone());
+            last_db = Some(db.clone());
+        }
+        if uri != sink_uri {
+            output_values.insert(uri.clone(), (value, db));
+        }
+    }
+    Ok((
+        last_value.expect("sink in order"),
+        last_db.expect("sink in order"),
+    ))
+}
+
+/// Feed one upstream value to multiple Chunk senders (one handle per edge when one source feeds multiple inputs).
+fn feed_value_to_senders(
+    value: &snaq_lite_lang::Value,
+    db: &salsa::DatabaseImpl,
+    senders: Vec<futures::channel::mpsc::UnboundedSender<snaq_lite_lang::Chunk>>,
 ) {
-    use futures::stream::StreamExt;
-    use futures::task::LocalSpawnExt;
-    const BATCH: usize = 64;
-    let run = async move {
-        let mut stream = snaq_lite_lang::vector_into_stream(&db, inner);
-        let mut batch = Vec::with_capacity(BATCH);
-        while let Some(item) = stream.next().await {
-            batch.push(item);
-            if batch.len() >= BATCH {
-                let _ = sender.unbounded_send(std::mem::take(&mut batch));
-                batch = Vec::with_capacity(BATCH);
+    match value {
+        snaq_lite_lang::Value::Vector(v) => {
+            let collected = snaq_lite_lang::collect_vector_stream(db, v.inner.clone());
+            for sender in senders {
+                let _ = sender.unbounded_send(collected.clone());
+                drop(sender);
             }
         }
-        if !batch.is_empty() {
-            let _ = sender.unbounded_send(batch);
+        _ => {
+            let chunk = vec![Ok(Some(value.clone()))];
+            for sender in senders {
+                let _ = sender.unbounded_send(chunk.clone());
+                drop(sender);
+            }
         }
-        drop(sender);
-    };
-    let mut pool = futures::executor::LocalPool::new();
-    pool.spawner().spawn_local(run).ok();
-    pool.run();
+    }
 }
 
 /// Native: run the stream in a blocking thread and send batches via notification_tx.

@@ -32,6 +32,7 @@ The Host pushes data in **chunks**. Each chunk is a list of elements in the runt
 
 - **run_numeric / to_quantity:** When the program result is a vector from an external stream (e.g. `$x * 2`), the result is a pipeline, not a single quantity. Requesting a numeric result for such a program is not supported; use **run_with_stream_inputs** and consume the vector stream instead.
 - **Stream handle is single-consumer:** Each registered receiver is taken by the runtime when you call **vector_into_stream** on a pipeline that uses that input. Calling **vector_into_stream** again on the same pipeline (or another expression that uses the same `$name`) will not see the data again; the stream yields one error (**stream input not available (already consumed or not registered)**) then completes.
+- **Graph fan-out:** In the LSP/graph UI, when one computation output is wired to **multiple inputs** of another computation, the runtime creates **one stream handle per edge** and feeds a copy of the upstream value (scalar or vector) to each handle. So fan-out (one output → many inputs) works without consuming the same handle twice.
 - **WASM:** The stream handle registry is thread-local. On WASM, drive the stream in an async task (e.g. with `wasm-bindgen-futures` or your async runtime) so that the main thread is not blocked. Chunked push and consumption work the same as on native targets.
 
 ## WASM Host (browser)

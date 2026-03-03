@@ -33,7 +33,10 @@ pub use unit::Unit;
 pub use ir::{ExprDef, Expression, NumLiteral, ProgramDef, SpannedExprDef, StreamInputRegistry};
 pub use scope::{empty_scope, Env, Scope, StoredValue};
 pub use parser::parse;
-pub use queries::{program, set_eval_registry, set_stream_input_registry, value, vector_into_stream};
+pub use queries::{
+    collect_vector_stream, program, set_eval_registry, set_stream_input_registry, value,
+    vector_into_stream,
+};
 pub use symbol_registry::SymbolRegistry;
 pub use fuzzy::FuzzyBool;
 pub use symbolic::{SymbolicQuantity, SymbolicExpr, Value};
@@ -3319,6 +3322,68 @@ mod tests {
         assert!(
             (q.value() - 420.0).abs() < 1e-10,
             "expected 420, got {}",
+            q.value()
+        );
+    }
+
+    /// Two inputs (abc, ggg) each bound from a separate stream handle with the same scalar data (42).
+    /// Ensures one-output-to-two-inputs works at the lang layer: two handles, two consumes, result abc * ggg = 1764.
+    #[test]
+    fn run_two_input_decls_two_handles_same_scalar_yields_product() {
+        let program = "input abc: Numeric\ninput ggg: Numeric\nabc * ggg";
+        let scalar = Value::Numeric(Quantity::from_scalar(42.0));
+        let chunk = vec![Ok(Some(scalar))];
+        let (handle_abc, sender_abc) = create_stream_input();
+        let _ = sender_abc.unbounded_send(chunk.clone());
+        drop(sender_abc);
+        let (handle_ggg, sender_ggg) = create_stream_input();
+        let _ = sender_ggg.unbounded_send(chunk);
+        drop(sender_ggg);
+        let stream_inputs = std::collections::HashMap::from([
+            ("abc".to_string(), handle_abc),
+            ("ggg".to_string(), handle_ggg),
+        ]);
+        let (value, _db) = run_with_stream_inputs(program, &default_si_registry(), stream_inputs)
+            .expect("run_with_stream_inputs should succeed");
+        let Value::Numeric(q) = value else {
+            panic!("expected numeric result 1764, got {:?}", value);
+        };
+        assert!(
+            (q.value() - 1764.0).abs() < 1e-10,
+            "expected 1764 (42*42), got {}",
+            q.value()
+        );
+    }
+
+    /// Two inputs (a, b) each bound from a separate stream handle with the same vector data [1,2,3].
+    /// a.sum() + b.sum() = 6 + 6 = 12. Covers the vector path when one logical source feeds two inputs.
+    #[test]
+    fn run_two_input_decls_two_handles_same_vector_yields_sum_of_sums() {
+        let program = "input a: Vector\ninput b: Vector\na.sum() + b.sum()";
+        let unit = Unit::scalar();
+        let chunk = vec![
+            Ok(Some(Value::Numeric(Quantity::new(1.0, unit.clone())))),
+            Ok(Some(Value::Numeric(Quantity::new(2.0, unit.clone())))),
+            Ok(Some(Value::Numeric(Quantity::new(3.0, unit)))),
+        ];
+        let (handle_a, sender_a) = create_stream_input();
+        let _ = sender_a.unbounded_send(chunk.clone());
+        drop(sender_a);
+        let (handle_b, sender_b) = create_stream_input();
+        let _ = sender_b.unbounded_send(chunk);
+        drop(sender_b);
+        let stream_inputs = std::collections::HashMap::from([
+            ("a".to_string(), handle_a),
+            ("b".to_string(), handle_b),
+        ]);
+        let (value, _db) = run_with_stream_inputs(program, &default_si_registry(), stream_inputs)
+            .expect("run_with_stream_inputs should succeed");
+        let Value::Numeric(q) = value else {
+            panic!("expected numeric result 12, got {:?}", value);
+        };
+        assert!(
+            (q.value() - 12.0).abs() < 1e-10,
+            "expected 12 (sum([1,2,3])+sum([1,2,3])), got {}",
             q.value()
         );
     }

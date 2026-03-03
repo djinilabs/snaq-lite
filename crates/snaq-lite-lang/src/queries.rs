@@ -726,7 +726,8 @@ fn with_registry<R, F: FnOnce(&UnitRegistry) -> R>(f: F) -> R {
 }
 
 /// Collect a vector stream to a vec (used for row×column dot product and sum).
-fn collect_vector_stream(
+/// Also used by the LSP to fan-out one upstream vector to multiple downstream inputs.
+pub fn collect_vector_stream(
     db: &dyn salsa::Database,
     v: LazyVector,
 ) -> Vec<Result<Option<Value>, RunError>> {

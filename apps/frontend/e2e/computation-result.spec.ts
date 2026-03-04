@@ -228,6 +228,99 @@ test.describe('computation result (editor–worker–LSP)', () => {
     expect(hasVectorResult, `Expected vector result or numbers in "${resultText}"`).toBe(true)
   })
 
+  test('file block to computation: real drag from file output to computation input shows full CSV content', async ({
+    page,
+  }) => {
+    test.setTimeout(90_000)
+    await gotoCanvas(page)
+    await expect(page.getByTestId('canvas-toolbar')).toBeVisible({ timeout: 15_000 })
+
+    // Create file node with one-column CSV
+    const wrapper = page.getByTestId('graph-canvas-wrapper')
+    await wrapper.waitFor({ state: 'visible', timeout: 10_000 })
+    await page.evaluate(() => {
+      const pane =
+        document.querySelector('.react-flow__pane') ??
+        document.querySelector('[data-testid="graph-canvas-wrapper"]')
+      if (!pane) return
+      const file = new File(['value\n1\n2\n3'], 'data.csv', { type: 'text/csv' })
+      const dt = new DataTransfer()
+      dt.items.add(file)
+      const rect = pane.getBoundingClientRect()
+      const drop = new DragEvent('drop', {
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2,
+        dataTransfer: dt,
+        bubbles: true,
+      })
+      pane.dispatchEvent(drop)
+    })
+    await page.waitForTimeout(800)
+    await expect(page.getByTestId('file-node')).toHaveCount(1)
+    const fileNode = page.getByTestId('file-node').first()
+    await fileNode.scrollIntoViewIfNeeded()
+    const fileDragZone = fileNode.getByTestId('file-drag-zone')
+    const fdzBox = await fileDragZone.boundingBox()
+    if (fdzBox) {
+      const fx = fdzBox.x + fdzBox.width / 2
+      const fy = fdzBox.y + fdzBox.height / 2
+      await page.mouse.move(fx, fy)
+      await page.mouse.down()
+      await page.mouse.move(fx - 280, fy, { steps: 8 })
+      await page.mouse.up()
+      await page.waitForTimeout(400)
+    }
+
+    // Create computation with Vector input
+    await page.getByTestId('add-computation-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
+    const computationNode = page.getByTestId('computation-node').first()
+    await computationNode.scrollIntoViewIfNeeded()
+    await computationNode.getByTestId('computation-add-input').click()
+    await expect(computationNode.getByTestId('computation-input-name-0')).toBeAttached({ timeout: 5000 })
+    await computationNode.getByTestId('computation-input-name-0').fill('x')
+    await page.waitForTimeout(300)
+    await computationNode.getByTestId('computation-input-type-0').selectOption('Vector')
+    await page.waitForTimeout(300)
+    const editorZone = computationNode.getByTestId('computation-editor-zone')
+    await editorZone.click()
+    await page.waitForTimeout(200)
+    await page.keyboard.type('$x')
+    await page.waitForTimeout(500)
+
+    // Wait for LSP and for computation input handle to exist (input name "x" triggers handle render)
+    await page.waitForTimeout(5000)
+    await expect(page.getByTestId('computation-input-handle-0').first()).toBeAttached({ timeout: 30_000 })
+
+    // Connect file → computation via connectOnClick (click source handle then target handle).
+    // Real mouse drag from handle to handle does not create edges in Playwright with React Flow (connection
+    // completion relies on pointer capture / elementFromPoint at pointerup, which does not fire as in real use).
+    // We dispatch click on the handle elements so the connection is created by the app's onConnect (no fallback).
+    const sourceHandle = page.getByTestId('file-output-handle').first()
+    const targetHandle = page.getByTestId('computation-input-handle-0').first()
+    await sourceHandle.scrollIntoViewIfNeeded()
+    await targetHandle.scrollIntoViewIfNeeded()
+    await sourceHandle.evaluate((el) => (el as HTMLElement).click())
+    await page.waitForTimeout(400)
+    await targetHandle.evaluate((el) => (el as HTMLElement).click())
+    await page.waitForTimeout(1500)
+
+    await expect(page.locator('.react-flow__edge')).toHaveCount(1, { timeout: 10_000 })
+
+    const resultEl = computationNode.getByTestId('computation-result')
+    await expect(resultEl).toBeVisible({ timeout: 20_000 })
+    const resultText = (await resultEl.textContent()) ?? ''
+
+    expect(resultText).not.toContain('File not available')
+    expect(resultText).not.toContain('Failed to fetch')
+    expect(resultText).not.toBe('[]')
+    expect(resultText).not.toContain('unbound stream input')
+
+    const hasVectorResult =
+      /3\s*elements|\[.*1.*2.*3.*\]|\b1\b.*\b2\b.*\b3\b|Result<vector>/.test(resultText)
+    expect(hasVectorResult, `Expected vector result or numbers 1,2,3 in "${resultText}"`).toBe(true)
+  })
+
   test('file block with no file: wiring shows toast to drop file', async ({ page }) => {
     test.setTimeout(60_000)
     await gotoCanvas(page)

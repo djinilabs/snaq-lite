@@ -12,6 +12,7 @@ import {
   Background,
   Controls,
   useReactFlow,
+  ConnectionMode,
   type Connection,
   type Node,
   type Edge,
@@ -250,6 +251,9 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
       <ReactFlow
         nodes={nodes}
         edges={edges}
+        connectionMode={ConnectionMode.Loose}
+        connectionRadius={40}
+        connectOnClick
         onNodesChange={onNodesChange}
         onConnect={onConnect}
         onEdgesDelete={onEdgesDelete}

@@ -84,6 +84,12 @@ button {
   stroke-width: 2px;
 }
 
+/* React Flow handles: larger hit area so drag-to-connect is reliable in E2E and for users */
+.react-flow__handle {
+  min-width: 20px;
+  min-height: 20px;
+}
+
 /* React Flow controls (zoom, fit view) – dark theme */
 .react-flow__controls button {
   background: var(--bg-elevated) !important;

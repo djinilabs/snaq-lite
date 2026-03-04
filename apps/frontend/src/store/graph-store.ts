@@ -43,6 +43,8 @@ export interface GraphNode {
   initialContent?: string
   /** URL for file nodes (blob URL, data URL, or https). Optional; used when type === 'file'. */
   url?: string
+  /** MIME type for file nodes (e.g. from dropped File). Optional; used when type === 'file'. */
+  fileType?: string
 }
 
 export interface GraphEdge {

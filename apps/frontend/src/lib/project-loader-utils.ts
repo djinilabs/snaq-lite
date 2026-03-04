@@ -32,7 +32,9 @@ export function snapshotToGraphNodes(snapshot: ProjectSnapshot): GraphNode[] {
     uri: nodeIdToUri(n.id),
     initialContent: n.type === 'computation' ? (n.content ?? '') : undefined,
     inputs: n.type === 'computation' && n.inputs?.length ? n.inputs : undefined,
-    ...(n.type === 'file' && n.url ? { url: n.url } : {}),
+    ...(n.type === 'file'
+        ? { ...(n.url ? { url: n.url } : {}), ...(n.fileType ? { fileType: n.fileType } : {}) }
+        : {}),
   }))
 }
 

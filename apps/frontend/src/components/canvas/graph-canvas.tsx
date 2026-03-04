@@ -121,7 +121,14 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
       const id = crypto.randomUUID()
       const file = files[0]
       const url = URL.createObjectURL(file)
-      addNode({ id, position, type: 'file', uri: nodeIdToUri(id), url })
+      addNode({
+        id,
+        position,
+        type: 'file',
+        uri: nodeIdToUri(id),
+        url,
+        fileType: file.type || undefined,
+      })
       onSelectionChangeRef.current?.({
         nodes: [{ id, position, data: {}, type: 'file' }],
         edges: [],

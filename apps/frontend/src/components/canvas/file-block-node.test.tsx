@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { fileBlockLabel } from './file-block-node'
+import { fileBlockLabel, fileBlockTypeLabel } from './file-block-node'
 
 const NODE_PATH = join(__dirname, 'file-block-node.tsx')
 
@@ -37,6 +37,34 @@ describe('fileBlockLabel', () => {
   })
 })
 
+describe('fileBlockTypeLabel', () => {
+  it('returns "—" when no fileType and no url', () => {
+    expect(fileBlockTypeLabel(undefined, undefined)).toBe('—')
+  })
+
+  it('returns friendly label for common MIME types', () => {
+    expect(fileBlockTypeLabel('text/csv', undefined)).toBe('CSV')
+    expect(fileBlockTypeLabel('text/plain', undefined)).toBe('Plain text')
+    expect(fileBlockTypeLabel('application/json', undefined)).toBe('JSON')
+  })
+
+  it('returns MIME type when not a known shorthand', () => {
+    expect(fileBlockTypeLabel('application/octet-stream', undefined)).toBe('application/octet-stream')
+  })
+
+  it('derives from URL when fileType is missing', () => {
+    expect(fileBlockTypeLabel(undefined, 'blob:https://example.com/x')).toBe('Local file')
+    expect(fileBlockTypeLabel(undefined, 'data:text/plain,hello')).toBe('Data URL')
+    expect(fileBlockTypeLabel(undefined, 'https://example.com/d.csv')).toBe('CSV')
+    expect(fileBlockTypeLabel(undefined, 'https://example.com/d.json')).toBe('JSON')
+    expect(fileBlockTypeLabel(undefined, 'https://example.com/notes.txt')).toBe('Plain text')
+  })
+
+  it('prefers fileType over URL-derived label', () => {
+    expect(fileBlockTypeLabel('text/csv', 'blob:xxx')).toBe('CSV')
+  })
+})
+
 describe('FileBlockNode', () => {
   it('uses NodeFrame kind file and file-node testid', () => {
     const source = readFileSync(NODE_PATH, 'utf-8')
@@ -53,9 +81,11 @@ describe('FileBlockNode', () => {
     expect(source).toMatch(/position=\{Position\.Right\}/)
   })
 
-  it('has file-content zone and fileBlockLabel for No file / blob / URL', () => {
+  it('has file-content zone, file-type and file-url testids, and fileBlockLabel for No file / blob / URL', () => {
     const source = readFileSync(NODE_PATH, 'utf-8')
     expect(source).toMatch(/data-testid="file-content"/)
+    expect(source).toMatch(/data-testid="file-type"/)
+    expect(source).toMatch(/data-testid="file-url"/)
     expect(source).toMatch(/fileBlockLabel/)
     expect(source).toMatch(/No file/)
     expect(source).toMatch(/Drop a file or add URL/)

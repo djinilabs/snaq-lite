@@ -80,7 +80,13 @@ describe('project-loader-utils', () => {
         id: 'p',
         nodes: [
           { id: 'f1', position: { x: 0, y: 0 }, type: 'file' as const },
-          { id: 'f2', position: { x: 50, y: 0 }, type: 'file' as const, url: 'https://example.com/d.csv' },
+          {
+            id: 'f2',
+            position: { x: 50, y: 0 },
+            type: 'file' as const,
+            url: 'https://example.com/d.csv',
+            fileType: 'text/csv',
+          },
         ],
         edges: [],
       }
@@ -88,7 +94,12 @@ describe('project-loader-utils', () => {
       expect(nodes).toHaveLength(2)
       expect(nodes[0]).toMatchObject({ id: 'f1', type: 'file', uri: `${VIRTUAL_URI_PREFIX}f1.sl` })
       expect(nodes[0].url).toBeUndefined()
-      expect(nodes[1]).toMatchObject({ id: 'f2', type: 'file', url: 'https://example.com/d.csv' })
+      expect(nodes[1]).toMatchObject({
+        id: 'f2',
+        type: 'file',
+        url: 'https://example.com/d.csv',
+        fileType: 'text/csv',
+      })
     })
 
     it('maps multiple nodes and preserves order', () => {

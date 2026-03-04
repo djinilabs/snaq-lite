@@ -21,6 +21,8 @@ export interface ProjectNode {
   inputs?: ProjectNodeInput[]
   /** URL for file nodes (blob, data, or https). Optional; used when type === 'file'. */
   url?: string
+  /** MIME type for file nodes. Optional; used when type === 'file'. */
+  fileType?: string
 }
 
 export interface ProjectEdge {
@@ -81,7 +83,12 @@ export function parseProjectSnapshot(data: unknown): ProjectSnapshot | null {
       type: no.type as ProjectNodeType,
       content: typeof no.content === 'string' ? no.content : undefined,
       inputs: parsedInputs,
-      ...(no.type === 'file' && typeof no.url === 'string' ? { url: no.url } : {}),
+      ...(no.type === 'file'
+        ? {
+            ...(typeof no.url === 'string' ? { url: no.url } : {}),
+            ...(typeof no.fileType === 'string' ? { fileType: no.fileType } : {}),
+          }
+        : {}),
     })
   }
   const parsedEdges: ProjectEdge[] = []

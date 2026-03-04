@@ -74,7 +74,12 @@ export function buildSnapshotFromGraph(
       position: n.position,
       type: n.type,
     }
-    if (n.type === 'file') return { ...base, ...(n.url ? { url: n.url } : {}) }
+    if (n.type === 'file')
+      return {
+        ...base,
+        ...(n.url ? { url: n.url } : {}),
+        ...(n.fileType ? { fileType: n.fileType } : {}),
+      }
     if (n.type !== 'computation') return base
     return {
       ...base,

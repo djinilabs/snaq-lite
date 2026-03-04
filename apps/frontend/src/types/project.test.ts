@@ -87,6 +87,22 @@ describe('parseProjectSnapshot', () => {
     expect(snapshot?.nodes[1]).toMatchObject({ id: 'f2', type: 'file', url: 'https://example.com/data.csv' })
   })
 
+  it('parses file nodes with optional fileType', () => {
+    const snapshot = parseProjectSnapshot({
+      id: 'p',
+      nodes: [
+        { id: 'f1', position: { x: 0, y: 0 }, type: 'file', url: 'https://example.com/d.csv', fileType: 'text/csv' },
+      ],
+      edges: [],
+    })
+    expect(snapshot?.nodes[0]).toMatchObject({
+      id: 'f1',
+      type: 'file',
+      url: 'https://example.com/d.csv',
+      fileType: 'text/csv',
+    })
+  })
+
   it('parses edges with targetInputIndex', () => {
     const snapshot = parseProjectSnapshot({
       id: 'p',

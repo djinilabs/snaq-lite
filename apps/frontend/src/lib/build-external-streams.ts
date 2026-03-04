@@ -42,15 +42,18 @@ export function* parseNewlineDelimitedNumbers(text: string): Generator<number[]>
   if (batch.length > 0) yield batch
 }
 
+/** CSV delimiter: comma or semicolon (semicolon common in European locales). */
+const CSV_DELIMITER = /[,;]/
+
 /**
- * Parse text as CSV: each line split by comma, each cell trimmed and parsed as number; yields batches of numbers.
+ * Parse text as CSV: each line split by comma or semicolon, each cell trimmed and parsed as number; yields batches of numbers.
  * Skips non-finite cells. Exported for unit tests.
  */
 export function* parseCsvToNumbers(text: string): Generator<number[]> {
   const lines = text.split(/\r?\n/)
   let batch: number[] = []
   for (const line of lines) {
-    const cells = line.split(',')
+    const cells = line.split(CSV_DELIMITER)
     for (const cell of cells) {
       const trimmed = cell.trim()
       if (trimmed === '') continue
@@ -66,11 +69,11 @@ export function* parseCsvToNumbers(text: string): Generator<number[]> {
   if (batch.length > 0) yield batch
 }
 
-/** Prefer CSV parser when fileType suggests CSV or when content has a comma in the first non-empty line. */
+/** Prefer CSV parser when fileType suggests CSV or when content has comma or semicolon in the first non-empty line. */
 function chooseParser(text: string, fileType?: string): 'csv' | 'newline' {
   if (fileType?.toLowerCase().includes('csv')) return 'csv'
   const firstLine = text.split(/\r?\n/).find((l) => l.trim() !== '')
-  if (firstLine?.includes(',')) return 'csv'
+  if (firstLine?.includes(',') || firstLine?.includes(';')) return 'csv'
   return 'newline'
 }
 

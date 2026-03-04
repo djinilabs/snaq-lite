@@ -115,6 +115,11 @@ describe('parseCsvToNumbers', () => {
     const csv = 'x\n1\n2\n3'
     expect([...parseCsvToNumbers(csv)]).toEqual([[1, 2, 3]])
   })
+
+  it('handles semicolon-delimited CSV (e.g. European locale)', () => {
+    const csv = '10;;;;;;\n20;;;;;;\n30;;;;;;'
+    expect([...parseCsvToNumbers(csv)]).toEqual([[10, 20, 30]])
+  })
 })
 
 describe('buildGetExternalStreams', () => {

@@ -10,6 +10,7 @@
 import { useEffect, useRef } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { disposeAllGraphModels } from '~/editor/text-model-registry'
+import { getFileBlob } from '~/lib/file-blob-idb'
 import { getProjectSnapshot } from '~/lib/project-storage'
 import {
   isValidUuid,
@@ -58,10 +59,29 @@ export function useProjectLoader(projectId: string): void {
       const edges = snapshotEdgesToGraphEdges(snapshot.edges, nodes)
       useGraphStore.getState().setGraph(nodes, edges, { clearHistory: true })
       useWidgetStore.getState().clearAll()
-      if (edges.length > 0) {
-        void syncLoadedGraphToLsp(nodes, edges).catch(() => {
-          // Sync failed (e.g. LSP not ready); graph is already set so blocks remain visible
-        })
+      const hasBlobUrl = nodes.some((n) => n.type === 'file' && n.url?.startsWith('blob:'))
+      if (hasBlobUrl) {
+        void (async () => {
+          try {
+            const migrated = await Promise.all(
+              nodes.map(async (n) => {
+                if (n.type === 'file' && n.url?.startsWith('blob:')) {
+                  const blob = await getFileBlob(projectId, n.id)
+                  return blob ? { ...n, url: `indexeddb://${projectId}/${n.id}` } : n
+                }
+                return n
+              }),
+            )
+            useGraphStore.getState().setGraph(migrated, edges, { clearHistory: true })
+            if (edges.length > 0) {
+              void syncLoadedGraphToLsp(migrated, edges).catch(() => {})
+            }
+          } catch (err) {
+            console.error('[useProjectLoader] Legacy blob URL migration failed', err)
+          }
+        })()
+      } else if (edges.length > 0) {
+        void syncLoadedGraphToLsp(nodes, edges).catch(() => {})
       }
     } else {
       useGraphStore.getState().setGraph([], [], { clearHistory: true })

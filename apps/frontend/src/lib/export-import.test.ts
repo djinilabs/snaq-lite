@@ -3,6 +3,13 @@ import { buildDownloadBlob, importProjectFile } from './export-import'
 import { getProjectSnapshot, PROJECTS_INDEX_KEY, PROJECT_KEY_PREFIX } from './project-storage'
 import { useProjectsIndexStore } from '~/store'
 
+const mockGetFileBlob = vi.fn()
+const mockPutFileBlob = vi.fn()
+vi.mock('~/lib/file-blob-idb', () => ({
+  getFileBlob: (projectId: string, nodeId: string) => mockGetFileBlob(projectId, nodeId),
+  putFileBlob: (projectId: string, nodeId: string, blob: Blob) => mockPutFileBlob(projectId, nodeId, blob),
+}))
+
 describe('export-import', () => {
   beforeEach(() => {
     localStorage.removeItem(PROJECTS_INDEX_KEY)
@@ -41,6 +48,11 @@ describe('export-import', () => {
   })
 
   describe('importProjectFile', () => {
+    beforeEach(() => {
+      mockGetFileBlob.mockReset()
+      mockPutFileBlob.mockReset()
+    })
+
     it('creates new project with new UUID and persists snapshot and index', async () => {
       const file = new File(
         [
@@ -89,6 +101,73 @@ describe('export-import', () => {
       const result = await importProjectFile(file)
       expect(result).toEqual({ error: 'Failed to read file' })
       readAsText.mockRestore()
+    })
+
+    it('returns error when blob copy fails during import', async () => {
+      mockGetFileBlob.mockResolvedValue(new Blob(['x']))
+      mockPutFileBlob.mockRejectedValue(new Error('IDB full'))
+
+      const file = new File(
+        [
+          JSON.stringify({
+            id: 'old-id',
+            version: 1,
+            nodes: [
+              {
+                id: 'f1',
+                position: { x: 0, y: 0 },
+                type: 'file',
+                url: 'indexeddb://old-id/f1',
+              },
+            ],
+            edges: [],
+          }),
+        ],
+        'import.snaq.json',
+        { type: 'application/json' },
+      )
+      const result = await importProjectFile(file)
+      expect(result).toEqual({ error: 'Failed to copy file data from storage.' })
+    })
+
+    it('rewrites indexeddb refs to new project and copies blobs in IDB', async () => {
+      const blob = new Blob(['1,2,3'])
+      mockGetFileBlob.mockResolvedValue(blob)
+      mockPutFileBlob.mockResolvedValue(undefined)
+
+      const file = new File(
+        [
+          JSON.stringify({
+            id: 'old-project-id',
+            version: 1,
+            nodes: [
+              { id: 'n1', position: { x: 0, y: 0 }, type: 'computation', content: '1' },
+              {
+                id: 'f1',
+                position: { x: 100, y: 0 },
+                type: 'file',
+                url: 'indexeddb://old-project-id/f1',
+                fileType: 'text/csv',
+              },
+            ],
+            edges: [],
+          }),
+        ],
+        'imported.snaq.json',
+        { type: 'application/json' },
+      )
+      const result = await importProjectFile(file)
+      expect('error' in result).toBe(false)
+      const newId = (result as { id: string }).id
+      expect(newId).not.toBe('old-project-id')
+
+      expect(mockGetFileBlob).toHaveBeenCalledWith('old-project-id', 'f1')
+      expect(mockPutFileBlob).toHaveBeenCalledWith(newId, 'f1', blob)
+
+      const stored = getProjectSnapshot(newId)
+      const fileNode = stored?.nodes.find((n) => n.id === 'f1')
+      expect(fileNode?.type).toBe('file')
+      expect(fileNode?.url).toBe(`indexeddb://${newId}/f1`)
     })
   })
 })

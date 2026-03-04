@@ -8,12 +8,14 @@
  * the CLI where the binary reads files from disk; here we parse in the frontend and push numeric chunks.
  *
  * For blob URLs we read from a cache (populated on file drop) to avoid fetch(blobUrl) which can fail in some environments.
+ * For indexeddb:// refs we read from IndexedDB and feed in chunks (streaming) so large files are not fully materialized.
  */
 
 import type { GraphEdge, GraphNode } from '~/store'
 import { useUIStore } from '~/store'
 import { requestCreateStreamInput, sendStreamChunk, closeStream } from '~/lsp/message-router'
 import { getBlobForUrl } from '~/lib/blob-url-cache'
+import { getFileBlob } from '~/lib/file-blob-idb'
 
 const BATCH_SIZE = 1000
 
@@ -78,6 +80,143 @@ function chooseParser(text: string, fileType?: string): 'csv' | 'newline' {
 }
 
 /**
+ * Parse a single line as CSV (comma/semicolon) or single number. Pushes parsed numbers into batch; returns updated batch (may have yielded and reset).
+ */
+function parseLineIntoBatch(
+  line: string,
+  isCsv: boolean,
+  batch: number[],
+  batchSize: number,
+): { batch: number[]; yielded: number[] } {
+  let yielded: number[] = []
+  if (isCsv) {
+    const cells = line.split(CSV_DELIMITER)
+    for (const cell of cells) {
+      const n = Number(cell.trim())
+      if (Number.isFinite(n)) {
+        batch.push(n)
+        if (batch.length >= batchSize) {
+          yielded = batch
+          batch = []
+        }
+      }
+    }
+  } else {
+    const trimmed = line.trim()
+    if (trimmed !== '') {
+      const n = Number(trimmed)
+      if (Number.isFinite(n)) {
+        batch.push(n)
+        if (batch.length >= batchSize) {
+          yielded = batch
+          batch = []
+        }
+      }
+    }
+  }
+  return { batch, yielded }
+}
+
+/**
+ * Stream a Blob in chunks: decode UTF-8, buffer partial lines, parse full lines to numbers (CSV or newline-delimited), yield batches.
+ * Handles BOM on first segment. Parser mode (CSV vs newline) from fileType or first line heuristic.
+ */
+async function* streamBlobToNumberBatches(
+  blob: Blob,
+  fileType?: string,
+): AsyncGenerator<number[]> {
+  const stream = blob.stream().pipeThrough(new TextDecoderStream())
+  const reader = stream.getReader()
+  let buffer = ''
+  let firstLineSeen = false
+  let isCsv = false
+  let batch: number[] = []
+  let bomStripped = false
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (value !== undefined) buffer += value
+    if (!bomStripped && buffer.length > 0) {
+      buffer = stripBom(buffer)
+      bomStripped = true
+    }
+    const lines = buffer.split(/\r?\n/)
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!firstLineSeen) {
+        firstLineSeen = true
+        isCsv =
+          fileType?.toLowerCase().includes('csv') ?? (line.includes(',') || line.includes(';'))
+      }
+      const { batch: nextBatch, yielded } = parseLineIntoBatch(line, isCsv, batch, BATCH_SIZE)
+      batch = nextBatch
+      if (yielded.length > 0) yield yielded
+    }
+    if (done) break
+  }
+  if (buffer.trim() !== '') {
+    if (!firstLineSeen) {
+      firstLineSeen = true
+      isCsv =
+        fileType?.toLowerCase().includes('csv') ?? (buffer.includes(',') || buffer.includes(';'))
+    }
+    const { batch: nextBatch, yielded } = parseLineIntoBatch(buffer, isCsv, batch, BATCH_SIZE)
+    batch = nextBatch
+    if (yielded.length > 0) yield yielded
+  }
+  if (batch.length > 0) yield batch
+}
+
+/**
+ * Feed a Blob to a new stream in chunks (streaming decode + parse). Returns stream index.
+ * Falls back to full blob.text() when blob.stream is not available (e.g. some test runners).
+ */
+async function feedBlobToStreamInChunks(blob: Blob, fileType?: string): Promise<number> {
+  const index = await requestCreateStreamInput()
+  let chunkCount = 0
+  try {
+    const blobWithStream = blob as Blob & { stream?: () => unknown; text?: () => Promise<string> }
+    if (typeof blobWithStream.stream !== 'function' && typeof blobWithStream.text === 'function') {
+      const rawText = await blobWithStream.text()
+      const text = stripBom(rawText)
+      const parser = chooseParser(text, fileType)
+      const numbers = parser === 'csv' ? parseCsvToNumbers(text) : parseNewlineDelimitedNumbers(text)
+      for (const chunk of numbers) {
+        sendStreamChunk(index, chunk)
+        chunkCount += 1
+      }
+    } else {
+      for await (const batch of streamBlobToNumberBatches(blob, fileType)) {
+        sendStreamChunk(index, batch)
+        chunkCount += 1
+      }
+    }
+    if (chunkCount === 0) {
+      console.warn(
+        '[buildGetExternalStreams] No numeric data in file (empty file or no numbers parsed). Result may be [].',
+      )
+      useUIStore.getState().addToast(
+        'The file has no numeric data. Use numbers (one per line) or CSV with numeric columns.',
+        'error',
+      )
+    }
+  } finally {
+    closeStream(index)
+  }
+  return index
+}
+
+/** Parse indexeddb://projectId/nodeId to { projectId, nodeId }. */
+function parseIndexedDbRef(url: string): { projectId: string; nodeId: string } | null {
+  if (!url.startsWith('indexeddb://')) return null
+  const parts = url.split('/')
+  if (parts.length < 4) return null
+  const projectId = parts[2]
+  const nodeId = parts.slice(3).join('/')
+  return projectId && nodeId ? { projectId, nodeId } : null
+}
+
+/**
  * Resolve URL to text: for blob URLs use in-memory cache (avoids fetch(blobUrl) which can fail).
  * Blob URLs not in cache (e.g. after page reload) throw a clear error instead of fetch.
  * For data: or https: use fetch.
@@ -96,11 +235,24 @@ async function urlToText(url: string): Promise<string> {
 }
 
 /**
- * Feed URL (blob, data, or https) to stream: resolve to text, parse (CSV or newline-delimited numbers), push chunks, close.
- * Uses CSV parsing when fileType is CSV or content looks like CSV; otherwise newline-delimited numbers.
- * Returns the stream index. On fetch/parse error throws.
+ * Feed URL (indexeddb://, blob:, data:, or https:) to stream. For indexeddb and blob we feed in chunks (streaming).
+ * For data/https we fetch full text then parse and push batches. Returns the stream index.
  */
 async function feedUrlToStream(url: string, fileType?: string): Promise<number> {
+  if (url.startsWith('indexeddb://')) {
+    const ref = parseIndexedDbRef(url)
+    if (!ref) throw new Error('Invalid indexeddb URL. Re-add the file.')
+    const blob = await getFileBlob(ref.projectId, ref.nodeId)
+    if (!blob) throw new Error('File not found in storage. Re-add the file.')
+    return feedBlobToStreamInChunks(blob, fileType)
+  }
+  if (url.startsWith('blob:')) {
+    const blob = getBlobForUrl(url)
+    if (blob) return feedBlobToStreamInChunks(blob, fileType)
+    throw new Error(
+      'File not available after reload. Blob URLs are only valid in the same session. Please re-drop the file.',
+    )
+  }
   const index = await requestCreateStreamInput()
   let chunkCount = 0
   try {
@@ -173,6 +325,8 @@ export function buildGetExternalStreams(
         const msg = e instanceof Error ? e.message : String(e)
         if (msg.includes('File not available after reload')) {
           useUIStore.getState().addToast('File not available after reload. Re-drop the file to use it again.', 'error')
+        } else if (msg.includes('File not found in storage')) {
+          useUIStore.getState().addToast('File not found in storage. Re-add the file.', 'error')
         }
         // Skip this input; LSP may see it as unbound
       }

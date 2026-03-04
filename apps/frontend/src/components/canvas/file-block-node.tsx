@@ -26,7 +26,7 @@ type FileFlowNode = Node<FileBlockData, 'file'>
 export function fileBlockLabel(url: string | undefined): string {
   if (!url) return 'No file'
   try {
-    if (url.startsWith('blob:')) {
+    if (url.startsWith('blob:') || url.startsWith('indexeddb://')) {
       return 'File'
     }
     const u = new URL(url)
@@ -49,7 +49,7 @@ export function fileBlockTypeLabel(fileType: string | undefined, url: string | u
     return m
   }
   if (!url) return '—'
-  if (url.startsWith('blob:')) return 'Local file'
+  if (url.startsWith('blob:') || url.startsWith('indexeddb://')) return 'Local file'
   if (url.startsWith('data:')) return 'Data URL'
   try {
     const u = new URL(url)
@@ -106,7 +106,7 @@ export function FileBlockNode({ id, data, selected }: NodeProps<FileFlowNode>) {
                 data-testid="file-url"
                 title={url}
               >
-                {url.startsWith('blob:') ? 'Local file (blob)' : url.length > 50 ? `${url.slice(0, 47)}…` : url}
+                {url.startsWith('blob:') ? 'Local file (blob)' : url.startsWith('indexeddb://') ? 'Local file (stored)' : url.length > 50 ? `${url.slice(0, 47)}…` : url}
               </dd>
             </div>
           </dl>

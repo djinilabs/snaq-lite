@@ -23,6 +23,10 @@ vi.mock('~/lsp/message-router', () => ({
 vi.mock('~/lib/blob-url-cache', () => ({
   getBlobForUrl: (url: string) => mockGetBlobForUrl(url),
 }))
+const mockGetFileBlob = vi.fn()
+vi.mock('~/lib/file-blob-idb', () => ({
+  getFileBlob: (projectId: string, nodeId: string) => mockGetFileBlob(projectId, nodeId),
+}))
 const mockAddToast = vi.fn()
 vi.mock('~/store', async (importOriginal) => {
   const actual = await importOriginal<typeof import('~/store')>()
@@ -453,6 +457,40 @@ describe('buildGetExternalStreams', () => {
       'The file has no numeric data. Use numbers (one per line) or CSV with numeric columns.',
       'error',
     )
+  })
+
+  it('getter uses IndexedDB blob for indexeddb:// URL and feeds in chunks', async () => {
+    mockRequestCreateStreamInput.mockResolvedValue(0)
+    const blobLike = { text: () => Promise.resolve('1\n2\n3') } as unknown as Blob
+    mockGetFileBlob.mockResolvedValue(blobLike)
+
+    const getter = buildGetExternalStreams(
+      'target',
+      () => [
+        {
+          id: 'f1',
+          position: { x: 0, y: 0 },
+          type: 'file' as const,
+          uri: 'snaq://graph/f1.sl',
+          url: 'indexeddb://my-project/f1',
+        },
+        {
+          id: 'target',
+          position: { x: 100, y: 0 },
+          type: 'computation',
+          uri: 'snaq://graph/t.sl',
+          inputs: [{ name: 'x', type: 'Vector' }],
+        },
+      ],
+      () => [{ sourceId: 'f1', targetId: 'target', targetInputIndex: 0 }],
+    )
+
+    const result = await getter!()
+    expect(result).toEqual({ x: 0 })
+    expect(mockGetFileBlob).toHaveBeenCalledWith('my-project', 'f1')
+    expect(mockSendStreamChunk).toHaveBeenCalledWith(0, [1, 2, 3])
+    expect(mockCloseStream).toHaveBeenCalledWith(0)
+    expect(globalThis.fetch).not.toHaveBeenCalled()
   })
 
   it('getter throws for blob URL when not in cache (e.g. after reload), does not call fetch, shows toast', async () => {

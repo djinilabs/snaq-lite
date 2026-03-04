@@ -24,6 +24,10 @@ describe('fileBlockLabel', () => {
     expect(fileBlockLabel('blob:https://example.com/abc')).toBe('File')
   })
 
+  it('returns "File" for indexeddb URLs', () => {
+    expect(fileBlockLabel('indexeddb://project-id/node-id')).toBe('File')
+  })
+
   it('returns last path segment for https URL with path', () => {
     expect(fileBlockLabel('https://example.com/data/numbers.csv')).toBe('numbers.csv')
   })
@@ -54,6 +58,7 @@ describe('fileBlockTypeLabel', () => {
 
   it('derives from URL when fileType is missing', () => {
     expect(fileBlockTypeLabel(undefined, 'blob:https://example.com/x')).toBe('Local file')
+    expect(fileBlockTypeLabel(undefined, 'indexeddb://proj/node')).toBe('Local file')
     expect(fileBlockTypeLabel(undefined, 'data:text/plain,hello')).toBe('Data URL')
     expect(fileBlockTypeLabel(undefined, 'https://example.com/d.csv')).toBe('CSV')
     expect(fileBlockTypeLabel(undefined, 'https://example.com/d.json')).toBe('JSON')

@@ -1,10 +1,14 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
   setProjectSnapshot,
   getProjectSnapshot,
   PROJECTS_INDEX_KEY,
 } from '~/lib/project-storage'
 import { useProjectsIndexStore } from './projects-index-store'
+
+vi.mock('~/lib/file-blob-idb', () => ({
+  deleteAllBlobsForProject: vi.fn().mockResolvedValue(undefined),
+}))
 
 describe('projects-index-store', () => {
   beforeEach(() => {

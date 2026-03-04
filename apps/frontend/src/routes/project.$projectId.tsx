@@ -11,6 +11,7 @@ import { AUTO_SAVE_DEBOUNCE_MS } from '~/lib/constants'
 import { buildSnapshotFromGraph, getGraphStateForUndo, setProjectSnapshot } from '~/lib/project-storage'
 import { performRedo, performUndo } from '~/lib/perform-undo-redo'
 import { buildGetExternalStreams } from '~/lib/build-external-streams'
+import { deleteFileBlob } from '~/lib/file-blob-idb'
 import { useGraphStore, useUIStore, useWidgetContentVersionStore } from '~/store'
 import { useProjectsIndexStore } from '~/store'
 
@@ -163,11 +164,18 @@ function ProjectCanvasPage() {
   )
 
   const handleDeleteSelected = useCallback(() => {
+    const stateNodes = useGraphStore.getState().nodes
     for (const id of selectedNodeIds) {
+      const node = stateNodes.find((n) => n.id === id)
+      if (node?.type === 'file') {
+        void deleteFileBlob(projectId, id).catch((err) => {
+          console.error('[ProjectCanvasPage] Failed to delete file blob from IndexedDB', err)
+        })
+      }
       removeNode(id)
     }
     setSelectedNodeIds([])
-  }, [selectedNodeIds, removeNode])
+  }, [projectId, selectedNodeIds, removeNode])
 
   const handleSelectionChange = useCallback(
     (params: { nodes: { id: string }[]; edges?: { id: string; target: string; targetHandle?: string | null }[] }) => {
@@ -225,6 +233,7 @@ function ProjectCanvasPage() {
         />
         <div data-testid="graph-canvas-wrapper" style={{ flex: 1, minHeight: 0 }}>
           <GraphCanvas
+            projectId={projectId}
             viewportRef={canvasViewportRef}
             selectedNodeIds={selectedNodeIds}
             selectedEdgeIds={selectedEdgeIds}

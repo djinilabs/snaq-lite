@@ -4,6 +4,7 @@
  */
 
 import { create } from 'zustand'
+import { deleteAllBlobsForProject } from '~/lib/file-blob-idb'
 import {
   deleteProjectSnapshot,
   getProjectsIndex,
@@ -43,6 +44,9 @@ export const useProjectsIndexStore = create<ProjectsIndexState>((set, _get) => (
 
   removeProject: (id) => {
     deleteProjectSnapshot(id)
+    void deleteAllBlobsForProject(id).catch((err) => {
+      console.error('[ProjectsIndexStore] Failed to delete file blobs from IndexedDB', err)
+    })
     set((state) => {
       const next = state.projects.filter((p) => p.id !== id)
       persist(next)

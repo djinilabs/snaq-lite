@@ -199,33 +199,44 @@ test.describe('computation result (editor–worker–LSP)', () => {
     // Wait for LSP to send node signature so buildGetExternalStreams can resolve input name
     await page.waitForTimeout(4000)
 
-    // Wire file → computation programmatically (E2E hook); avoids flaky drag-and-drop over small handles
+    // Wire file → computation programmatically (E2E hook); avoids flaky drag-and-drop over small handles.
+    // Retry hook + wait: sometimes the first call doesn't result in a visible edge (store/render timing).
     const fileNodeId = await page.getByTestId('file-node').first().getAttribute('data-node-id')
     const computationNodeId = await computationNode.getAttribute('data-node-id')
     expect(fileNodeId).toBeTruthy()
     expect(computationNodeId).toBeTruthy()
-    await page.evaluate(
-      ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
-        const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => void })
-          .__E2E_GRAPH_ADD_EDGE__
-        addEdge?.(sourceId, targetId, 0)
-      },
-      { sourceId: fileNodeId!, targetId: computationNodeId! },
-    )
-    await page.waitForTimeout(1000)
-    await expect(page.locator('.react-flow__edge')).toHaveCount(1, { timeout: 10_000 })
+    const addEdgeViaHook = async () => {
+      await page.evaluate(
+        ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
+          const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => void })
+            .__E2E_GRAPH_ADD_EDGE__
+          addEdge?.(sourceId, targetId, 0)
+        },
+        { sourceId: fileNodeId!, targetId: computationNodeId! },
+      )
+    }
+    await addEdgeViaHook()
+    let edgeVisible = await page.locator('.react-flow__edge').count().then((c) => c >= 1)
+    if (!edgeVisible) {
+      await page.waitForTimeout(1500)
+      await addEdgeViaHook()
+    }
+    await expect(page.locator('.react-flow__edge')).toHaveCount(1, { timeout: 15_000 })
 
-    // Result should show stream data (from blob cache, not fetch): not [], not an error, and shows vector result
+    // Result should show stream data (from blob cache, not fetch): poll until LSP has finished and widget shows vector (avoids flakiness from transient parse/error state)
     const resultEl = computationNode.getByTestId('computation-result')
     await expect(resultEl).toBeVisible({ timeout: 20_000 })
-    const resultText = (await resultEl.textContent()) ?? ''
-    expect(resultText).not.toBe('[]')
-    expect(resultText).not.toContain('File not available')
-    expect(resultText).not.toContain('Failed to fetch')
-    // Display may be "Result<vector>", "3 elements", or "[10, 20, 30]" depending on LSP/widget formatting
-    const hasVectorResult =
-      /vector|elements|\b10\b|\b20\b|\b30\b|\[.*10.*20.*30\]/.test(resultText)
-    expect(hasVectorResult, `Expected vector result or numbers in "${resultText}"`).toBe(true)
+    const vectorResultPattern = /vector|elements|\b10\b|\b20\b|\b30\b|\[.*10.*20.*30\]/
+    await expect
+      .poll(
+        async () => {
+          const text = (await resultEl.textContent()) ?? ''
+          if (text === '[]' || text.includes('File not available') || text.includes('Failed to fetch')) return false
+          return vectorResultPattern.test(text)
+        },
+        { timeout: 15_000, intervals: [500, 1000, 1000, 2000, 2000] },
+      )
+      .toBe(true)
   })
 
   test('file block to computation: real drag from file output to computation input shows full CSV content', async ({

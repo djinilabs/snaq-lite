@@ -74,12 +74,15 @@ export function buildSnapshotFromGraph(
       position: n.position,
       type: n.type,
     }
-    if (n.type === 'file')
+    if (n.type === 'file') {
+      const url =
+        n.url?.startsWith('blob:') ? `indexeddb://${projectId}/${n.id}` : n.url
       return {
         ...base,
-        ...(n.url ? { url: n.url } : {}),
+        ...(url ? { url } : {}),
         ...(n.fileType ? { fileType: n.fileType } : {}),
       }
+    }
     if (n.type !== 'computation') return base
     return {
       ...base,

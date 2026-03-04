@@ -221,6 +221,26 @@ describe('project-storage', () => {
         fileType: 'text/csv',
       })
     })
+
+    it('rewrites blob URL to indexeddb ref for file nodes', () => {
+      const nodes = [
+        {
+          id: 'f1',
+          position: { x: 0, y: 0 },
+          type: 'file' as const,
+          uri: 'snaq://graph/f1.sl',
+          url: 'blob:http://localhost:5173/abc-123',
+          fileType: 'text/csv',
+        },
+      ]
+      const snapshot = buildSnapshotFromGraph('proj-id', nodes, [])
+      expect(snapshot.nodes[0]).toMatchObject({
+        id: 'f1',
+        type: 'file',
+        url: 'indexeddb://proj-id/f1',
+        fileType: 'text/csv',
+      })
+    })
   })
 
   describe('getGraphStateForUndo', () => {

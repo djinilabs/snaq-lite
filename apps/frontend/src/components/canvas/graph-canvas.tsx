@@ -31,6 +31,7 @@ import { FileBlockNode } from './file-block-node'
 import { PresentationBlockNode } from './presentation-block-node'
 import { nodeIdToUri } from '~/editor/virtual-uri'
 import { registerBlobUrl } from '~/lib/blob-url-cache'
+import { putFileBlob } from '~/lib/file-blob-idb'
 import { useGraphStore } from '~/store'
 
 function graphNodeToFlowNode(
@@ -48,6 +49,8 @@ function graphNodeToFlowNode(
 }
 
 export interface GraphCanvasProps {
+  /** Current project ID (for persisting dropped file blobs to IndexedDB). */
+  projectId: string
   onSelectionChange?: OnSelectionChangeFunc
   /** Synced into node.selected so React Flow selection matches app state (e.g. toolbar Delete). */
   selectedNodeIds?: string[]
@@ -97,8 +100,8 @@ function ViewportCenterRef({
   return null
 }
 
-export function GraphCanvas(props: GraphCanvasProps = {}) {
-  const { onSelectionChange, selectedNodeIds = [], selectedEdgeIds = [] } = props
+export function GraphCanvas(props: GraphCanvasProps) {
+  const { projectId, onSelectionChange, selectedNodeIds = [], selectedEdgeIds = [] } = props
   const viewportRef = useRef<HTMLDivElement>(null)
   const screenToFlowPositionRef = useRef<ScreenToFlowPositionFn | null>(null) as MutableRefObject<ScreenToFlowPositionFn | null>
   const addNode = useGraphStore((s) => s.addNode)
@@ -132,12 +135,15 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
         url,
         fileType: file.type || undefined,
       })
+      void putFileBlob(projectId, id, file).catch((err) => {
+        console.error('[GraphCanvas] Failed to persist file blob to IndexedDB', err)
+      })
       onSelectionChangeRef.current?.({
         nodes: [{ id, position, data: {}, type: 'file' }],
         edges: [],
       })
     },
-    [addNode],
+    [addNode, projectId],
   )
 
   const nodeTypes = useMemo(

@@ -16,6 +16,7 @@ import {
   LSP_METHOD_DID_CHANGE,
   LSP_SUBSCRIBE_RETRY_INTERVAL_MS,
   LSP_SUBSCRIBE_MAX_WAIT_MS,
+  CREATE_STREAM_INPUT_TIMEOUT_MS,
   DRAG_HANDLE_CLASS_COMPUTATION,
   DRAG_HANDLE_CLASS_PRESENTATION,
   NODRAG_CLASS,
@@ -50,6 +51,7 @@ describe('constants', () => {
   it('LSP subscribe retry and drag handle constants are positive/non-empty', () => {
     expect(LSP_SUBSCRIBE_RETRY_INTERVAL_MS).toBe(200)
     expect(LSP_SUBSCRIBE_MAX_WAIT_MS).toBe(10_000)
+    expect(CREATE_STREAM_INPUT_TIMEOUT_MS).toBe(10_000)
     expect(DRAG_HANDLE_CLASS_COMPUTATION).toBe('computation-drag-handle')
     expect(DRAG_HANDLE_CLASS_PRESENTATION).toBe('presentation-drag-handle')
   })

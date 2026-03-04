@@ -24,6 +24,8 @@ export const LSP_METHOD_DID_CHANGE = 'textDocument/didChange'
 /** Retry interval and max wait when LSP client is not ready before subscribeWidget. */
 export const LSP_SUBSCRIBE_RETRY_INTERVAL_MS = 200
 export const LSP_SUBSCRIBE_MAX_WAIT_MS = 10_000
+/** Timeout for createStreamInput request to the LSP worker (file-block external streams). */
+export const CREATE_STREAM_INPUT_TIMEOUT_MS = 10_000
 /** Delay after onBeforeSubscribe before sending subscribeWidget so worker processes didOpen first. */
 export const LSP_SUBSCRIBE_AFTER_DID_OPEN_MS = 150
 

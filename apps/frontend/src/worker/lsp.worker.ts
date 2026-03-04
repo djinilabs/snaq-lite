@@ -1,7 +1,7 @@
 /**
  * LSP Web Worker entry. Loads WASM LSP and forwards messages.
  * First message from main must be { type: WORKER_MSG_INIT, wasmUrl: string }.
- * Host stream API: { type: 'createStreamInput', id } → response { type: 'createStreamInputResponse', id, index };
+ * Host stream API: { type: 'createStreamInput', id } → response { type: 'createStreamInputResponse', id, index } or { type, id, error }.
  * { type: 'pushChunk', index, chunk: number[] }; { type: 'closeStream', index }.
  * All other messages are raw LSP JSON-RPC strings, forwarded to push_lsp_message after WASM is ready.
  */
@@ -71,9 +71,24 @@ async function loadWasm(wasmUrl: string): Promise<void> {
 
 function handleStreamHostMessage(parsed: { type?: string; id?: number; index?: number; chunk?: number[] }): boolean {
   if (!parsed || typeof parsed.type !== 'string') return false
-  if (parsed.type === 'createStreamInput' && wasmReady && createStreamInputJs) {
-    const index = createStreamInputJs()
-    self.postMessage(JSON.stringify({ type: WORKER_MSG_CREATE_STREAM_RESPONSE, id: parsed.id, index }))
+  if (parsed.type === 'createStreamInput') {
+    if (wasmReady && createStreamInputJs) {
+      try {
+        const index = createStreamInputJs()
+        self.postMessage(JSON.stringify({ type: WORKER_MSG_CREATE_STREAM_RESPONSE, id: parsed.id, index }))
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        self.postMessage(JSON.stringify({ type: WORKER_MSG_CREATE_STREAM_RESPONSE, id: parsed.id, error: message }))
+      }
+    } else {
+      self.postMessage(
+        JSON.stringify({
+          type: WORKER_MSG_CREATE_STREAM_RESPONSE,
+          id: parsed.id,
+          error: 'Worker or stream host not ready',
+        }),
+      )
+    }
     return true
   }
   if (parsed.type === 'pushChunk' && typeof parsed.index === 'number' && Array.isArray(parsed.chunk) && pushChunkJs) {

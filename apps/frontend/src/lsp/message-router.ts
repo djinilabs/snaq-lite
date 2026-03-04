@@ -8,6 +8,7 @@ import {
   WORKER_MSG_ERROR,
   WORKER_MSG_INIT,
   WORKER_MSG_CREATE_STREAM_RESPONSE,
+  CREATE_STREAM_INPUT_TIMEOUT_MS,
 } from '~/lib/constants'
 import { routeMessage } from './route-message'
 
@@ -47,9 +48,19 @@ export function setIncomingLspPush(cb: ((raw: string) => void) | null): void {
   incomingLspPush = cb
 }
 
-/** Reset workerReady for test isolation. Do not use in production. */
+/** Reset workerReady and pending stream resolvers for test isolation. Do not use in production. */
 export function resetMessageRouterForTest(): void {
   workerReady = false
+  for (const [, entry] of pendingStreamResolvers) {
+    clearTimeout(entry.timeoutId)
+    entry.reject(new Error('Message router reset'))
+  }
+  pendingStreamResolvers.clear()
+}
+
+/** Set worker instance for tests (e.g. mock worker). Do not use in production. */
+export function setWorkerForTest(w: Worker | null): void {
+  worker = w
 }
 
 /**
@@ -57,7 +68,12 @@ export function resetMessageRouterForTest(): void {
  * updates workerReady and returns true (caller should not pass to routeMessage).
  * Otherwise returns false and the caller should pass the raw string to routeMessage.
  */
-const pendingStreamResolvers = new Map<number, (index: number) => void>()
+interface PendingStreamResolver {
+  resolve: (index: number) => void
+  reject: (err: Error) => void
+  timeoutId: ReturnType<typeof setTimeout>
+}
+const pendingStreamResolvers = new Map<number, PendingStreamResolver>()
 
 export function processIncomingWorkerMessage(data: string): boolean {
   try {
@@ -90,9 +106,18 @@ export function processIncomingWorkerMessage(data: string): boolean {
         return true
       }
       if (parsed.type === WORKER_MSG_CREATE_STREAM_RESPONSE && typeof parsed.id === 'number') {
-        const resolve = pendingStreamResolvers.get(parsed.id)
+        const entry = pendingStreamResolvers.get(parsed.id)
         pendingStreamResolvers.delete(parsed.id)
-        if (resolve && typeof parsed.index === 'number') resolve(parsed.index)
+        if (entry) {
+          clearTimeout(entry.timeoutId)
+          if (typeof parsed.error === 'string') {
+            entry.reject(new Error(parsed.error))
+          } else if (typeof parsed.index === 'number') {
+            entry.resolve(parsed.index)
+          } else {
+            entry.reject(new Error('Invalid createStreamInput response'))
+          }
+        }
         return true
       }
     }
@@ -274,23 +299,28 @@ export function sendRequest(method: string, params?: unknown, id?: string | numb
 let nextStreamRequestId = 0
 
 /** Request a new stream index from the LSP worker (for file-block external streams). Resolves when worker responds. */
-export function requestCreateStreamInput(): Promise<number> {
+export async function requestCreateStreamInput(): Promise<number> {
+  await waitForWorkerReady()
   return new Promise((resolve, reject) => {
     const id = nextStreamRequestId++
-    pendingStreamResolvers.set(id, resolve)
+    const timeoutId = setTimeout(() => {
+      const entry = pendingStreamResolvers.get(id)
+      if (entry) {
+        pendingStreamResolvers.delete(id)
+        clearTimeout(entry.timeoutId)
+        entry.reject(new Error('createStreamInput response timeout'))
+      }
+    }, CREATE_STREAM_INPUT_TIMEOUT_MS)
+    const entry: PendingStreamResolver = { resolve, reject, timeoutId }
+    pendingStreamResolvers.set(id, entry)
     const w = getWorker()
     if (!w) {
       pendingStreamResolvers.delete(id)
+      clearTimeout(timeoutId)
       reject(new Error('Worker not initialized'))
       return
     }
     w.postMessage(JSON.stringify({ type: 'createStreamInput', id }))
-    setTimeout(() => {
-      if (pendingStreamResolvers.has(id)) {
-        pendingStreamResolvers.delete(id)
-        reject(new Error('createStreamInput response timeout'))
-      }
-    }, 10_000)
   })
 }
 

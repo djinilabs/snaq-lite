@@ -275,4 +275,47 @@ describe('buildGetExternalStreams', () => {
     )
     consoleSpy.mockRestore()
   })
+
+  it('getter catches createStreamInput timeout and returns partial result, logs error', async () => {
+    const timeoutError = new Error('createStreamInput response timeout')
+    mockRequestCreateStreamInput.mockRejectedValue(timeoutError)
+    const fetchMock = vi.mocked(globalThis.fetch)
+    fetchMock.mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve('1\n2\n3'),
+    } as Response)
+
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const getter = buildGetExternalStreams(
+      'target',
+      () => [
+        {
+          id: 'f1',
+          position: { x: 0, y: 0 },
+          type: 'file' as const,
+          uri: 'snaq://graph/f1.sl',
+          url: 'https://example.com/d.txt',
+        },
+        {
+          id: 'target',
+          position: { x: 100, y: 0 },
+          type: 'computation',
+          uri: 'snaq://graph/t.sl',
+          inputs: [{ name: 'x', type: 'Vector' }],
+        },
+      ],
+      () => [{ sourceId: 'f1', targetId: 'target', targetInputIndex: 0 }],
+    )
+
+    const result = await getter!()
+    expect(result).toEqual({})
+    expect(mockRequestCreateStreamInput).toHaveBeenCalledTimes(1)
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '[buildGetExternalStreams] feed failed for',
+      'x',
+      timeoutError,
+    )
+    consoleSpy.mockRestore()
+  })
 })

@@ -57,6 +57,8 @@ interface NodeFrameProps extends PropsWithChildren {
   minHeight?: number
   titleTestId?: string
   nodeTestId?: string
+  /** Node id for E2E (data-node-id) so tests can resolve store node ids for programmatic edge add. */
+  nodeId?: string
 }
 
 export function NodeFrame({
@@ -66,12 +68,14 @@ export function NodeFrame({
   minHeight,
   titleTestId,
   nodeTestId,
+  nodeId,
   children,
 }: NodeFrameProps) {
   return (
     <div
       className="nopan"
       data-testid={nodeTestId}
+      {...(nodeId != null ? { 'data-node-id': nodeId } : {})}
       style={{
         ...NODE_BASE_STYLE,
         ...(typeof minHeight === 'number' ? { minHeight } : {}),

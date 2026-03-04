@@ -149,6 +149,333 @@ test.describe('computation result (editor–worker–LSP)', () => {
     expect((widgetUpdate?.params as { status?: string })?.status).toBe('Completed')
   })
 
+  test('file block wired to computation with Vector input shows stream result (blob cache, no fetch)', async ({
+    page,
+  }) => {
+    test.setTimeout(90_000)
+    await gotoCanvas(page)
+    await expect(page.getByTestId('canvas-toolbar')).toBeVisible({ timeout: 15_000 })
+
+    // Drop a file with numeric content so the app creates a blob URL and registers it in the blob cache
+    const wrapper = page.getByTestId('graph-canvas-wrapper')
+    await wrapper.waitFor({ state: 'visible', timeout: 10_000 })
+    await page.evaluate(() => {
+      const pane =
+        document.querySelector('.react-flow__pane') ??
+        document.querySelector('[data-testid="graph-canvas-wrapper"]')
+      if (!pane) return
+      const file = new File(['10\n20\n30'], 'numbers.txt', { type: 'text/plain' })
+      const dt = new DataTransfer()
+      dt.items.add(file)
+      const rect = pane.getBoundingClientRect()
+      const drop = new DragEvent('drop', {
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2,
+        dataTransfer: dt,
+        bubbles: true,
+      })
+      pane.dispatchEvent(drop)
+    })
+    await page.waitForTimeout(800)
+    await expect(page.getByTestId('file-node')).toHaveCount(1)
+
+    // Add computation block and configure Vector input + body that consumes the stream
+    await page.getByTestId('add-computation-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
+    const computationNode = page.getByTestId('computation-node').first()
+    await computationNode.scrollIntoViewIfNeeded()
+    await computationNode.getByTestId('computation-add-input').click()
+    await expect(computationNode.getByTestId('computation-input-name-0')).toBeAttached({ timeout: 5000 })
+    await computationNode.getByTestId('computation-input-name-0').fill('x')
+    await page.waitForTimeout(300)
+    await computationNode.getByTestId('computation-input-type-0').selectOption('Vector')
+    await page.waitForTimeout(300)
+    const editorZone = computationNode.getByTestId('computation-editor-zone')
+    await editorZone.click()
+    await page.waitForTimeout(200)
+    await page.keyboard.type('$x')
+    await page.waitForTimeout(500)
+
+    // Wait for LSP to send node signature so buildGetExternalStreams can resolve input name
+    await page.waitForTimeout(4000)
+
+    // Wire file → computation programmatically (E2E hook); avoids flaky drag-and-drop over small handles
+    const fileNodeId = await page.getByTestId('file-node').first().getAttribute('data-node-id')
+    const computationNodeId = await computationNode.getAttribute('data-node-id')
+    expect(fileNodeId).toBeTruthy()
+    expect(computationNodeId).toBeTruthy()
+    await page.evaluate(
+      ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
+        const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => void })
+          .__E2E_GRAPH_ADD_EDGE__
+        addEdge?.(sourceId, targetId, 0)
+      },
+      { sourceId: fileNodeId!, targetId: computationNodeId! },
+    )
+    await page.waitForTimeout(1000)
+    await expect(page.locator('.react-flow__edge')).toHaveCount(1, { timeout: 10_000 })
+
+    // Result should show stream data (from blob cache, not fetch): not [], not an error, and shows vector result
+    const resultEl = computationNode.getByTestId('computation-result')
+    await expect(resultEl).toBeVisible({ timeout: 20_000 })
+    const resultText = (await resultEl.textContent()) ?? ''
+    expect(resultText).not.toBe('[]')
+    expect(resultText).not.toContain('File not available')
+    expect(resultText).not.toContain('Failed to fetch')
+    // Display may be "Result<vector>", "3 elements", or "[10, 20, 30]" depending on LSP/widget formatting
+    const hasVectorResult =
+      /vector|elements|\b10\b|\b20\b|\b30\b|\[.*10.*20.*30\]/.test(resultText)
+    expect(hasVectorResult, `Expected vector result or numbers in "${resultText}"`).toBe(true)
+  })
+
+  test('file block with no file: wiring shows toast to drop file', async ({ page }) => {
+    test.setTimeout(60_000)
+    await gotoCanvas(page)
+    await expect(page.getByTestId('canvas-toolbar')).toBeVisible({ timeout: 15_000 })
+    // Add file block via button only (no drop) — so file node has no URL
+    await page.getByTestId('add-file-btn').click()
+    await expect(page.getByTestId('file-node')).toHaveCount(1)
+    // Add computation with named Vector input and body $x
+    await page.getByTestId('add-computation-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
+    const computationNode = page.getByTestId('computation-node').first()
+    await computationNode.scrollIntoViewIfNeeded()
+    await computationNode.getByTestId('computation-add-input').click()
+    await expect(computationNode.getByTestId('computation-input-name-0')).toBeAttached({ timeout: 5000 })
+    await computationNode.getByTestId('computation-input-name-0').fill('x')
+    await computationNode.getByTestId('computation-input-type-0').selectOption('Vector')
+    await page.waitForTimeout(300)
+    const editorZone = computationNode.getByTestId('computation-editor-zone')
+    await editorZone.click()
+    await page.waitForTimeout(200)
+    await page.keyboard.type('$x')
+    await page.waitForTimeout(500)
+    await page.waitForTimeout(4000)
+    // Wire file → computation (file has no URL so no stream will be bound)
+    const fileNodeId = await page.getByTestId('file-node').first().getAttribute('data-node-id')
+    const computationNodeId = await computationNode.getAttribute('data-node-id')
+    expect(fileNodeId).toBeTruthy()
+    expect(computationNodeId).toBeTruthy()
+    await page.evaluate(
+      ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
+        const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => void })
+          .__E2E_GRAPH_ADD_EDGE__
+        addEdge?.(sourceId, targetId, 0)
+      },
+      { sourceId: fileNodeId!, targetId: computationNodeId! },
+    )
+    // Ensure computation node has named input in store (in case fill didn't commit), then run getExternalStreams
+    await page.evaluate(
+      ({
+        targetId,
+        inputs,
+      }: {
+        targetId: string
+        inputs: Array<{ name: string; type: string }>
+      }) => {
+        const setInputs = (window as Window & {
+          __E2E_SET_NODE_INPUTS__?: (id: string, i: Array<{ name: string; type: string }>) => void
+        }).__E2E_SET_NODE_INPUTS__
+        setInputs?.(targetId, inputs)
+      },
+      { targetId: computationNodeId!, inputs: [{ name: 'x', type: 'Vector' }] },
+    )
+    const runResult = await page.evaluate(
+      async (targetId: string) => {
+        const run = (window as Window & {
+          __E2E_RUN_GET_EXTERNAL_STREAMS__?: (id: string) => Promise<{ streams: Record<string, number>; _debug?: unknown }>
+        }).__E2E_RUN_GET_EXTERNAL_STREAMS__
+        const getToasts = (window as Window & { __E2E_GET_TOAST_MESSAGES__?: () => string[] }).__E2E_GET_TOAST_MESSAGES__
+        const out = run ? await run(targetId) : undefined
+        const toasts = getToasts?.() ?? []
+        return { ...out, toasts }
+      },
+      computationNodeId!,
+    )
+    expect(
+      runResult.toasts.some((m: string) => m.includes('Drop a file on the file block first')),
+      `Expected toast "Drop a file...". _debug: ${JSON.stringify(runResult._debug)}, toasts: ${JSON.stringify(runResult.toasts)}`,
+    ).toBe(true)
+  })
+
+  test('computation input without name: wiring shows toast to name input', async ({ page }) => {
+    test.setTimeout(90_000)
+    await gotoCanvas(page)
+    await expect(page.getByTestId('canvas-toolbar')).toBeVisible({ timeout: 15_000 })
+    // Drop a file so file node has blob URL
+    const wrapper = page.getByTestId('graph-canvas-wrapper')
+    await wrapper.waitFor({ state: 'visible', timeout: 10_000 })
+    await page.evaluate(() => {
+      const pane =
+        document.querySelector('.react-flow__pane') ??
+        document.querySelector('[data-testid="graph-canvas-wrapper"]')
+      if (!pane) return
+      const file = new File(['1\n2\n3'], 'n.txt', { type: 'text/plain' })
+      const dt = new DataTransfer()
+      dt.items.add(file)
+      const rect = pane.getBoundingClientRect()
+      const drop = new DragEvent('drop', {
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2,
+        dataTransfer: dt,
+        bubbles: true,
+      })
+      pane.dispatchEvent(drop)
+    })
+    await page.waitForTimeout(800)
+    await expect(page.getByTestId('file-node')).toHaveCount(1)
+    // Add computation and add one input but leave name EMPTY (don't fill)
+    await page.getByTestId('add-computation-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
+    const computationNode = page.getByTestId('computation-node').first()
+    await computationNode.scrollIntoViewIfNeeded()
+    await computationNode.getByTestId('computation-add-input').click()
+    await expect(computationNode.getByTestId('computation-input-name-0')).toBeAttached({ timeout: 5000 })
+    // Do NOT fill the name — leave it empty so no stream is bound
+    await computationNode.getByTestId('computation-input-type-0').selectOption('Vector')
+    await page.waitForTimeout(300)
+    const editorZone = computationNode.getByTestId('computation-editor-zone')
+    await editorZone.click()
+    await page.waitForTimeout(200)
+    await page.keyboard.type('$x')
+    await page.waitForTimeout(500)
+    await page.waitForTimeout(4000)
+    // Wire file → computation (input name is '' so we skip binding)
+    const fileNodeId = await page.getByTestId('file-node').first().getAttribute('data-node-id')
+    const computationNodeId = await computationNode.getAttribute('data-node-id')
+    expect(fileNodeId).toBeTruthy()
+    expect(computationNodeId).toBeTruthy()
+    await page.evaluate(
+      ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
+        const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => void })
+          .__E2E_GRAPH_ADD_EDGE__
+        addEdge?.(sourceId, targetId, 0)
+      },
+      { sourceId: fileNodeId!, targetId: computationNodeId! },
+    )
+    // Ensure computation node has one input with empty name, then run getExternalStreams
+    await page.evaluate(
+      ({
+        targetId,
+        inputs,
+      }: {
+        targetId: string
+        inputs: Array<{ name: string; type: string }>
+      }) => {
+        const setInputs = (window as Window & {
+          __E2E_SET_NODE_INPUTS__?: (id: string, i: Array<{ name: string; type: string }>) => void
+        }).__E2E_SET_NODE_INPUTS__
+        setInputs?.(targetId, inputs)
+      },
+      { targetId: computationNodeId!, inputs: [{ name: '', type: 'Vector' }] },
+    )
+    const runResult = await page.evaluate(
+      async (targetId: string) => {
+        const run = (window as Window & {
+          __E2E_RUN_GET_EXTERNAL_STREAMS__?: (id: string) => Promise<{ streams: Record<string, number>; _debug?: unknown }>
+        }).__E2E_RUN_GET_EXTERNAL_STREAMS__
+        const getToasts = (window as Window & { __E2E_GET_TOAST_MESSAGES__?: () => string[] }).__E2E_GET_TOAST_MESSAGES__
+        const out = run ? await run(targetId) : undefined
+        const toasts = getToasts?.() ?? []
+        return { ...out, toasts }
+      },
+      computationNodeId!,
+    )
+    expect(
+      runResult.toasts.some((m: string) => m.includes('Name the computation input')),
+      `Expected toast "Name the computation input...". _debug: ${JSON.stringify(runResult._debug)}, toasts: ${JSON.stringify(runResult.toasts)}`,
+    ).toBe(true)
+  })
+
+  test('file with no numeric content: shows toast about no numeric data', async ({ page }) => {
+    test.setTimeout(90_000)
+    await gotoCanvas(page)
+    await expect(page.getByTestId('canvas-toolbar')).toBeVisible({ timeout: 15_000 })
+    // Drop a file with no numbers (text only) so parsing yields zero numeric chunks
+    const wrapper = page.getByTestId('graph-canvas-wrapper')
+    await wrapper.waitFor({ state: 'visible', timeout: 10_000 })
+    await page.evaluate(() => {
+      const pane =
+        document.querySelector('.react-flow__pane') ??
+        document.querySelector('[data-testid="graph-canvas-wrapper"]')
+      if (!pane) return
+      const file = new File(['hello\nworld\nno numbers'], 'notes.txt', { type: 'text/plain' })
+      const dt = new DataTransfer()
+      dt.items.add(file)
+      const rect = pane.getBoundingClientRect()
+      const drop = new DragEvent('drop', {
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2,
+        dataTransfer: dt,
+        bubbles: true,
+      })
+      pane.dispatchEvent(drop)
+    })
+    await page.waitForTimeout(800)
+    await expect(page.getByTestId('file-node')).toHaveCount(1)
+    // Add computation with named Vector input and body $x
+    await page.getByTestId('add-computation-btn').click()
+    await expect(page.getByTestId('computation-node')).toHaveCount(1)
+    const computationNode = page.getByTestId('computation-node').first()
+    await computationNode.scrollIntoViewIfNeeded()
+    await computationNode.getByTestId('computation-add-input').click()
+    await expect(computationNode.getByTestId('computation-input-name-0')).toBeAttached({ timeout: 5000 })
+    await computationNode.getByTestId('computation-input-name-0').fill('x')
+    await computationNode.getByTestId('computation-input-type-0').selectOption('Vector')
+    await page.waitForTimeout(300)
+    const editorZone = computationNode.getByTestId('computation-editor-zone')
+    await editorZone.click()
+    await page.waitForTimeout(200)
+    await page.keyboard.type('$x')
+    await page.waitForTimeout(500)
+    await page.waitForTimeout(2000)
+    // Wire file → computation
+    const fileNodeId = await page.getByTestId('file-node').first().getAttribute('data-node-id')
+    const computationNodeId = await computationNode.getAttribute('data-node-id')
+    expect(fileNodeId).toBeTruthy()
+    expect(computationNodeId).toBeTruthy()
+    await page.evaluate(
+      ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
+        const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => void })
+          .__E2E_GRAPH_ADD_EDGE__
+        addEdge?.(sourceId, targetId, 0)
+      },
+      { sourceId: fileNodeId!, targetId: computationNodeId! },
+    )
+    // Ensure computation has named input, then run getExternalStreams (reads file, parses, finds no numbers → toast)
+    await page.evaluate(
+      ({
+        targetId,
+        inputs,
+      }: {
+        targetId: string
+        inputs: Array<{ name: string; type: string }>
+      }) => {
+        const setInputs = (window as Window & {
+          __E2E_SET_NODE_INPUTS__?: (id: string, i: Array<{ name: string; type: string }>) => void
+        }).__E2E_SET_NODE_INPUTS__
+        setInputs?.(targetId, inputs)
+      },
+      { targetId: computationNodeId!, inputs: [{ name: 'x', type: 'Vector' }] },
+    )
+    const runResult = await page.evaluate(
+      async (targetId: string) => {
+        const run = (window as Window & {
+          __E2E_RUN_GET_EXTERNAL_STREAMS__?: (id: string) => Promise<{ streams: Record<string, number>; _debug?: unknown }>
+        }).__E2E_RUN_GET_EXTERNAL_STREAMS__
+        const getToasts = (window as Window & { __E2E_GET_TOAST_MESSAGES__?: () => string[] }).__E2E_GET_TOAST_MESSAGES__
+        const out = run ? await run(targetId) : undefined
+        const toasts = getToasts?.() ?? []
+        return { ...out, toasts }
+      },
+      computationNodeId!,
+    )
+    expect(
+      runResult.toasts.some((m: string) => m.includes('no numeric data') || m.includes('The file has no numeric data')),
+      `Expected toast about no numeric data. toasts: ${JSON.stringify(runResult.toasts)}`,
+    ).toBe(true)
+  })
+
   test('focus: log when focus is lost and correlate with React events', async ({ page }) => {
     test.setTimeout(25_000)
     await page.addInitScript(() => {

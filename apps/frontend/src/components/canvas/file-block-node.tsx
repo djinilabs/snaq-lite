@@ -80,6 +80,7 @@ export function FileBlockNode({ id, data, selected }: NodeProps<FileFlowNode>) {
       title={label}
       selected={selected}
       minHeight={80}
+      nodeId={id}
     >
       <NodeContentZone data-testid="file-content">
         {url ? (

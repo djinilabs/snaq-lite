@@ -206,6 +206,7 @@ export function ComputationBoxNode({
       title={data.label ?? 'Computation'}
       selected={selected}
       minHeight={minHeight}
+      nodeId={id}
     >
       <Handle
         type="source"

@@ -10,6 +10,7 @@ import {
   COMPUTATION_OUTPUT_HANDLE_RIGHT,
   UNDO_STACK_MAX,
 } from '~/lib/constants'
+import { unregisterBlobUrl } from '~/lib/blob-url-cache'
 import type { NodeInputPort } from '~/lsp/types'
 
 export type UndoSnapshot = { nodes: GraphNode[]; edges: GraphEdge[] }
@@ -129,6 +130,7 @@ export const useGraphStore = create<GraphState>((set) => ({
     set((state) => {
       const node = state.nodes.find((n) => n.id === id)
       if (node?.type === 'file' && node.url?.startsWith('blob:')) {
+        unregisterBlobUrl(node.url)
         try {
           URL.revokeObjectURL(node.url)
         } catch {

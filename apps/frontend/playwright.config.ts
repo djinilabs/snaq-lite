@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test'
 
-const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? 'http://localhost:3000'
+const port = Number(process.env.PLAYWRIGHT_PORT) || 3000
+const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://localhost:${port}`
 const reuseServer = !!process.env.PLAYWRIGHT_REUSE_SERVER
 
 export default defineConfig({
@@ -24,7 +25,7 @@ export default defineConfig({
     ? {}
     : {
         webServer: {
-          command: 'pnpm run preview',
+          command: `npx vite preview --port ${port}`,
           url: baseURL,
           reuseExistingServer: !process.env.CI,
           timeout: 60_000,

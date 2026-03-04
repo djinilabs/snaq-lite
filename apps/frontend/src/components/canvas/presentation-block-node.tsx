@@ -70,6 +70,7 @@ export function PresentationBlockNode({
       title={data.label ?? 'Presentation'}
       selected={selected}
       minHeight={120}
+      nodeId={id}
     >
       <Handle type="target" position={Position.Left} id="0" data-testid="presentation-input-handle" />
       <NodeContentZone data-testid="presentation-content">

@@ -29,6 +29,7 @@ import { ComputationBoxNode } from './computation-box-node'
 import { FileBlockNode } from './file-block-node'
 import { PresentationBlockNode } from './presentation-block-node'
 import { nodeIdToUri } from '~/editor/virtual-uri'
+import { registerBlobUrl } from '~/lib/blob-url-cache'
 import { useGraphStore } from '~/store'
 
 function graphNodeToFlowNode(
@@ -121,6 +122,7 @@ export function GraphCanvas(props: GraphCanvasProps = {}) {
       const id = crypto.randomUUID()
       const file = files[0]
       const url = URL.createObjectURL(file)
+      registerBlobUrl(url, file)
       addNode({
         id,
         position,

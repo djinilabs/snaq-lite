@@ -10,7 +10,8 @@ import { nodeIdToUri } from '~/editor/virtual-uri'
 import { AUTO_SAVE_DEBOUNCE_MS } from '~/lib/constants'
 import { buildSnapshotFromGraph, getGraphStateForUndo, setProjectSnapshot } from '~/lib/project-storage'
 import { performRedo, performUndo } from '~/lib/perform-undo-redo'
-import { useGraphStore } from '~/store'
+import { buildGetExternalStreams } from '~/lib/build-external-streams'
+import { useGraphStore, useUIStore, useWidgetContentVersionStore } from '~/store'
 import { useProjectsIndexStore } from '~/store'
 
 /** Selected edge shape for keyboard delete (target + targetHandle from React Flow). */
@@ -88,6 +89,61 @@ function ProjectCanvasPage() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
+  // E2E: expose addEdge and runGetExternalStreams so tests can wire file→computation and assert toasts
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const w = window as Window & {
+      __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => void
+      __E2E_INCREMENT_WIDGET__?: (computationNodeId: string) => void
+      __E2E_RUN_GET_EXTERNAL_STREAMS__?: (nodeId: string) => Promise<{ streams: Record<string, number>; _debug?: unknown }>
+      __E2E_GET_TOAST_MESSAGES__?: () => string[]
+      __E2E_SET_NODE_INPUTS__?: (nodeId: string, inputs: Array<{ name: string; type: string }>) => void
+    }
+    w.__E2E_GRAPH_ADD_EDGE__ = (sourceId: string, targetId: string, targetInputIndex: number) => {
+      useGraphStore.getState().addEdge({ sourceId, targetId, targetInputIndex })
+      useWidgetContentVersionStore.getState().increment(`computation-result-${targetId}`)
+    }
+    w.__E2E_INCREMENT_WIDGET__ = (computationNodeId: string) => {
+      useWidgetContentVersionStore.getState().increment(`computation-result-${computationNodeId}`)
+    }
+    w.__E2E_RUN_GET_EXTERNAL_STREAMS__ = async (nodeId: string) => {
+      const getNodes = () => useGraphStore.getState().nodes
+      const getEdges = () => useGraphStore.getState().edges
+      const nodes = getNodes()
+      const edges = getEdges()
+      const targetNode = nodes.find((n) => n.id === nodeId)
+      const fileEdgesCount = edges.filter((e) => {
+        if (e.targetId !== nodeId) return false
+        const source = nodes.find((n) => n.id === e.sourceId)
+        return source?.type === 'file'
+      }).length
+      const fn = buildGetExternalStreams(nodeId, getNodes, getEdges)
+      const streams = fn ? await fn() : {}
+      return {
+        streams,
+        _debug: {
+          targetHasInputs: !!targetNode?.inputs?.length,
+          targetInputs: targetNode?.inputs,
+          fileEdgesCount,
+          edgesCount: edges.length,
+          nodesCount: nodes.length,
+        },
+      }
+    }
+    w.__E2E_GET_TOAST_MESSAGES__ = () =>
+      useUIStore.getState().toasts.map((t) => t.message)
+    w.__E2E_SET_NODE_INPUTS__ = (nodeId: string, inputs: Array<{ name: string; type: string }>) => {
+      useGraphStore.getState().setNodeInputs(nodeId, inputs)
+    }
+    return () => {
+      delete w.__E2E_GRAPH_ADD_EDGE__
+      delete w.__E2E_INCREMENT_WIDGET__
+      delete w.__E2E_RUN_GET_EXTERNAL_STREAMS__
+      delete w.__E2E_GET_TOAST_MESSAGES__
+      delete w.__E2E_SET_NODE_INPUTS__
+    }
   }, [])
 
   const handleAddNode = useCallback(

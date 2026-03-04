@@ -12,6 +12,7 @@ export function ToastList() {
 
   return (
     <div
+      data-testid="toast-list"
       style={{
         position: 'fixed',
         bottom: 24,
@@ -40,7 +41,7 @@ export function ToastList() {
             gap: 12,
           }}
         >
-          <span style={{ flex: 1, fontSize: 14 }}>{t.message}</span>
+          <span data-testid="toast-message" style={{ flex: 1, fontSize: 14 }}>{t.message}</span>
           <button
             type="button"
             aria-label="Dismiss"

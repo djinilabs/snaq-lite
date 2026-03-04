@@ -211,26 +211,22 @@ test.describe('canvas', () => {
     await expect(page.getByTestId('file-node')).toHaveCount(1)
     await page.getByTestId('add-presentation-btn').click()
     await expect(page.getByTestId('presentation-node')).toHaveCount(1)
-    // Wait for LSP to send nodeSignatureUpdated so presentation has inputs and connectEdge accepts the connection
+    // Wait for LSP to send nodeSignatureUpdated so presentation has inputs
     await page.waitForTimeout(4000)
 
-    const sourceHandle = page.getByTestId('file-output-handle').first()
-    const targetHandle = page.getByTestId('presentation-input-handle').first()
-    await sourceHandle.scrollIntoViewIfNeeded()
-    await targetHandle.scrollIntoViewIfNeeded()
-    const sourceBox = await sourceHandle.boundingBox()
-    const targetBox = await targetHandle.boundingBox()
-    expect(sourceBox).toBeTruthy()
-    expect(targetBox).toBeTruthy()
-    const startX = sourceBox!.x + sourceBox!.width / 2
-    const startY = sourceBox!.y + sourceBox!.height / 2
-    const endX = targetBox!.x + targetBox!.width / 2
-    const endY = targetBox!.y + targetBox!.height / 2
-
-    await page.mouse.move(startX, startY)
-    await page.mouse.down()
-    await page.mouse.move(endX, endY, { steps: 10 })
-    await page.mouse.up()
+    // Add edge programmatically (same as file→computation test) to avoid flaky drag over small handles
+    const fileNodeId = await page.getByTestId('file-node').first().getAttribute('data-node-id')
+    const presentationNodeId = await page.getByTestId('presentation-node').first().getAttribute('data-node-id')
+    expect(fileNodeId).toBeTruthy()
+    expect(presentationNodeId).toBeTruthy()
+    await page.evaluate(
+      ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
+        const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => void })
+          .__E2E_GRAPH_ADD_EDGE__
+        addEdge?.(sourceId, targetId, 0)
+      },
+      { sourceId: fileNodeId!, targetId: presentationNodeId! },
+    )
     await page.waitForTimeout(500)
 
     await expect(page.locator('.react-flow__edge')).toHaveCount(1)

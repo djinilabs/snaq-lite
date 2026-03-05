@@ -74,6 +74,13 @@ impl WidgetRegistry {
         self.by_id.get(widget_id).and_then(|e| e.cached_value.clone())
     }
 
+    /// Replace the cached value for an existing widget (e.g. after materializing a stream). No-op if widget not found.
+    pub fn update_cached_value(&mut self, widget_id: &str, value: snaq_lite_lang::Value) {
+        if let Some(entry) = self.by_id.get_mut(widget_id) {
+            entry.cached_value = Some(value);
+        }
+    }
+
     /// Remove widget by id. Returns Some(Some(cancel_tx)) if had a consumer, Some(None) for scalar, None if not found.
     pub fn remove(&mut self, widget_id: &str) -> Option<Option<futures::channel::oneshot::Sender<()>>> {
         self.by_id.remove(widget_id).map(|e| e.cancel_tx)

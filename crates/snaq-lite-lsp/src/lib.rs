@@ -721,76 +721,132 @@ impl SnaqLiteBackend {
             })
             .collect();
 
-        let state = self.state.lock().await;
-        let db = state.db();
-        let sub_value = Self::resolve_path(&value, &path_segments, db).ok_or_else(|| {
-            tower_lsp::jsonrpc::Error::invalid_params("Invalid path or value not found")
-        })?;
+        /// Deferred update to run after releasing state lock (keeps future Send).
+        struct PendingUpdate {
+            widget_id: String,
+            materialized: snaq_lite_lang::Value,
+            payload: serde_json::Value,
+        }
 
-        let (elements, total_count) = match &sub_value {
-            snaq_lite_lang::Value::Vector(v) => {
-                let offset = params.offset as usize;
-                let limit = params.limit as usize;
-                let take = snaq_lite_lang::LazyVector::Take {
-                    source: Box::new(v.inner.clone()),
-                    start: offset,
-                    length: limit,
-                };
-                let slice_vec = snaq_lite_lang::collect_vector_stream(db, take);
-                let total_count = {
-                    let stream = snaq_lite_lang::vector_into_stream(db, v.inner.clone());
-                    let count = futures::executor::block_on(async move {
-                        use futures::stream::StreamExt;
-                        stream.fold(0u64, |acc, _| async move { acc + 1 }).await
-                    });
-                    count
-                };
-                let elements: Vec<serde_json::Value> = slice_vec
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, item)| {
-                        match &item {
-                            Ok(Some(val)) => {
-                                let mut elem_path = path_json.clone();
-                                elem_path.push(serde_json::json!((offset + i) as u64));
-                                crate::pubsub::value_to_slice_element(db, val, &elem_path)
-                            }
-                            Ok(None) => serde_json::Value::Null,
-                            Err(e) => serde_json::json!({
-                                "kind": "error",
-                                "message": e.to_string()
-                            }),
+        let (elements, total_count, pending_update) = {
+            let state = self.state.lock().await;
+            let db = state.db();
+            let sub_value = Self::resolve_path(&value, &path_segments, db).ok_or_else(|| {
+                tower_lsp::jsonrpc::Error::invalid_params("Invalid path or value not found")
+            })?;
+
+            let (elements, total_count, pending_update) = match &sub_value {
+                snaq_lite_lang::Value::Vector(v) => {
+                    let offset = params.offset as usize;
+                    let limit = params.limit as usize;
+
+                    // Stream-backed vectors (e.g. CSV FromInput) can only be consumed once. At root, materialize on first fetch; defer cache + notification until after we release state lock.
+                    let (total_count, slice_vec, pending_update): (
+                        u64,
+                        Vec<Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>>,
+                        Option<PendingUpdate>,
+                    ) = match (&v.inner, path_segments.is_empty()) {
+                        (snaq_lite_lang::LazyVector::FromInput(_), true) => {
+                            let collected =
+                                snaq_lite_lang::collect_vector_stream(db, v.inner.clone());
+                            let len = collected.len() as u64;
+                            let materialized = snaq_lite_lang::Value::Vector(
+                                snaq_lite_lang::VectorValue {
+                                    inner: snaq_lite_lang::LazyVector::FromEvaluated(collected.clone()),
+                                    orientation: v.orientation,
+                                },
+                            );
+                            let payload = Self::build_completed_payload(&materialized, db);
+                            let start = offset.min(collected.len());
+                            let end = (offset + limit).min(collected.len());
+                            let slice_vec: Vec<_> = collected[start..end].to_vec();
+                            let pending = PendingUpdate {
+                                widget_id: params.widget_id.clone(),
+                                materialized,
+                                payload,
+                            };
+                            (len, slice_vec, Some(pending))
                         }
-                    })
-                    .collect();
-                (elements, total_count)
-            }
-            snaq_lite_lang::Value::Map(id) => {
-                use snaq_lite_lang::map_registry;
-                let entries = map_registry::get(*id).unwrap_or_default();
-                let total_count = entries.len() as u64;
-                let offset = (params.offset as usize).min(entries.len());
-                let end = (offset + params.limit as usize).min(entries.len());
-                let slice_entries = &entries[offset..end];
-                let elements: Vec<serde_json::Value> = slice_entries
-                    .iter()
-                    .map(|(k, val)| {
-                        let mut elem_path = path_json.clone();
-                        elem_path.push(serde_json::json!(k));
-                        serde_json::json!({
-                            "key": k,
-                            "value": crate::pubsub::value_to_slice_element(db, val, &elem_path)
+                        (_, _) => {
+                            let total_count = {
+                                let stream = snaq_lite_lang::vector_into_stream(db, v.inner.clone());
+                                futures::executor::block_on(async move {
+                                    use futures::stream::StreamExt;
+                                    stream.fold(0u64, |acc, _| async move { acc + 1 }).await
+                                })
+                            };
+                            let take = snaq_lite_lang::LazyVector::Take {
+                                source: Box::new(v.inner.clone()),
+                                start: offset,
+                                length: limit,
+                            };
+                            let slice_vec = snaq_lite_lang::collect_vector_stream(db, take);
+                            (total_count, slice_vec, None)
+                        }
+                    };
+
+                    let elements: Vec<serde_json::Value> = slice_vec
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, item)| {
+                            match &item {
+                                Ok(Some(val)) => {
+                                    let mut elem_path = path_json.clone();
+                                    elem_path.push(serde_json::json!((offset + i) as u64));
+                                    crate::pubsub::value_to_slice_element(db, val, &elem_path)
+                                }
+                                Ok(None) => serde_json::Value::Null,
+                                Err(e) => serde_json::json!({
+                                    "kind": "error",
+                                    "message": e.to_string()
+                                }),
+                            }
                         })
-                    })
-                    .collect();
-                (elements, total_count)
-            }
-            _ => {
-                return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                    "Path does not refer to a vector or map",
-                ));
-            }
+                        .collect();
+                    (elements, total_count, pending_update)
+                }
+                snaq_lite_lang::Value::Map(id) => {
+                    use snaq_lite_lang::map_registry;
+                    let entries = map_registry::get(*id).unwrap_or_default();
+                    let total_count = entries.len() as u64;
+                    let offset = (params.offset as usize).min(entries.len());
+                    let end = (offset + params.limit as usize).min(entries.len());
+                    let slice_entries = &entries[offset..end];
+                    let elements: Vec<serde_json::Value> = slice_entries
+                        .iter()
+                        .map(|(k, val)| {
+                            let mut elem_path = path_json.clone();
+                            elem_path.push(serde_json::json!(k));
+                            serde_json::json!({
+                                "key": k,
+                                "value": crate::pubsub::value_to_slice_element(db, val, &elem_path)
+                            })
+                        })
+                        .collect();
+                    (elements, total_count, None)
+                }
+                _ => {
+                    return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                        "Path does not refer to a vector or map",
+                    ));
+                }
+            };
+            (elements, total_count, pending_update)
         };
+
+        if let Some(pending) = pending_update {
+            let mut w = self.widgets.lock().await;
+            w.update_cached_value(&pending.widget_id, pending.materialized);
+            drop(w);
+            let _ = self
+                .client
+                .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                    widget_id: pending.widget_id,
+                    status: WidgetDataStatus::Completed,
+                    payload: Some(pending.payload),
+                })
+                .await;
+        }
 
         let has_more = params.offset + (elements.len() as u64) < total_count;
         Ok(FetchResultSliceResponse {

@@ -1,12 +1,18 @@
 /**
  * Dumb display: consumes streamed elements / display strings. Can be extended with Recharts/Chart.js.
  * Uses TEXT_WRAP_STYLE so long content (errors, display, counts) wraps and does not expand the block.
+ *
+ * When the backend sends "Vector (0 elements)" for a stream-backed result (e.g. CSV), it hasn't
+ * materialized the stream yet. We trigger a one-time fetchResultSlice so the backend materializes,
+ * caches, and sends a follow-up widget update with the real count—then the summary updates without
+ * the user having to open "View details".
  */
 
-import { useCallback } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import type { CSSProperties } from 'react'
 import type { WidgetState } from '~/store'
 import { useUIStore } from '~/store'
+import { fetchResultSlice } from '~/lsp/fetch-result-slice'
 
 /** Applied so long text wraps inside constrained result areas and does not expand the node. */
 const TEXT_WRAP_STYLE: CSSProperties = {
@@ -77,7 +83,32 @@ interface WidgetDataViewProps {
   onViewDetails?: (widgetId: string) => void
 }
 
+/** Widget IDs we've already triggered a materialize fetch for (stream-backed "Vector (0 elements)"). */
+const materializeTriggeredFor = new Set<string>()
+
 export function WidgetDataView({ state, widgetId, onViewDetails }: WidgetDataViewProps) {
+  // When we show "Vector (0 elements)" for a stream-backed result, one-time fetch to trigger backend materialization so the real count is sent and the summary updates.
+  useEffect(() => {
+    if (
+      !widgetId ||
+      state?.status !== 'Completed' ||
+      state?.payload?.resultType?.toLowerCase() !== 'vector' ||
+      state?.payload?.totalElements !== 0 ||
+      materializeTriggeredFor.has(widgetId)
+    ) {
+      return
+    }
+    materializeTriggeredFor.add(widgetId)
+    void fetchResultSlice({
+      widgetId,
+      path: [],
+      offset: 0,
+      limit: 1,
+    }).catch(() => {
+      materializeTriggeredFor.delete(widgetId)
+    })
+  }, [widgetId, state?.status, state?.payload?.resultType, state?.payload?.totalElements])
+
   if (!state) {
     return (
       <span

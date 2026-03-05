@@ -7,6 +7,7 @@ Programs can refer to **external stream inputs** using the `$name` syntax. The H
 - **Syntax:** `$` followed by an identifier (e.g. `$sales_data`, `$readings`).
 - **Meaning:** The expression denotes an external stream identified by `name`. The name is looked up in a **stream input registry** provided by the Host at run time. The registry maps names to **stream handles**, not to the data itself.
 - **Use in expressions:** You can use `$name` anywhere a vector is valid. For example: `$sales_data * 2`, `$readings.sum()`, `take($log, 0, 100)`.
+- **Browser (WASM):** When a computation input is wired from a file block, you **must** use `$name` in the expression (e.g. `$aa * 10`). Do not use the bare name `aa` — the stream is not bound to the identifier in the browser, so `aa * 10` would fail or hang.
 
 If the Host runs a program that uses `$name` but does **not** set the stream input registry (or does not register that name), evaluation fails with **unbound stream input: name**.
 
@@ -21,7 +22,7 @@ The Host pushes data in **chunks**. Each chunk is a list of elements in the runt
 
 ## Host workflow
 
-1. **Create a channel** (e.g. an unbounded sender/receiver pair) whose items are **chunks** in the format above.
+1. **Create a channel** (bounded sender/receiver; see **Back-pressure** in WASM Host) whose items are **chunks** in the format above.
 2. **Register the receiver:** Call the library’s **register** function with the receiver; it returns a **stream handle id**. The receiver is single-consumer: it is taken by the runtime when the stream is driven.
 3. **Build the stream input map:** Map each name used in the program (e.g. `"sales_data"`) to the corresponding stream handle id.
 4. **Run with stream inputs:** Call **run_with_stream_inputs**(input, unit_registry, stream_input_map). You get back the evaluated **Value** and the **database**. If the result is a vector (e.g. `$sales_data * 2`), it is a pipeline that reads from the registered stream.
@@ -39,10 +40,14 @@ The Host pushes data in **chunks**. Each chunk is a list of elements in the runt
 
 When the runtime runs as WebAssembly in the browser, the Host has no access to the native file system. Data must come from browser APIs (e.g. `fetch()` response body, `File.stream()` from an file input). The WASM build exposes a Host API that uses **single-threaded async**: channels and streams are driven via `wasm-bindgen-futures` so the main thread is not blocked and the UI stays responsive.
 
+### Back-pressure
+
+The stream channel is **bounded** (capacity 4 chunks). When the channel is full, **send** in the feeder yields until the consumer drains a chunk. So the feeder is back-pressured and never pushes as fast as possible, which keeps memory bounded for large files.
+
 ### I/O safeguards
 
-- **No file paths:** All input is from JS: pass a `ReadableStream` (e.g. `response.body` or `file.stream()`) into the feeder, or build chunks in JS and call `pushChunk(streamIndex, array)`.
-- **Memory limit:** WASM is constrained to a 4GB address space. The Host must not load entire files into memory; use chunked reading and fixed-size batches (e.g. 8,192 rows per chunk when parsing).
+- **No file paths:** All input is from JS: pass a URL or a `ReadableStream` (e.g. `response.body` or `file.stream()`) to the worker via **feedStreamFromUrl** or **feedStreamFromReadableStream**, or build chunks in JS and call `pushChunk(streamIndex, array)`.
+- **Memory limit:** WASM is constrained to a 4GB address space. The Host must not load entire files into memory; use chunked reading and fixed-size batches (e.g. 8,192 rows per chunk when parsing). Bounded send ensures the feeder does not run ahead of the consumer.
 - **Event-loop yielding:** The consumer and feeder yield to the browser event loop periodically (consumer: every 16 elements; feeder: every 4 read calls) so the tab can paint and handle input. These intervals are fixed; a future version could expose them as options.
 - **Indices:** Stream and run indices are not reclaimed; slots grow with use over the page lifetime. For long-lived apps with many runs, consider reusing a small set of stream inputs where possible.
 
@@ -52,7 +57,10 @@ When the runtime runs as WebAssembly in the browser, the Host has no access to t
 - **runWithStreamInputs(script, streamInputMap)** → `{ runIndex, isVector }`. `streamInputMap` is a JS object mapping stream names to **non-negative integer** stream indices from `createStreamInput` (e.g. `{ data: 0 }`). Returns a run index for consumption.
 - **pushChunk(streamIndex, array)** — Push a chunk: `array` is a JS array of numbers (or `null` for sparse). Converts to scalar dimensionless values (variance 0). Fails if the stream was already closed.
 - **closeStream(streamIndex)** — Signal end-of-stream for that stream. After this, `pushChunk` for this index will fail.
-- **startFeeder(streamIndex, readableStream)** — Start an async task that reads from the JS `ReadableStream`, parses **newline-delimited numbers**, pushes chunks, and yields to the event loop. When the ReadableStream ends or a read fails, the feeder closes the stream (consumer sees EOF). For other formats (CSV, Parquet, etc.), parse in JS and use `pushChunk` instead.
+- **startFeeder(streamIndex, readableStream)** — Start an async task that reads from the JS `ReadableStream`, parses **newline-delimited numbers**, pushes chunks with **send().await** (back-pressure), and drops the sender when done.
+- **startCsvFeeder(streamIndex, readableStream)** — Same as above but parses **CSV**: first line = headers, rest = data rows; each row is converted to a **map** (column name → number). Pushes row-as-map chunks with back-pressure. Delimiter is comma or semicolon (auto-detected from first line).
+- **pushChunkMaps(streamIndex, rowsJs)** — Push a chunk of row-as-map values from JS (array of objects: each object = column name → number). Used when the client has already parsed rows and wants to push map chunks.
+- **Format hint:** The worker messages **feedStreamFromUrl** and **feedStreamFromReadableStream** accept an optional **format** (`"numeric"` | `"csv"`). When `format === "csv"`, the worker calls **startCsvFeeder** instead of **startFeeder**. The client infers format from URL (e.g. `.csv`) or file type (e.g. `text/csv`).
 - **consumeOutputStream(runIndex, onChunk, onDone, onError)** — Drive the output stream: `onChunk(element)` for each element (number for numeric, `null` for sparse/undefined, or object `{ uncertain: p }` for fuzzy boolean), `onDone()` at end, `onError(message)` when the run result is invalid or the stream yields an error. Yields every 16 elements. **Callbacks must not throw**; if they do, behavior is unspecified.
 
 ### Host execution loop
@@ -64,7 +72,12 @@ When the runtime runs as WebAssembly in the browser, the Host has no access to t
 
 ### File blocks in the graph UI
 
-In the graph UI, **file blocks** are output-only nodes that hold a URL (e.g. a dropped file as a blob URL). When a file block is connected to a computation or presentation input, the UI binds that input via **external streams**: before subscribing the widget, the frontend builds a map from input name to stream index by creating streams (e.g. `createStreamInput`), feeding them from the file URL (fetch + parse), then passing that map as `externalStreams` in the subscribe request. The current browser implementation feeds data with **numeric-only** content: newline-delimited numbers (or a single column). Other formats would require parsing in JS and calling `pushChunk` with the appropriate chunk shape.
+In the graph UI, **file blocks** are output-only nodes that hold a URL (e.g. a dropped file as a blob URL, or `indexeddb://projectId/nodeId` for persisted files). When a file block is connected to a computation or presentation input, the frontend builds a map from input name to stream index by calling `createStreamInput`, then **feeding** the stream in the worker so that parsing runs in WASM with back-pressure:
+
+- **feedStreamFromUrl(streamIndex, url, format?)** — For fetchable URLs (`https:`, `data:`), the client sends the URL and optional format (`"numeric"` | `"csv"`). The worker fetches and runs **startFeeder** (newline-delimited) or **startCsvFeeder** (row-as-map) according to format. Parsing and send happen in the worker with back-pressure.
+- **feedStreamFromReadableStream(streamIndex, stream, format?)** — For blob or IndexedDB-backed files, the client resolves the URL to a `ReadableStream` (e.g. `blob.stream()`), then sends the stream (and optional format) to the worker (transferable); the worker runs **startFeeder** or **startCsvFeeder** on it.
+
+So the client sends **only the URL or the stream**; the worker fetches/reads and parses. For URLs that cannot be fetched by the worker (e.g. `indexeddb://` when the client must read from IDB), the client gets a `ReadableStream` from the blob and uses **feedStreamFromReadableStream**. Fallback: when `blob.stream` is not available, the client fetches/reads, parses in JS, and calls `pushChunk` / `closeStream`.
 
 ## CLI
 

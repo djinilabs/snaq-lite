@@ -770,7 +770,7 @@ fn run_node_with_graph_inputs_impl(
             };
         let mut senders_by_source: std::collections::HashMap<
             Url,
-            Vec<futures::channel::mpsc::UnboundedSender<snaq_lite_lang::Chunk>>,
+            Vec<snaq_lite_lang::StreamChunkSender>,
         > = std::collections::HashMap::new();
         for (name, source_uri) in incoming {
             if stream_inputs.contains_key(name) {
@@ -809,24 +809,45 @@ fn run_node_with_graph_inputs_impl(
 }
 
 /// Feed one upstream value to multiple Chunk senders (one handle per edge when one source feeds multiple inputs).
+/// Uses bounded send (block_on on native, spawn_local on WASM) for back-pressure.
 fn feed_value_to_senders(
     value: &snaq_lite_lang::Value,
     db: &salsa::DatabaseImpl,
-    senders: Vec<futures::channel::mpsc::UnboundedSender<snaq_lite_lang::Chunk>>,
+    senders: Vec<snaq_lite_lang::StreamChunkSender>,
 ) {
+    use futures::sink::SinkExt;
+
     match value {
         snaq_lite_lang::Value::Vector(v) => {
             let collected = snaq_lite_lang::collect_vector_stream(db, v.inner.clone());
-            for sender in senders {
-                let _ = sender.unbounded_send(collected.clone());
-                drop(sender);
+            for mut sender in senders {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let _ = futures::executor::block_on(sender.send(collected.clone()));
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let chunk = collected.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let _ = sender.send(chunk).await;
+                    });
+                }
             }
         }
         _ => {
             let chunk = vec![Ok(Some(value.clone()))];
-            for sender in senders {
-                let _ = sender.unbounded_send(chunk.clone());
-                drop(sender);
+            for mut sender in senders {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let _ = futures::executor::block_on(sender.send(chunk.clone()));
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let c = chunk.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let _ = sender.send(c).await;
+                    });
+                }
             }
         }
     }

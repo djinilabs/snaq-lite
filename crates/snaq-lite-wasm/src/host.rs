@@ -5,9 +5,10 @@ use wasm_bindgen::{JsCast, JsValue};
 
 use futures::stream::StreamExt;
 use web_sys::ReadableStreamDefaultReader;
+use futures::sink::SinkExt;
 use snaq_lite_lang::{
     create_stream_input, default_si_registry, run_with_stream_inputs, vector_into_stream,
-    Chunk, FuzzyBool, Quantity, SnaqNumber, StreamHandleId, Unit, Value,
+    Chunk, FuzzyBool, Quantity, SnaqNumber, StreamChunkSender, StreamHandleId, Unit, Value,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -17,10 +18,10 @@ const CONSUMER_YIELD_EVERY: u32 = 16;
 /// Yield to the event loop every this many read() calls in the feeder loop.
 const FEEDER_YIELD_EVERY: u32 = 4;
 
-/// Host-held stream: handle id (for Salsa registry) and sender (for pushing chunks).
+/// Host-held stream: handle id (for Salsa registry) and sender (None after close or when feeder owns it).
 struct HostStreamHandle {
     id: StreamHandleId,
-    sender: futures::channel::mpsc::UnboundedSender<Chunk>,
+    sender: RefCell<Option<StreamChunkSender>>,
 }
 
 type RunResultSlot = RefCell<Option<(Value, salsa::DatabaseImpl)>>;
@@ -39,17 +40,21 @@ pub fn create_stream_input_host() -> u32 {
     STREAM_HANDLES.with(|handles| {
         let mut h = handles.borrow_mut();
         let index = h.len();
-        h.push(HostStreamHandle { id, sender });
+        h.push(HostStreamHandle {
+            id,
+            sender: RefCell::new(Some(sender)),
+        });
         index as u32
     })
 }
 
-/// Look up StreamHandleId and Sender by index. Returns None if index is invalid.
-fn get_stream_handle(index: u32) -> Option<(StreamHandleId, futures::channel::mpsc::UnboundedSender<Chunk>)> {
+/// Look up StreamHandleId and Sender by index. Returns None if index is invalid or stream closed.
+fn get_stream_handle(index: u32) -> Option<(StreamHandleId, StreamChunkSender)> {
     STREAM_HANDLES.with(|handles| {
         let h = handles.borrow();
         let i = index as usize;
-        h.get(i).map(|x| (x.id, x.sender.clone()))
+        h.get(i)
+            .and_then(|x| x.sender.borrow().as_ref().map(|s| (x.id, s.clone())))
     })
 }
 
@@ -129,23 +134,28 @@ pub fn js_array_to_chunk(arr: &js_sys::Array) -> Result<Chunk, JsValue> {
     Ok(chunk)
 }
 
-/// Push a chunk to a stream by index. Returns Ok(()) or error string.
+/// Push a chunk to a stream by index. Spawns send in background so JS thread is not blocked.
 pub fn push_chunk_host(stream_index: u32, chunk_js: &js_sys::Array) -> Result<(), JsValue> {
-    let (_, sender) = get_stream_handle(stream_index)
-        .ok_or_else(|| JsValue::from_str(&format!("stream index {stream_index} not found")))?;
+    let sender = get_stream_handle(stream_index)
+        .map(|(_, s)| s)
+        .ok_or_else(|| JsValue::from_str(&format!("stream index {stream_index} not found or closed")))?;
     let chunk = js_array_to_chunk(chunk_js)?;
-    sender
-        .unbounded_send(chunk)
-        .map_err(|_| JsValue::from_str("stream sender closed"))?;
+    wasm_bindgen_futures::spawn_local(async move {
+        let mut s = sender;
+        let _ = s.send(chunk).await;
+    });
     Ok(())
 }
 
 /// Close the stream (signal EOF). After this, pushChunk will fail.
 pub fn close_stream_host(stream_index: u32) -> Result<(), JsValue> {
-    let (_, sender) = get_stream_handle(stream_index)
-        .ok_or_else(|| JsValue::from_str(&format!("stream index {stream_index} not found")))?;
-    sender.close_channel();
-    Ok(())
+    STREAM_HANDLES.with(|handles| {
+        let mut h = handles.borrow_mut();
+        let i = stream_index as usize;
+        let handle = h.get_mut(i).ok_or_else(|| JsValue::from_str(&format!("stream index {stream_index} not found")))?;
+        handle.sender = RefCell::new(None);
+        Ok(())
+    })
 }
 
 /// Take the (Value, Database) for a run index. Returns None if already consumed or invalid index.
@@ -281,13 +291,18 @@ fn parse_newline_delimited_numbers(
 }
 
 /// Start a feeder task that reads from a JS ReadableStream, parses newline-delimited numbers,
-/// and pushes chunks to the stream. Yields to the event loop after each read. Closes the sender when done.
+/// and pushes chunks with send().await (back-pressure). Drops the sender when done.
 pub fn start_feeder_host(
     stream_index: u32,
     readable_stream: JsValue,
 ) -> Result<(), JsValue> {
-    let (_, sender) = get_stream_handle(stream_index)
-        .ok_or_else(|| JsValue::from_str(&format!("stream index {stream_index} not found")))?;
+    let sender = STREAM_HANDLES.with(|handles| {
+        let mut h = handles.borrow_mut();
+        let i = stream_index as usize;
+        h.get_mut(i)
+            .and_then(|handle| handle.sender.borrow_mut().take())
+            .ok_or_else(|| JsValue::from_str(&format!("stream index {stream_index} not found or already feeding")))
+    })?;
 
     let stream = readable_stream
         .dyn_into::<web_sys::ReadableStream>()
@@ -296,15 +311,13 @@ pub fn start_feeder_host(
     wasm_bindgen_futures::spawn_local(async move {
         let reader = match ReadableStreamDefaultReader::new(&stream) {
             Ok(r) => r,
-            Err(_) => {
-                sender.close_channel();
-                return;
-            }
+            Err(_) => return,
         };
 
         let scalar = Unit::scalar();
         let mut buffer = Vec::<u8>::new();
         let mut read_count = 0u32;
+        let mut sender = sender;
 
         loop {
             let promise = reader.read();
@@ -322,7 +335,7 @@ pub fn start_feeder_host(
                 if !buffer.is_empty() {
                     let (chunk, _) = parse_newline_delimited_numbers(&buffer, &scalar);
                     if !chunk.is_empty() {
-                        let _ = sender.unbounded_send(chunk);
+                        let _ = sender.send(chunk).await;
                     }
                 }
                 break;
@@ -340,17 +353,17 @@ pub fn start_feeder_host(
 
             let (chunk, remainder) = parse_newline_delimited_numbers(&buffer, &scalar);
             buffer = remainder;
-            if !chunk.is_empty() && sender.unbounded_send(chunk).is_err() {
+            if !chunk.is_empty() && sender.send(chunk).await.is_err() {
                 break;
             }
 
             read_count += 1;
-            if read_count.is_multiple_of(FEEDER_YIELD_EVERY) {
+            if read_count % FEEDER_YIELD_EVERY == 0 {
                 yield_to_event_loop().await;
             }
         }
 
-        sender.close_channel();
+        drop(sender);
     });
 
     Ok(())

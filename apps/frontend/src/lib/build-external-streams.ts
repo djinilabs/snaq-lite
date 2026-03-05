@@ -1,19 +1,23 @@
 /**
  * Build getExternalStreams for subscribeWidget when the node has inputs wired from file blocks.
- * Creates streams via worker, feeds from file URL (parse in JS, then pushChunk), returns input name → stream index.
+ * Prefers worker-side feed: send URL (fetchable) or ReadableStream (blob/indexeddb) so the worker fetches/reads
+ * and parses in WASM with back-pressure. Falls back to main-thread fetch + parse + pushChunk when stream is not available.
  *
- * In the browser the WASM Host has no file access: it only receives chunks we push. The Host API's startFeeder
- * only parses newline-delimited numbers; for CSV the docs require "parse in JS and use pushChunk" (see
- * docs/EXTERNAL_STREAMS.md "WASM Host (browser)"). CSV/tabular parsing in Rust (snaq-lite-ingest) is used by
- * the CLI where the binary reads files from disk; here we parse in the frontend and push numeric chunks.
- *
- * For blob URLs we read from a cache (populated on file drop) to avoid fetch(blobUrl) which can fail in some environments.
- * For indexeddb:// refs we read from IndexedDB and feed in chunks (streaming) so large files are not fully materialized.
+ * - Fetchable URLs (https:, data:): sendFeedStreamFromUrl(index, url) — worker fetches and runs startFeeder (newline-delimited).
+ * - Blob/indexeddb with blob.stream(): sendFeedStreamFromReadableStream(index, stream) — worker runs startFeeder.
+ * - Otherwise: parse in JS and pushChunk (e.g. CSV until worker supports it, or when blob.stream is missing).
  */
 
 import type { GraphEdge, GraphNode } from '~/store'
 import { useUIStore } from '~/store'
-import { requestCreateStreamInput, sendStreamChunk, closeStream } from '~/lsp/message-router'
+import type { FeedStreamFormat } from '~/lsp/message-router'
+import {
+  requestCreateStreamInput,
+  sendStreamChunk,
+  closeStream,
+  sendFeedStreamFromUrl,
+  sendFeedStreamFromReadableStream,
+} from '~/lsp/message-router'
 import { getBlobForUrl } from '~/lib/blob-url-cache'
 import { getFileBlob } from '~/lib/file-blob-idb'
 
@@ -77,6 +81,13 @@ function chooseParser(text: string, fileType?: string): 'csv' | 'newline' {
   const firstLine = text.split(/\r?\n/).find((l) => l.trim() !== '')
   if (firstLine?.includes(',') || firstLine?.includes(';')) return 'csv'
   return 'newline'
+}
+
+/** Infer worker feed format from URL or file type (for feedStreamFromUrl / feedStreamFromReadableStream). Exported for tests. */
+export function getFeedFormat(url?: string, fileType?: string): FeedStreamFormat | undefined {
+  if (fileType?.toLowerCase().includes('csv')) return 'csv'
+  if (url && /\.csv$/i.test(url)) return 'csv'
+  return 'numeric'
 }
 
 /**
@@ -235,25 +246,46 @@ async function urlToText(url: string): Promise<string> {
 }
 
 /**
- * Feed URL (indexeddb://, blob:, data:, or https:) to stream. For indexeddb and blob we feed in chunks (streaming).
- * For data/https we fetch full text then parse and push batches. Returns the stream index.
+ * Feed URL to stream. Prefers worker-side feed (URL or ReadableStream) for back-pressure; falls back to JS parse + pushChunk.
  */
 async function feedUrlToStream(url: string, fileType?: string): Promise<number> {
+  const index = await requestCreateStreamInput()
+
+  const format = getFeedFormat(url, fileType)
+
+  if (url.startsWith('https:') || url.startsWith('data:')) {
+    sendFeedStreamFromUrl(index, url, format)
+    return index
+  }
+
   if (url.startsWith('indexeddb://')) {
     const ref = parseIndexedDbRef(url)
     if (!ref) throw new Error('Invalid indexeddb URL. Re-add the file.')
     const blob = await getFileBlob(ref.projectId, ref.nodeId)
     if (!blob) throw new Error('File not found in storage. Re-add the file.')
+    const blobWithStream = blob as Blob & { stream?: () => ReadableStream }
+    if (typeof blobWithStream.stream === 'function') {
+      sendFeedStreamFromReadableStream(index, blobWithStream.stream(), format)
+      return index
+    }
     return feedBlobToStreamInChunks(blob, fileType)
   }
+
   if (url.startsWith('blob:')) {
     const blob = getBlobForUrl(url)
-    if (blob) return feedBlobToStreamInChunks(blob, fileType)
-    throw new Error(
-      'File not available after reload. Blob URLs are only valid in the same session. Please re-drop the file.',
-    )
+    if (!blob) {
+      throw new Error(
+        'File not available after reload. Blob URLs are only valid in the same session. Please re-drop the file.',
+      )
+    }
+    const blobWithStream = blob as Blob & { stream?: () => ReadableStream }
+    if (typeof blobWithStream.stream === 'function') {
+      sendFeedStreamFromReadableStream(index, blobWithStream.stream(), format)
+      return index
+    }
+    return feedBlobToStreamInChunks(blob, fileType)
   }
-  const index = await requestCreateStreamInput()
+
   let chunkCount = 0
   try {
     const rawText = await urlToText(url)

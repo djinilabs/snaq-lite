@@ -3,6 +3,8 @@
  * First message from main must be { type: WORKER_MSG_INIT, wasmUrl: string }.
  * Host stream API: { type: 'createStreamInput', id } → response { type: 'createStreamInputResponse', id, index } or { type, id, error }.
  * { type: 'pushChunk', index, chunk: number[] }; { type: 'closeStream', index }.
+ * { type: 'feedStreamFromUrl', streamIndex, url } — worker fetches URL and runs startFeeder (back-pressure).
+ * { type: 'feedStreamFromReadableStream', streamIndex, stream } — main thread passes stream (transferable).
  * All other messages are raw LSP JSON-RPC strings, forwarded to push_lsp_message after WASM is ready.
  */
 
@@ -23,6 +25,8 @@ let pushLspMessageRef: ((s: string) => void) | null = null
 let createStreamInputJs: (() => number) | null = null
 let pushChunkJs: ((index: number, chunk: number[]) => void) | null = null
 let closeStreamJs: ((index: number) => void) | null = null
+let startFeederJs: ((streamIndex: number, readableStream: ReadableStream) => void) | null = null
+let startCsvFeederJs: ((streamIndex: number, readableStream: ReadableStream) => void) | null = null
 const buffer: string[] = []
 
 function sendReady(): void {
@@ -55,6 +59,8 @@ async function loadWasm(wasmUrl: string): Promise<void> {
     createStreamInputJs = typeof mod.create_stream_input_js === 'function' ? mod.create_stream_input_js : null
     pushChunkJs = typeof mod.push_chunk_js === 'function' ? mod.push_chunk_js : null
     closeStreamJs = typeof mod.close_stream_js === 'function' ? mod.close_stream_js : null
+    startFeederJs = typeof mod.start_feeder_js === 'function' ? mod.start_feeder_js : null
+    startCsvFeederJs = typeof mod.start_csv_feeder_js === 'function' ? mod.start_csv_feeder_js : null
     wasmReady = true
     sendReady()
     for (const s of buffer) {
@@ -69,8 +75,55 @@ async function loadWasm(wasmUrl: string): Promise<void> {
   }
 }
 
-function handleStreamHostMessage(parsed: { type?: string; id?: number; index?: number; chunk?: number[] }): boolean {
+/** Format hint: 'csv' = row-as-map CSV; 'numeric' or omit = newline-delimited numbers. */
+type FeedFormat = 'numeric' | 'csv'
+
+function handleStreamHostMessage(parsed: {
+  type?: string
+  id?: number
+  index?: number
+  chunk?: number[]
+  url?: string
+  stream?: ReadableStream
+  format?: FeedFormat
+}): boolean {
   if (!parsed || typeof parsed.type !== 'string') return false
+  if (parsed.type === 'feedStreamFromUrl' && typeof parsed.streamIndex === 'number' && typeof parsed.url === 'string') {
+    const format: FeedFormat = parsed.format === 'csv' ? 'csv' : 'numeric'
+    const useCsv = format === 'csv' && startCsvFeederJs
+    const feeder = useCsv ? startCsvFeederJs : startFeederJs
+    if (wasmReady && feeder) {
+      const streamIndex = parsed.streamIndex
+      const url = parsed.url
+      ;(async () => {
+        try {
+          const res = await fetch(url)
+          if (!res.body || !res.ok) return
+          feeder(streamIndex, res.body)
+        } catch {
+          // ignore fetch error
+        }
+      })()
+    }
+    return true
+  }
+  if (
+    parsed.type === 'feedStreamFromReadableStream' &&
+    typeof parsed.streamIndex === 'number' &&
+    parsed.stream instanceof ReadableStream
+  ) {
+    const format: FeedFormat = parsed.format === 'csv' ? 'csv' : 'numeric'
+    const useCsv = format === 'csv' && startCsvFeederJs
+    const feeder = useCsv ? startCsvFeederJs : startFeederJs
+    if (wasmReady && feeder) {
+      try {
+        feeder(parsed.streamIndex, parsed.stream)
+      } catch {
+        // ignore
+      }
+    }
+    return true
+  }
   if (parsed.type === 'createStreamInput') {
     if (wasmReady && createStreamInputJs) {
       try {
@@ -110,12 +163,20 @@ function handleStreamHostMessage(parsed: { type?: string; id?: number; index?: n
   return false
 }
 
-self.onmessage = (event: MessageEvent<string>) => {
+self.onmessage = (event: MessageEvent<string | { type?: string; wasmUrl?: string; streamIndex?: number; url?: string; stream?: ReadableStream }>) => {
   const data = event.data
+  if (typeof data === 'object' && data !== null) {
+    if (data.type === WORKER_MSG_INIT && typeof data.wasmUrl === 'string') {
+      loadWasm(data.wasmUrl)
+      return
+    }
+    if (handleStreamHostMessage(data)) return
+    return
+  }
   if (typeof data !== 'string') return
 
   try {
-    const parsed = JSON.parse(data) as { type?: string; wasmUrl?: string }
+    const parsed = JSON.parse(data) as { type?: string; wasmUrl?: string; streamIndex?: number; url?: string }
     if (parsed && parsed.type === WORKER_MSG_INIT && typeof parsed.wasmUrl === 'string') {
       loadWasm(parsed.wasmUrl)
       return

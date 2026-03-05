@@ -8,17 +8,24 @@ import {
   parseCsvToNumbers,
   stripBom,
   buildGetExternalStreams,
+  getFeedFormat,
 } from './build-external-streams'
 
 const mockRequestCreateStreamInput = vi.fn()
 const mockSendStreamChunk = vi.fn()
 const mockCloseStream = vi.fn()
+const mockSendFeedStreamFromUrl = vi.fn()
+const mockSendFeedStreamFromReadableStream = vi.fn()
 const mockGetBlobForUrl = vi.fn()
 vi.mock('~/lsp/message-router', () => ({
   requestCreateStreamInput: (...args: unknown[]) =>
     mockRequestCreateStreamInput(...args),
   sendStreamChunk: (...args: unknown[]) => mockSendStreamChunk(...args),
   closeStream: (...args: unknown[]) => mockCloseStream(...args),
+  sendFeedStreamFromUrl: (...args: unknown[]) =>
+    mockSendFeedStreamFromUrl(...args),
+  sendFeedStreamFromReadableStream: (...args: unknown[]) =>
+    mockSendFeedStreamFromReadableStream(...args),
 }))
 vi.mock('~/lib/blob-url-cache', () => ({
   getBlobForUrl: (url: string) => mockGetBlobForUrl(url),
@@ -123,6 +130,30 @@ describe('parseCsvToNumbers', () => {
   it('handles semicolon-delimited CSV (e.g. European locale)', () => {
     const csv = '10;;;;;;\n20;;;;;;\n30;;;;;;'
     expect([...parseCsvToNumbers(csv)]).toEqual([[10, 20, 30]])
+  })
+})
+
+describe('getFeedFormat', () => {
+  it('returns "csv" when fileType includes csv (case-insensitive)', () => {
+    expect(getFeedFormat(undefined, 'text/csv')).toBe('csv')
+    expect(getFeedFormat(undefined, 'application/csv')).toBe('csv')
+    expect(getFeedFormat(undefined, 'TEXT/CSV')).toBe('csv')
+  })
+
+  it('returns "csv" when URL ends with .csv (case-insensitive)', () => {
+    expect(getFeedFormat('https://example.com/data.CSV')).toBe('csv')
+    expect(getFeedFormat('https://example.com/path/to/file.csv')).toBe('csv')
+    expect(getFeedFormat('blob:https://example.com/abc.csv')).toBe('csv')
+  })
+
+  it('returns "numeric" when no CSV hint', () => {
+    expect(getFeedFormat()).toBe('numeric')
+    expect(getFeedFormat('https://example.com/data.txt')).toBe('numeric')
+    expect(getFeedFormat(undefined, 'text/plain')).toBe('numeric')
+  })
+
+  it('prefers fileType over URL when both suggest CSV', () => {
+    expect(getFeedFormat('https://x.com/d.csv', 'text/csv')).toBe('csv')
   })
 })
 
@@ -255,11 +286,6 @@ describe('buildGetExternalStreams', () => {
 
   it('getter returns name → index and feeds stream when one file edge with url', async () => {
     mockRequestCreateStreamInput.mockResolvedValue(0)
-    const fetchMock = vi.mocked(globalThis.fetch)
-    fetchMock.mockResolvedValue({
-      ok: true,
-      text: () => Promise.resolve('1\n2\n3'),
-    } as Response)
 
     const getter = buildGetExternalStreams(
       'target',
@@ -285,20 +311,19 @@ describe('buildGetExternalStreams', () => {
     const result = await getter!()
     expect(result).toEqual({ x: 0 })
     expect(mockRequestCreateStreamInput).toHaveBeenCalledTimes(1)
-    expect(mockSendStreamChunk).toHaveBeenCalledWith(0, [1, 2, 3])
-    expect(mockCloseStream).toHaveBeenCalledWith(0)
+    expect(mockSendFeedStreamFromUrl).toHaveBeenCalledWith(0, 'https://example.com/d.txt', 'numeric')
+    expect(mockSendStreamChunk).not.toHaveBeenCalled()
+    expect(mockCloseStream).not.toHaveBeenCalled()
   })
 
   it('getter catches fetch failure and skips that input, returns partial result', async () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     mockRequestCreateStreamInput.mockResolvedValueOnce(0).mockResolvedValueOnce(1)
-    const fetchMock = vi.mocked(globalThis.fetch)
-    fetchMock
-      .mockRejectedValueOnce(new Error('Network error'))
-      .mockResolvedValueOnce({
-        ok: true,
-        text: () => Promise.resolve('4\n5'),
-      } as Response)
+    mockSendFeedStreamFromUrl
+      .mockImplementationOnce(() => {
+        throw new Error('Network error')
+      })
+      .mockImplementation(() => {})
 
     const getter = buildGetExternalStreams(
       'target',
@@ -570,7 +595,12 @@ describe('buildGetExternalStreams', () => {
 
     const result = await getter!()
     expect(result).toEqual({ x: 0 })
-    expect(mockSendStreamChunk).toHaveBeenCalledWith(0, [1, 2, 3])
-    expect(mockCloseStream).toHaveBeenCalledWith(0)
+    expect(mockSendFeedStreamFromUrl).toHaveBeenCalledWith(
+      0,
+      'https://example.com/data.csv',
+      'csv',
+    )
+    expect(mockSendStreamChunk).not.toHaveBeenCalled()
+    expect(mockCloseStream).not.toHaveBeenCalled()
   })
 })

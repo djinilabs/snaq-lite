@@ -1,8 +1,9 @@
 //! Read a file and push newline-delimited numbers as [Chunk]s to a stream sender.
 //! Used by the CLI when running with `--stream name=path`.
+//! Uses bounded send so the feeder is back-pressured by the consumer.
 
 use snaq_lite_lang::{
-    decimal_string_to_quantity, Chunk, Quantity, RunError, RunErrorKind, SnaqNumber,
+    decimal_string_to_quantity, Quantity, RunError, RunErrorKind, SnaqNumber, StreamChunkSender,
     StreamVarianceMode, Unit, Value,
 };
 use std::io::{BufRead, BufReader, Read};
@@ -11,13 +12,13 @@ use std::path::Path;
 /// Maximum lines per chunk to avoid huge allocations.
 const CHUNK_SIZE: usize = 8192;
 
-/// Read the file at `path`, parse newline-delimited numbers, push chunks to `sender`, then drop the sender (EOF).
+/// Read the file at `path`, parse newline-delimited numbers, push chunks to `sender` (awaiting send for back-pressure), then drop the sender (EOF).
 /// Empty lines are skipped. Invalid lines (non-numeric) yield a stream error: `Err(InvalidArgument(...))`.
 /// If `on_ready` is provided, it is called once after the file is successfully opened.
 /// Returns `Ok(())` on success, or `Err(std::io::Error)` if the file could not be opened or read.
 pub fn feed_file_to_sender(
     path: &Path,
-    sender: futures::channel::mpsc::UnboundedSender<Chunk>,
+    sender: StreamChunkSender,
     variance_mode: StreamVarianceMode,
     on_ready: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<(), std::io::Error> {
@@ -30,13 +31,15 @@ pub fn feed_file_to_sender(
     Ok(())
 }
 
-/// Read from `reader` line by line, parse newline-delimited numbers, push chunks to `sender`, then drop the sender.
+/// Read from `reader` line by line, parse newline-delimited numbers, push chunks to `sender` (block_on send for back-pressure), then drop the sender.
 /// Used by tests with in-memory readers. Invalid lines yield `Err(InvalidArgument(...))`.
 pub fn feed_read_to_sender<R: Read>(
     reader: R,
-    sender: futures::channel::mpsc::UnboundedSender<Chunk>,
+    mut sender: StreamChunkSender,
     variance_mode: StreamVarianceMode,
 ) {
+    use futures::sink::SinkExt;
+
     let scalar = Unit::scalar();
     let mut chunk = Vec::with_capacity(CHUNK_SIZE);
     let mut lines = BufReader::new(reader).lines();
@@ -54,7 +57,9 @@ pub fn feed_read_to_sender<R: Read>(
                         "stream feeder: invalid number: {s:?}"
                     )))));
                     if chunk.len() >= CHUNK_SIZE {
-                        if sender.unbounded_send(std::mem::take(&mut chunk)).is_err() {
+                        if futures::executor::block_on(sender.send(std::mem::take(&mut chunk)))
+                            .is_err()
+                        {
                             return;
                         }
                         chunk = Vec::with_capacity(CHUNK_SIZE);
@@ -69,7 +74,9 @@ pub fn feed_read_to_sender<R: Read>(
                         "stream feeder: invalid number: {s:?}"
                     )))));
                     if chunk.len() >= CHUNK_SIZE {
-                        if sender.unbounded_send(std::mem::take(&mut chunk)).is_err() {
+                        if futures::executor::block_on(sender.send(std::mem::take(&mut chunk)))
+                            .is_err()
+                        {
                             return;
                         }
                         chunk = Vec::with_capacity(CHUNK_SIZE);
@@ -81,7 +88,7 @@ pub fn feed_read_to_sender<R: Read>(
         let q = Quantity::with_number(SnaqNumber::new(n, variance), scalar.clone());
         chunk.push(Ok(Some(Value::Numeric(q))));
         if chunk.len() >= CHUNK_SIZE {
-            if sender.unbounded_send(std::mem::take(&mut chunk)).is_err() {
+            if futures::executor::block_on(sender.send(std::mem::take(&mut chunk))).is_err() {
                 return;
             }
             chunk = Vec::with_capacity(CHUNK_SIZE);
@@ -89,19 +96,20 @@ pub fn feed_read_to_sender<R: Read>(
     }
 
     if !chunk.is_empty() {
-        let _ = sender.unbounded_send(chunk);
+        let _ = futures::executor::block_on(sender.send(chunk));
     }
-    sender.close_channel();
+    drop(sender);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use futures::stream::StreamExt;
+    use snaq_lite_lang::Chunk;
 
     #[test]
     fn feed_read_to_sender_yields_chunks_and_eof() {
-        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let (tx, mut rx) = futures::channel::mpsc::channel(snaq_lite_lang::STREAM_CHANNEL_CAPACITY);
         feed_read_to_sender(
             "1\n2\n3\n".as_bytes(),
             tx,
@@ -127,7 +135,7 @@ mod tests {
 
     #[test]
     fn feed_read_to_sender_skips_empty_lines() {
-        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let (tx, mut rx) = futures::channel::mpsc::channel(snaq_lite_lang::STREAM_CHANNEL_CAPACITY);
         feed_read_to_sender(
             "1\n\n2\n\n\n3".as_bytes(),
             tx,
@@ -144,7 +152,7 @@ mod tests {
 
     #[test]
     fn feed_read_to_sender_invalid_line_yields_error() {
-        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let (tx, mut rx) = futures::channel::mpsc::channel(snaq_lite_lang::STREAM_CHANNEL_CAPACITY);
         feed_read_to_sender(
             "1\nfoo\n3".as_bytes(),
             tx,
@@ -164,7 +172,7 @@ mod tests {
 
     #[test]
     fn feed_read_to_sender_infer_variance_from_decimal_places() {
-        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let (tx, mut rx) = futures::channel::mpsc::channel(snaq_lite_lang::STREAM_CHANNEL_CAPACITY);
         feed_read_to_sender(
             "10.5\n10.50\n".as_bytes(),
             tx,
@@ -191,7 +199,7 @@ mod tests {
 
     #[test]
     fn feed_read_to_sender_infer_invalid_line_yields_error() {
-        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let (tx, mut rx) = futures::channel::mpsc::channel(snaq_lite_lang::STREAM_CHANNEL_CAPACITY);
         feed_read_to_sender(
             "10.5\nnot_a_number\n10.50".as_bytes(),
             tx,

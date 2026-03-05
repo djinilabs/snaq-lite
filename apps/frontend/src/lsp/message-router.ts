@@ -338,6 +338,43 @@ export function closeStream(index: number): void {
   w.postMessage(JSON.stringify({ type: 'closeStream', index }))
 }
 
+/** Stream format hint: 'numeric' = newline-delimited numbers, 'csv' = CSV with row-as-map. */
+export type FeedStreamFormat = 'numeric' | 'csv'
+
+/** Tell the worker to fetch the URL and feed the response body into the stream (worker runs startFeeder/startCsvFeeder; back-pressured). */
+export function sendFeedStreamFromUrl(
+  streamIndex: number,
+  url: string,
+  format?: FeedStreamFormat,
+): void {
+  const w = getWorker()
+  if (!w) return
+  const msg: { type: string; streamIndex: number; url: string; format?: FeedStreamFormat } = {
+    type: 'feedStreamFromUrl',
+    streamIndex,
+    url,
+  }
+  if (format) msg.format = format
+  w.postMessage(JSON.stringify(msg))
+}
+
+/** Pass a ReadableStream to the worker to feed into the stream (transferable; worker runs startFeeder/startCsvFeeder). */
+export function sendFeedStreamFromReadableStream(
+  streamIndex: number,
+  stream: ReadableStream,
+  format?: FeedStreamFormat,
+): void {
+  const w = getWorker()
+  if (!w) return
+  const msg: { type: string; streamIndex: number; stream: ReadableStream; format?: FeedStreamFormat } = {
+    type: 'feedStreamFromReadableStream',
+    streamIndex,
+    stream,
+  }
+  if (format) msg.format = format
+  w.postMessage(msg, [stream])
+}
+
 export function sendNotification(method: string, params?: unknown): void {
   const msg = {
     jsonrpc: '2.0' as const,

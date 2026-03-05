@@ -188,8 +188,7 @@ fn run_stream_mode(
 
     let registry = snaq_lite_lang::default_si_registry();
     let mut stream_input_map = std::collections::HashMap::new();
-    let mut feeders: Vec<(PathBuf, futures::channel::mpsc::UnboundedSender<snaq_lite_lang::Chunk>)> =
-        Vec::new();
+    let mut feeders: Vec<(PathBuf, snaq_lite_lang::StreamChunkSender)> = Vec::new();
 
     for (name, path) in streams {
         if stream_input_map.contains_key(name) {

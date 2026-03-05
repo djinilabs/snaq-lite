@@ -48,16 +48,21 @@ export function useSubscribeWidget({
     function subscribe(): void {
       if (!hasLanguageClient()) return
       didSubscribe = true
-      try {
-        onBeforeSubscribe?.()
-      } catch (e) {
-        console.error('[useSubscribeWidget] onBeforeSubscribe failed:', e)
-      }
       const doSubscribe = async (): Promise<void> => {
         deferTimeoutId = null
         if (!hasLanguageClient()) return
         try {
+          // Resolve stream indices before didOpen so the worker processes createStreamInput
+          // before any LSP work that can block the single thread (avoids response timeout).
           const externalStreams = await getExternalStreams?.().then((m) => m ?? undefined)
+          try {
+            onBeforeSubscribe?.()
+          } catch (e) {
+            console.error('[useSubscribeWidget] onBeforeSubscribe failed:', e)
+          }
+          if (onBeforeSubscribe != null) {
+            await new Promise((r) => setTimeout(r, LSP_SUBSCRIBE_AFTER_DID_OPEN_MS))
+          }
           const params: { widgetId: string; sourceUri: string; externalStreams?: Record<string, number> } = {
             widgetId,
             sourceUri,
@@ -70,11 +75,7 @@ export function useSubscribeWidget({
           console.error('[useSubscribeWidget] subscribeWidget failed:', err)
         }
       }
-      if (onBeforeSubscribe != null) {
-        deferTimeoutId = setTimeout(() => void doSubscribe(), LSP_SUBSCRIBE_AFTER_DID_OPEN_MS)
-      } else {
-        void doSubscribe()
-      }
+      void doSubscribe()
     }
 
     if (hasLanguageClient()) {

@@ -24,6 +24,7 @@ pub mod vector;
 pub mod vector_registry;
 pub mod map_registry;
 pub mod stream_handle;
+pub mod csv_stream_parse;
 pub mod stream_variance;
 pub mod graph;
 
@@ -42,11 +43,15 @@ pub use fuzzy::FuzzyBool;
 pub use symbolic::{SymbolicQuantity, SymbolicExpr, Value};
 pub use vector::{LazyVector, VectorOrientation, VectorValue};
 pub use unit_registry::{default_si_registry, UnitRegistry};
-pub use stream_handle::{Chunk, StreamHandleId, create_stream_input, register, take_receiver};
+pub use stream_handle::{
+    Chunk, StreamChunkReceiver, StreamChunkSender, StreamHandleId, STREAM_CHANNEL_CAPACITY,
+    create_stream_input, register, take_receiver,
+};
 pub use map_registry::{
     MapId, Record, record_to_chunk_element, record_to_value,
 };
 pub use stream_variance::{decimal_string_to_quantity, StreamVarianceMode};
+pub use csv_stream_parse::{csv_delimiter_from_line, parse_csv_line_to_record, strip_bom};
 pub use graph::{extract_input_decls_from_block, value_type_name};
 
 /// Parse and evaluate the expression, returning a Value (symbolic by default, e.g. "6 + π").
@@ -170,7 +175,7 @@ pub fn run_with_registry_format(input: &str, registry: &UnitRegistry) -> Result<
 }
 
 /// Like [run_with_registry], but with external stream inputs for programs that use `$name`.
-/// The Host creates channels (e.g. [futures::channel::mpsc::unbounded]), registers the
+/// The Host creates channels (e.g. [futures::channel::mpsc::channel] with [stream_handle::STREAM_CHANNEL_CAPACITY]), registers the
 /// receiver with [register], and passes a map from name to [StreamHandleId]. Returns the
 /// evaluated [Value] and the database so the Host can call [vector_into_stream] on any
 /// resulting vector (e.g. `$sales_data * 2`) to consume the stream while pushing chunks
@@ -3307,10 +3312,12 @@ mod tests {
     /// should bind abc to the wired value so the result is 420, not symbolic "10 * abc".
     #[test]
     fn run_input_decl_binds_stream_input_to_identifier() {
+        use futures::sink::SinkExt;
+
         let program = "input abc: Numeric\nabc * 10";
-        let (handle_id, sender) = create_stream_input();
+        let (handle_id, mut sender) = create_stream_input();
         let q42 = Quantity::from_scalar(42.0);
-        let _ = sender.unbounded_send(vec![Ok(Some(Value::Numeric(q42)))]);
+        let _ = futures::executor::block_on(sender.send(vec![Ok(Some(Value::Numeric(q42)))]));
         drop(sender);
         let stream_inputs =
             std::collections::HashMap::from([("abc".to_string(), handle_id)]);
@@ -3330,14 +3337,16 @@ mod tests {
     /// Ensures one-output-to-two-inputs works at the lang layer: two handles, two consumes, result abc * ggg = 1764.
     #[test]
     fn run_two_input_decls_two_handles_same_scalar_yields_product() {
+        use futures::sink::SinkExt;
+
         let program = "input abc: Numeric\ninput ggg: Numeric\nabc * ggg";
         let scalar = Value::Numeric(Quantity::from_scalar(42.0));
         let chunk = vec![Ok(Some(scalar))];
-        let (handle_abc, sender_abc) = create_stream_input();
-        let _ = sender_abc.unbounded_send(chunk.clone());
+        let (handle_abc, mut sender_abc) = create_stream_input();
+        let _ = futures::executor::block_on(sender_abc.send(chunk.clone()));
         drop(sender_abc);
-        let (handle_ggg, sender_ggg) = create_stream_input();
-        let _ = sender_ggg.unbounded_send(chunk);
+        let (handle_ggg, mut sender_ggg) = create_stream_input();
+        let _ = futures::executor::block_on(sender_ggg.send(chunk));
         drop(sender_ggg);
         let stream_inputs = std::collections::HashMap::from([
             ("abc".to_string(), handle_abc),
@@ -3359,6 +3368,8 @@ mod tests {
     /// a.sum() + b.sum() = 6 + 6 = 12. Covers the vector path when one logical source feeds two inputs.
     #[test]
     fn run_two_input_decls_two_handles_same_vector_yields_sum_of_sums() {
+        use futures::sink::SinkExt;
+
         let program = "input a: Vector\ninput b: Vector\na.sum() + b.sum()";
         let unit = Unit::scalar();
         let chunk = vec![
@@ -3366,11 +3377,11 @@ mod tests {
             Ok(Some(Value::Numeric(Quantity::new(2.0, unit.clone())))),
             Ok(Some(Value::Numeric(Quantity::new(3.0, unit)))),
         ];
-        let (handle_a, sender_a) = create_stream_input();
-        let _ = sender_a.unbounded_send(chunk.clone());
+        let (handle_a, mut sender_a) = create_stream_input();
+        let _ = futures::executor::block_on(sender_a.send(chunk.clone()));
         drop(sender_a);
-        let (handle_b, sender_b) = create_stream_input();
-        let _ = sender_b.unbounded_send(chunk);
+        let (handle_b, mut sender_b) = create_stream_input();
+        let _ = futures::executor::block_on(sender_b.send(chunk));
         drop(sender_b);
         let stream_inputs = std::collections::HashMap::from([
             ("a".to_string(), handle_a),
@@ -3405,10 +3416,11 @@ mod tests {
     fn value_external_stream_with_registry_returns_from_input_vector() {
         use crate::queries::{program, set_eval_registry, set_stream_input_registry, value};
         use crate::vector::LazyVector;
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
         use salsa::DatabaseImpl;
 
         let registry = default_si_registry();
-        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let (tx, rx) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
         let handle_id = register(rx);
         drop(tx);
 
@@ -3450,10 +3462,11 @@ mod tests {
     fn external_stream_times_two_yields_map_over_from_input() {
         use crate::queries::{program, set_eval_registry, set_stream_input_registry, value};
         use crate::vector::LazyVector;
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
         use salsa::DatabaseImpl;
 
         let registry = default_si_registry();
-        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let (tx, rx) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
         let handle_id = register(rx);
         drop(tx);
 
@@ -3483,10 +3496,11 @@ mod tests {
     fn create_stream_input_returns_id_and_sender() {
         use crate::quantity::Quantity;
         use crate::symbolic::Value;
+        use futures::sink::SinkExt;
         use futures::stream::StreamExt;
 
         let registry = default_si_registry();
-        let (handle_id, tx) = create_stream_input();
+        let (handle_id, mut tx) = create_stream_input();
 
         let (val, db) = run_with_stream_inputs(
             "$data",
@@ -3501,10 +3515,10 @@ mod tests {
         };
 
         let scalar = Unit::scalar();
-        tx.unbounded_send(vec![
+        futures::executor::block_on(tx.send(vec![
             Ok(Some(Value::Numeric(Quantity::new(1.0, scalar.clone())))),
             Ok(Some(Value::Numeric(Quantity::new(2.0, scalar)))),
-        ])
+        ]))
         .unwrap();
         drop(tx);
 
@@ -3519,10 +3533,12 @@ mod tests {
     fn vector_into_stream_from_input_yields_elements_and_eof() {
         use crate::quantity::Quantity;
         use crate::symbolic::Value;
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
+        use futures::sink::SinkExt;
         use futures::stream::StreamExt;
 
         let registry = default_si_registry();
-        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let (tx, rx) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
         let handle_id = register(rx);
 
         let (val, db) = run_with_stream_inputs(
@@ -3538,10 +3554,11 @@ mod tests {
         };
 
         let scalar = Unit::scalar();
-        tx.unbounded_send(vec![
+        let mut tx = tx;
+        futures::executor::block_on(tx.send(vec![
             Ok(Some(Value::Numeric(Quantity::new(1.0, scalar.clone())))),
             Ok(Some(Value::Numeric(Quantity::new(2.0, scalar)))),
-        ])
+        ]))
         .unwrap();
         drop(tx);
 
@@ -3556,10 +3573,12 @@ mod tests {
     fn vector_into_stream_from_input_when_handle_consumed_yields_one_error() {
         use crate::quantity::Quantity;
         use crate::symbolic::Value;
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
+        use futures::sink::SinkExt;
         use futures::stream::StreamExt;
 
         let registry = default_si_registry();
-        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let (mut tx, rx) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
         let handle_id = register(rx);
 
         let (val, db) = run_with_stream_inputs(
@@ -3575,8 +3594,10 @@ mod tests {
         };
 
         let scalar = Unit::scalar();
-        tx.unbounded_send(vec![Ok(Some(Value::Numeric(Quantity::new(1.0, scalar))))])
-            .unwrap();
+        futures::executor::block_on(tx.send(vec![Ok(Some(Value::Numeric(Quantity::new(
+            1.0, scalar,
+        ))))]))
+        .unwrap();
         drop(tx);
 
         let stream1 = vector_into_stream(&db, lv.clone());

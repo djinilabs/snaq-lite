@@ -13,6 +13,8 @@ import {
   resetMessageRouterForTest,
   setWorkerForTest,
   requestCreateStreamInput,
+  sendFeedStreamFromUrl,
+  sendFeedStreamFromReadableStream,
 } from './message-router'
 
 describe('message-router', () => {
@@ -209,6 +211,110 @@ describe('message-router', () => {
       } finally {
         setWorkerForTest(null)
       }
+    })
+  })
+
+  describe('sendFeedStreamFromUrl', () => {
+    it('sends JSON message with type, streamIndex, url', () => {
+      const messages: string[] = []
+      const mockWorker = { postMessage: (msg: string) => messages.push(msg) }
+      setWorkerForTest(mockWorker as unknown as Worker)
+      try {
+        sendFeedStreamFromUrl(0, 'https://example.com/data.txt')
+        expect(messages).toHaveLength(1)
+        const parsed = JSON.parse(messages[0]) as { type: string; streamIndex: number; url: string }
+        expect(parsed.type).toBe('feedStreamFromUrl')
+        expect(parsed.streamIndex).toBe(0)
+        expect(parsed.url).toBe('https://example.com/data.txt')
+      } finally {
+        setWorkerForTest(null)
+      }
+    })
+
+    it('includes format in message when provided', () => {
+      const messages: string[] = []
+      const mockWorker = { postMessage: (msg: string) => messages.push(msg) }
+      setWorkerForTest(mockWorker as unknown as Worker)
+      try {
+        sendFeedStreamFromUrl(1, 'https://example.com/data.csv', 'csv')
+        expect(messages).toHaveLength(1)
+        const parsed = JSON.parse(messages[0]) as {
+          type: string
+          streamIndex: number
+          url: string
+          format?: string
+        }
+        expect(parsed.format).toBe('csv')
+        sendFeedStreamFromUrl(2, 'https://x.com/nums.txt', 'numeric')
+        const parsed2 = JSON.parse(messages[1]) as { format?: string }
+        expect(parsed2.format).toBe('numeric')
+      } finally {
+        setWorkerForTest(null)
+      }
+    })
+
+    it('does not include format key when omitted', () => {
+      const messages: string[] = []
+      const mockWorker = { postMessage: (msg: string) => messages.push(msg) }
+      setWorkerForTest(mockWorker as unknown as Worker)
+      try {
+        sendFeedStreamFromUrl(0, 'https://example.com/data.txt')
+        const parsed = JSON.parse(messages[0]) as { format?: string }
+        expect(parsed).not.toHaveProperty('format')
+      } finally {
+        setWorkerForTest(null)
+      }
+    })
+
+    it('does not throw when worker is null (no-op)', () => {
+      setWorkerForTest(null)
+      expect(() => sendFeedStreamFromUrl(0, 'https://example.com/data.txt')).not.toThrow()
+    })
+  })
+
+  describe('sendFeedStreamFromReadableStream', () => {
+    it('sends object message with type, streamIndex, stream and transfer list', () => {
+      const messages: unknown[] = []
+      const transferList: unknown[] = []
+      const mockWorker = {
+        postMessage: (msg: unknown, transfer?: unknown[]) => {
+          messages.push(msg)
+          if (transfer) transferList.push(...transfer)
+        },
+      }
+      const stream = new ReadableStream()
+      setWorkerForTest(mockWorker as unknown as Worker)
+      try {
+        sendFeedStreamFromReadableStream(0, stream)
+        expect(messages).toHaveLength(1)
+        const payload = messages[0] as { type: string; streamIndex: number; stream: ReadableStream }
+        expect(payload.type).toBe('feedStreamFromReadableStream')
+        expect(payload.streamIndex).toBe(0)
+        expect(payload.stream).toBe(stream)
+        expect(transferList).toContain(stream)
+      } finally {
+        setWorkerForTest(null)
+      }
+    })
+
+    it('includes format in message when provided', () => {
+      const messages: unknown[] = []
+      const mockWorker = { postMessage: (msg: unknown) => messages.push(msg) }
+      const stream = new ReadableStream()
+      setWorkerForTest(mockWorker as unknown as Worker)
+      try {
+        sendFeedStreamFromReadableStream(0, stream, 'csv')
+        const payload = messages[0] as { format?: string }
+        expect(payload.format).toBe('csv')
+      } finally {
+        setWorkerForTest(null)
+      }
+    })
+
+    it('does not throw when worker is null (no-op)', () => {
+      setWorkerForTest(null)
+      const stream = new ReadableStream()
+      expect(() => sendFeedStreamFromReadableStream(0, stream)).not.toThrow()
     })
   })
 })

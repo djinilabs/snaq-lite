@@ -1,10 +1,11 @@
 //! Dispatch stream feeding by file format: tabular (CSV, etc.) vs newline-delimited numbers.
 //! Uses [snaq_lite_ingest] for format detection and tabular parsing.
+//! Uses bounded send so the feeder is back-pressured by the consumer.
 
 use crate::stream_feeder;
 use snaq_lite_ingest::{detect_format, parse_tabular, ReadSeek};
 use snaq_lite_lang::{
-    record_to_chunk_element, Chunk, RunError, RunErrorKind, StreamVarianceMode,
+    record_to_chunk_element, RunError, RunErrorKind, StreamChunkSender, StreamVarianceMode,
 };
 use std::path::Path;
 
@@ -17,7 +18,7 @@ const CHUNK_SIZE: usize = 8192;
 /// Returns `Ok(())` on success, or `Err(std::io::Error)` if the file could not be opened.
 pub fn feed_stream_file_to_sender(
     path: &Path,
-    sender: futures::channel::mpsc::UnboundedSender<Chunk>,
+    sender: StreamChunkSender,
     variance_mode: StreamVarianceMode,
     on_ready: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<(), std::io::Error> {
@@ -30,13 +31,15 @@ pub fn feed_stream_file_to_sender(
     }
 }
 
-/// Open file, parse as tabular (e.g. CSV), push records as chunk elements, then close sender.
+/// Open file, parse as tabular (e.g. CSV), push records as chunk elements (await send for back-pressure), then drop sender.
 fn feed_tabular_to_sender(
     path: &Path,
-    sender: futures::channel::mpsc::UnboundedSender<Chunk>,
+    mut sender: StreamChunkSender,
     variance_mode: StreamVarianceMode,
     on_ready: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<(), std::io::Error> {
+    use futures::sink::SinkExt;
+
     let file = std::fs::File::open(path)?;
     if let Some(f) = on_ready {
         f();
@@ -48,8 +51,8 @@ fn feed_tabular_to_sender(
         Ok(it) => it,
         Err(e) => {
             let run_err = RunError::new(RunErrorKind::InvalidArgument(e.to_string()));
-            let _ = sender.unbounded_send(vec![Err(run_err)]);
-            sender.close_channel();
+            let _ = futures::executor::block_on(sender.send(vec![Err(run_err)]));
+            drop(sender);
             return Ok(());
         }
     };
@@ -64,16 +67,17 @@ fn feed_tabular_to_sender(
         };
         chunk.push(elem);
         if chunk.len() >= CHUNK_SIZE {
-            if sender.unbounded_send(std::mem::take(&mut chunk)).is_err() {
+            if futures::executor::block_on(sender.send(std::mem::take(&mut chunk))).is_err() {
+                drop(sender);
                 return Ok(());
             }
             chunk = Vec::with_capacity(CHUNK_SIZE);
         }
     }
     if !chunk.is_empty() {
-        let _ = sender.unbounded_send(chunk);
+        let _ = futures::executor::block_on(sender.send(chunk));
     }
-    sender.close_channel();
+    drop(sender);
     Ok(())
 }
 
@@ -112,7 +116,8 @@ mod tests {
             extension
         ));
         std::fs::write(&tmp, contents).expect("write");
-        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let (tx, mut rx) =
+            futures::channel::mpsc::channel(snaq_lite_lang::STREAM_CHANNEL_CAPACITY);
         feed_stream_file_to_sender(&tmp, tx, variance_mode, None).expect("feed");
         let _ = std::fs::remove_file(&tmp);
         let mut chunks = Vec::new();

@@ -225,6 +225,19 @@ export function ComputationBoxNode({
       >
         Inputs
       </NodeContentZone>
+      {getExternalStreams != null && (
+        <div
+          style={{
+            fontSize: 10,
+            color: 'var(--text-muted)',
+            marginBottom: 4,
+            fontStyle: 'italic',
+          }}
+          title="In the browser, file streams must be referenced with $name in the expression."
+        >
+          File connected: use $name in the expression (e.g. $aa * 10).
+        </div>
+      )}
       <NodeContentZone
         nowheel
         onMouseDown={(e) => e.stopPropagation()}

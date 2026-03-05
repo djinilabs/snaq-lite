@@ -8,7 +8,7 @@
  * the user having to open "View details".
  */
 
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect } from 'react'
 import type { CSSProperties } from 'react'
 import type { WidgetState } from '~/store'
 import { useUIStore } from '~/store'

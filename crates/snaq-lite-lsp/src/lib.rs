@@ -728,6 +728,12 @@ impl SnaqLiteBackend {
             payload: serde_json::Value,
         }
 
+        type FetchResultSlice = (
+            u64,
+            Vec<Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>>,
+            Option<PendingUpdate>,
+        );
+
         let (elements, total_count, pending_update) = {
             let state = self.state.lock().await;
             let db = state.db();
@@ -741,11 +747,8 @@ impl SnaqLiteBackend {
                     let limit = params.limit as usize;
 
                     // Stream-backed vectors (e.g. CSV FromInput) can only be consumed once. At root, materialize on first fetch; defer cache + notification until after we release state lock.
-                    let (total_count, slice_vec, pending_update): (
-                        u64,
-                        Vec<Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>>,
-                        Option<PendingUpdate>,
-                    ) = match (&v.inner, path_segments.is_empty()) {
+                    let (total_count, slice_vec, pending_update): FetchResultSlice =
+                        match (&v.inner, path_segments.is_empty()) {
                         (snaq_lite_lang::LazyVector::FromInput(_), true) => {
                             let collected =
                                 snaq_lite_lang::collect_vector_stream(db, v.inner.clone());

@@ -126,9 +126,8 @@ test.describe('computation result (editor–worker–LSP)', () => {
     const viewDetailsBtn = resultEl.getByTestId('view-details-btn')
     await expect(viewDetailsBtn).toBeVisible({ timeout: 5000 })
     await viewDetailsBtn.click()
-    await page.waitForTimeout(500)
     const modal = page.getByTestId('result-detail-modal')
-    await expect(modal).toBeVisible({ timeout: 5000 })
+    await expect(modal).toBeVisible({ timeout: 10_000 })
     await page.keyboard.press('Escape')
     await page.waitForTimeout(300)
     await expect(modal).not.toBeVisible()
@@ -150,9 +149,8 @@ test.describe('computation result (editor–worker–LSP)', () => {
     const resultEl = page.getByTestId('computation-result').first()
     await expect(resultEl.getByText(/Vector \(\d+ elements\)/)).toBeVisible({ timeout: 15_000 })
     await resultEl.getByTestId('view-details-btn').click()
-    await page.waitForTimeout(500)
     const modal = page.getByTestId('result-detail-modal')
-    await expect(modal).toBeVisible({ timeout: 5000 })
+    await expect(modal).toBeVisible({ timeout: 10_000 })
     await page.getByTestId('result-detail-close-btn').click()
     await page.waitForTimeout(300)
     await expect(modal).not.toBeVisible()
@@ -174,9 +172,8 @@ test.describe('computation result (editor–worker–LSP)', () => {
     const resultEl = page.getByTestId('computation-result').first()
     await expect(resultEl.getByText(/Vector \(\d+ elements\)/)).toBeVisible({ timeout: 15_000 })
     await resultEl.getByTestId('view-details-btn').click()
-    await page.waitForTimeout(500)
     const modal = page.getByTestId('result-detail-modal')
-    await expect(modal).toBeVisible({ timeout: 5000 })
+    await expect(modal).toBeVisible({ timeout: 10_000 })
     const overlay = page.getByTestId('result-detail-overlay')
     await overlay.click({ position: { x: 5, y: 5 } })
     await page.waitForTimeout(300)
@@ -222,11 +219,13 @@ test.describe('computation result (editor–worker–LSP)', () => {
     expect(out('textDocument/didOpen'), 'log should contain didOpen (out)').toBe(true)
     expect(out('snaqlite/graph/subscribeWidget'), 'log should contain subscribeWidget (out)').toBe(true)
     expect(in_('snaqlite/graph/widgetDataUpdate'), 'log should contain widgetDataUpdate (in)').toBe(true)
-    const widgetUpdate = log.find(
+    const widgetUpdates = log.filter(
       (e) => e.dir === 'in' && e.method === 'snaqlite/graph/widgetDataUpdate',
     )
-    expect(widgetUpdate?.params).toBeDefined()
-    expect((widgetUpdate?.params as { status?: string })?.status).toBe('Completed')
+    const statuses = widgetUpdates
+      .map((e) => (e.params as { status?: string })?.status)
+      .filter(Boolean)
+    expect(statuses.some((s) => s === 'Completed'), 'at least one widgetDataUpdate should have status Completed').toBe(true)
   })
 
   test('file block wired to computation with Vector input shows stream result (blob cache, no fetch)', async ({

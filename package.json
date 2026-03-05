@@ -14,7 +14,7 @@
     "build:lsp-wasm": "cargo build -p snaq-lite-lsp --target wasm32-unknown-unknown --lib && wasm-pack build crates/snaq-lite-lsp --target web --out-dir ../../apps/frontend/public/lsp-wasm",
     "build:lsp-wasm:dev": "cargo build -p snaq-lite-lsp --target wasm32-unknown-unknown --lib && wasm-pack build crates/snaq-lite-lsp --target web --out-dir ../../apps/frontend/public/lsp-wasm --dev",
     "lint": "pnpm run lint:backend && pnpm run lint:frontend",
-    "lint:backend": "cargo clippy --workspace",
+    "lint:backend": "cargo clippy --workspace -- -D warnings",
     "lint:frontend": "pnpm -C apps/frontend run lint",
     "dev": "pnpm run dev:frontend",
     "dev:frontend": "pnpm -C apps/frontend run dev",

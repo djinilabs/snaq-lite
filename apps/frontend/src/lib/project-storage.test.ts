@@ -194,7 +194,7 @@ describe('project-storage', () => {
       expect(snapshot.nodes[0].inputs).toEqual([{ name: 'x', type: 'Vector' }])
     })
 
-    it('includes url for file nodes when present', () => {
+    it('includes url and fileName for file nodes when present', () => {
       const nodes = [
         {
           id: 'f1',
@@ -209,6 +209,7 @@ describe('project-storage', () => {
           uri: 'snaq://graph/f2.sl',
           url: 'https://example.com/data.csv',
           fileType: 'text/csv',
+          fileName: 'data.csv',
         },
       ]
       const snapshot = buildSnapshotFromGraph('p', nodes, [])
@@ -219,6 +220,7 @@ describe('project-storage', () => {
         type: 'file',
         url: 'https://example.com/data.csv',
         fileType: 'text/csv',
+        fileName: 'data.csv',
       })
     })
 

@@ -4,6 +4,7 @@
  */
 
 import type { GraphNode, GraphEdge } from '~/store'
+import { fileBlockLabel } from './file-block-node'
 
 export interface FlowNodeData {
   uri: string
@@ -30,8 +31,8 @@ export function getFlowNodeData(
     label = 'Presentation'
   } else if (n.type === 'file') {
     sourceUri = ''
-    label = 'File'
-    return { uri: n.uri, label: 'File', sourceUri: '', ...(n.url ? { url: n.url } : {}) }
+    label = n.fileName ?? fileBlockLabel(n.url)
+    return { uri: n.uri, label, sourceUri: '', ...(n.url ? { url: n.url } : {}) }
   } else {
     sourceUri = n.uri
     label = 'Computation'

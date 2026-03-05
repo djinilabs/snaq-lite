@@ -134,6 +134,7 @@ export function GraphCanvas(props: GraphCanvasProps) {
         uri: nodeIdToUri(id),
         url,
         fileType: file.type || undefined,
+        fileName: file.name || undefined,
       })
       void putFileBlob(projectId, id, file).catch((err) => {
         console.error('[GraphCanvas] Failed to persist file blob to IndexedDB', err)

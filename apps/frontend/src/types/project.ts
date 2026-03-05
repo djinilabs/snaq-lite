@@ -23,6 +23,8 @@ export interface ProjectNode {
   url?: string
   /** MIME type for file nodes. Optional; used when type === 'file'. */
   fileType?: string
+  /** Original file name for file nodes (e.g. from dropped file). Optional; used when type === 'file'. */
+  fileName?: string
 }
 
 export interface ProjectEdge {
@@ -87,6 +89,7 @@ export function parseProjectSnapshot(data: unknown): ProjectSnapshot | null {
         ? {
             ...(typeof no.url === 'string' ? { url: no.url } : {}),
             ...(typeof no.fileType === 'string' ? { fileType: no.fileType } : {}),
+            ...(typeof no.fileName === 'string' ? { fileName: no.fileName } : {}),
           }
         : {}),
     })

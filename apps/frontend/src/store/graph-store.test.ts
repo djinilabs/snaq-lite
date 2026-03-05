@@ -54,7 +54,7 @@ describe('graph-store', () => {
     expect(useGraphStore.getState().focusEditorForNodeId).toBeNull()
   })
 
-  it('addNode type file does not set focusEditorForNodeId and stores optional url', () => {
+  it('addNode type file does not set focusEditorForNodeId and stores optional url and fileName', () => {
     useGraphStore.setState({ focusEditorForNodeId: null })
     useGraphStore.getState().addNode({
       id: 'f1',
@@ -62,12 +62,14 @@ describe('graph-store', () => {
       type: 'file',
       uri: 'snaq://graph/f1.sl',
       url: 'blob:https://example.com/abc',
+      fileName: 'data.csv',
     })
     expect(useGraphStore.getState().focusEditorForNodeId).toBeNull()
     expect(useGraphStore.getState().nodes[0]).toMatchObject({
       id: 'f1',
       type: 'file',
       url: 'blob:https://example.com/abc',
+      fileName: 'data.csv',
     })
   })
 

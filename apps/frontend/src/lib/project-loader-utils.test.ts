@@ -75,7 +75,7 @@ describe('project-loader-utils', () => {
       expect(nodes[0].initialContent).toBeUndefined()
     })
 
-    it('maps file nodes with optional url', () => {
+    it('maps file nodes with optional url and fileName', () => {
       const snapshot = {
         id: 'p',
         nodes: [
@@ -86,6 +86,7 @@ describe('project-loader-utils', () => {
             type: 'file' as const,
             url: 'https://example.com/d.csv',
             fileType: 'text/csv',
+            fileName: 'sales.csv',
           },
         ],
         edges: [],
@@ -99,6 +100,7 @@ describe('project-loader-utils', () => {
         type: 'file',
         url: 'https://example.com/d.csv',
         fileType: 'text/csv',
+        fileName: 'sales.csv',
       })
     })
 

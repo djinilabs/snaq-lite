@@ -88,6 +88,43 @@ describe('getFlowNodeData', () => {
     const data = getFlowNodeData(presNode, nodes, edges)
     expect(data.sourceUri).toBe('')
   })
+
+  it('uses fileName as label for file node when present', () => {
+    const fileNode: GraphNode = {
+      id: 'file-1',
+      position: { x: 0, y: 0 },
+      type: 'file',
+      uri: 'snaq://graph/file-1.sl',
+      url: 'blob:https://example.com/abc',
+      fileName: 'sales-data.csv',
+    }
+    const nodes: GraphNode[] = [fileNode]
+    const edges: GraphEdge[] = []
+    const data = getFlowNodeData(fileNode, nodes, edges)
+    expect(data.label).toBe('sales-data.csv')
+    expect(data.sourceUri).toBe('')
+    expect(data.url).toBe('blob:https://example.com/abc')
+  })
+
+  it('uses fileBlockLabel fallback for file node when fileName is missing', () => {
+    const fileNodeWithUrl: GraphNode = {
+      id: 'file-1',
+      position: { x: 0, y: 0 },
+      type: 'file',
+      uri: 'snaq://graph/file-1.sl',
+      url: 'blob:https://example.com/abc',
+    }
+    const fileNodeNoUrl: GraphNode = {
+      id: 'file-2',
+      position: { x: 0, y: 0 },
+      type: 'file',
+      uri: 'snaq://graph/file-2.sl',
+    }
+    const nodes: GraphNode[] = [fileNodeWithUrl, fileNodeNoUrl]
+    const edges: GraphEdge[] = []
+    expect(getFlowNodeData(fileNodeWithUrl, nodes, edges).label).toBe('File')
+    expect(getFlowNodeData(fileNodeNoUrl, nodes, edges).label).toBe('No file')
+  })
 })
 
 describe('applyNodePositionChanges', () => {

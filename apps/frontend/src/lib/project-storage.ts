@@ -81,6 +81,7 @@ export function buildSnapshotFromGraph(
         ...base,
         ...(url ? { url } : {}),
         ...(n.fileType ? { fileType: n.fileType } : {}),
+        ...(n.fileName ? { fileName: n.fileName } : {}),
       }
     }
     if (n.type !== 'computation') return base

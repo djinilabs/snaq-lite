@@ -33,7 +33,11 @@ export function snapshotToGraphNodes(snapshot: ProjectSnapshot): GraphNode[] {
     initialContent: n.type === 'computation' ? (n.content ?? '') : undefined,
     inputs: n.type === 'computation' && n.inputs?.length ? n.inputs : undefined,
     ...(n.type === 'file'
-        ? { ...(n.url ? { url: n.url } : {}), ...(n.fileType ? { fileType: n.fileType } : {}) }
+        ? {
+            ...(n.url ? { url: n.url } : {}),
+            ...(n.fileType ? { fileType: n.fileType } : {}),
+            ...(n.fileName ? { fileName: n.fileName } : {}),
+          }
         : {}),
   }))
 }

@@ -46,6 +46,8 @@ export interface GraphNode {
   url?: string
   /** MIME type for file nodes (e.g. from dropped File). Optional; used when type === 'file'. */
   fileType?: string
+  /** Original file name for file nodes (e.g. from dropped File.name). Optional; used when type === 'file'. */
+  fileName?: string
 }
 
 export interface GraphEdge {

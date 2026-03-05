@@ -747,6 +747,7 @@ impl SnaqLiteBackend {
                     let limit = params.limit as usize;
 
                     // Stream-backed vectors (e.g. CSV FromInput) can only be consumed once. At root, materialize on first fetch; defer cache + notification until after we release state lock.
+                    #[allow(clippy::type_complexity)]
                     let (total_count, slice_vec, pending_update): FetchResultSlice =
                         match (&v.inner, path_segments.is_empty()) {
                         (snaq_lite_lang::LazyVector::FromInput(_), true) => {

@@ -1250,6 +1250,25 @@ mod tests {
     }
 
     #[test]
+    fn undefined_in_arithmetic_returns_undefined_result() {
+        // Empty block {} yields Undefined; arithmetic with it returns Err(UndefinedResult).
+        let e = run("{} + 1").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::UndefinedResult));
+        let e = run("{} * 2").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::UndefinedResult));
+        let e = run("1 - {}").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::UndefinedResult));
+        let e = run("2 / {}").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::UndefinedResult));
+    }
+
+    #[test]
+    fn undefined_in_comparison_returns_undefined_result() {
+        let e = run("{} == 1").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::UndefinedResult));
+    }
+
+    #[test]
     fn run_block_as_expression() {
         // Block is an expression; can be used in larger expressions
         let v = run("2 * { 3; 4 }").unwrap();
@@ -2641,6 +2660,23 @@ mod tests {
     }
 
     #[test]
+    fn date_in_mul_div_returns_invalid_argument() {
+        let registry = default_si_registry();
+        let e = run_with_registry("@2026-01-01 * 2", &registry).unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::InvalidArgument(msg) if msg.contains("multiplication")));
+        let e = run_with_registry("@2026-01-01 / 2", &registry).unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::InvalidArgument(msg) if msg.contains("division")));
+    }
+
+    #[test]
+    fn date_plus_date_in_add_returns_invalid_argument() {
+        let registry = default_si_registry();
+        // Date + Date is not supported; only + duration, - duration, or date - date.
+        let e = run_with_registry("@2026-01-01 + @2026-01-02", &registry).unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::InvalidArgument(msg) if msg.contains("date")));
+    }
+
+    #[test]
     fn run_vector_index_dot() {
         assert_eq!(run_format("[1, 2, 3, 4].0").unwrap(), "1");
         assert_eq!(run_format("[1, 2, 3, 4].1").unwrap(), "2");
@@ -3567,6 +3603,268 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(matches!(&results[0], Ok(Some(Value::Numeric(q))) if (q.value() - 1.0).abs() < 1e-10));
         assert!(matches!(&results[1], Ok(Some(Value::Numeric(q))) if (q.value() - 2.0).abs() < 1e-10));
+    }
+
+    #[test]
+    fn stream_of_maps_times_scalar_yields_run_error_not_panic() {
+        // Reproduces: CSV file -> computation block "$x * 10" -> stream consumes map elements.
+        // Without fix, apply_map_op calls mul_values(map, 10) which hits value_to_expr_unit(Map) -> panic (WASM "unreachable").
+        use crate::quantity::Quantity;
+        use crate::symbolic::Value;
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
+        use futures::sink::SinkExt;
+        use futures::stream::StreamExt;
+
+        let registry = default_si_registry();
+        let (mut tx, rx) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let handle_id = register(rx);
+
+        let (val, db) = run_with_stream_inputs(
+            "$x * 10",
+            &registry,
+            std::collections::HashMap::from([("x".to_string(), handle_id)]),
+        )
+        .unwrap();
+
+        let lv = match &val {
+            Value::Vector(v) => v.inner.clone(),
+            _ => panic!("expected vector"),
+        };
+
+        let row = record_to_chunk_element(vec![(
+            "col".to_string(),
+            Value::Numeric(Quantity::new(1.0, Unit::scalar())),
+        )])
+        .unwrap();
+        let chunk: Chunk = vec![Ok(row)];
+        futures::executor::block_on(tx.send(chunk)).unwrap();
+        drop(tx);
+
+        let stream = vector_into_stream(&db, lv);
+        let results: Vec<_> = futures::executor::block_on(stream.collect());
+        assert_eq!(results.len(), 1, "one map element in stream");
+        match &results[0] {
+            Err(e) => assert!(
+                matches!(e.kind, RunErrorKind::UnsupportedVectorOperation),
+                "expected UnsupportedVectorOperation when multiplying map by scalar, got {:?}",
+                e.kind
+            ),
+            Ok(_) => panic!("expected Err(UnsupportedVectorOperation), got Ok"),
+        }
+    }
+
+    #[test]
+    fn stream_of_maps_unary_func_yields_run_error_not_panic() {
+        // sin($x) when $x is CSV rows: apply_unary_builtin(sin, map) must return Err, not panic.
+        use crate::quantity::Quantity;
+        use crate::symbolic::Value;
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
+        use futures::sink::SinkExt;
+        use futures::stream::StreamExt;
+
+        let registry = default_si_registry();
+        let (mut tx, rx) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let handle_id = register(rx);
+
+        let (val, db) = run_with_stream_inputs(
+            "sin($x)",
+            &registry,
+            std::collections::HashMap::from([("x".to_string(), handle_id)]),
+        )
+        .unwrap();
+
+        let lv = match &val {
+            Value::Vector(v) => v.inner.clone(),
+            _ => panic!("expected vector"),
+        };
+
+        let row = record_to_chunk_element(vec![(
+            "a".to_string(),
+            Value::Numeric(Quantity::new(1.0, Unit::scalar())),
+        )])
+        .unwrap();
+        let chunk: Chunk = vec![Ok(row)];
+        futures::executor::block_on(tx.send(chunk)).unwrap();
+        drop(tx);
+
+        let stream = vector_into_stream(&db, lv);
+        let results: Vec<_> = futures::executor::block_on(stream.collect());
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            Err(e) => assert!(
+                matches!(e.kind, RunErrorKind::UnsupportedVectorOperation),
+                "expected UnsupportedVectorOperation when applying sin to map, got {:?}",
+                e.kind
+            ),
+            Ok(_) => panic!("expected Err(UnsupportedVectorOperation), got Ok"),
+        }
+    }
+
+    #[test]
+    fn stream_undefined_unary_func_yields_undefined_result() {
+        // sin($x) when stream yields Undefined: apply_unary_builtin returns UndefinedResult.
+        use crate::symbolic::Value;
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
+        use futures::sink::SinkExt;
+        use futures::stream::StreamExt;
+
+        let registry = default_si_registry();
+        let (mut tx, rx) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let handle_id = register(rx);
+
+        let (val, db) = run_with_stream_inputs(
+            "sin($x)",
+            &registry,
+            std::collections::HashMap::from([("x".to_string(), handle_id)]),
+        )
+        .unwrap();
+
+        let lv = match &val {
+            Value::Vector(v) => v.inner.clone(),
+            _ => panic!("expected vector"),
+        };
+
+        let chunk: Chunk = vec![Ok(Some(Value::Undefined))];
+        futures::executor::block_on(tx.send(chunk)).unwrap();
+        drop(tx);
+
+        let stream = vector_into_stream(&db, lv);
+        let results: Vec<_> = futures::executor::block_on(stream.collect());
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            Err(e) => assert!(matches!(e.kind, RunErrorKind::UndefinedResult)),
+            Ok(_) => panic!("expected Err(UndefinedResult), got Ok"),
+        }
+    }
+
+    #[test]
+    fn stream_date_unary_func_yields_invalid_argument() {
+        // sin($x) when stream yields Date: apply_unary_builtin returns InvalidArgument.
+        use crate::symbolic::Value;
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
+        use futures::sink::SinkExt;
+        use futures::stream::StreamExt;
+
+        let registry = default_si_registry();
+        let date_val = run_with_registry("@2026-01-01", &registry).unwrap();
+        assert!(matches!(date_val, Value::Date(_)));
+
+        let (mut tx, rx) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let handle_id = register(rx);
+
+        let (val, db) = run_with_stream_inputs(
+            "sin($x)",
+            &registry,
+            std::collections::HashMap::from([("x".to_string(), handle_id)]),
+        )
+        .unwrap();
+
+        let lv = match &val {
+            Value::Vector(v) => v.inner.clone(),
+            _ => panic!("expected vector"),
+        };
+
+        let chunk: Chunk = vec![Ok(Some(date_val))];
+        futures::executor::block_on(tx.send(chunk)).unwrap();
+        drop(tx);
+
+        let stream = vector_into_stream(&db, lv);
+        let results: Vec<_> = futures::executor::block_on(stream.collect());
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            Err(e) => assert!(
+                matches!(e.kind, RunErrorKind::InvalidArgument(ref msg) if msg.contains("date")),
+                "expected InvalidArgument with date, got {:?}",
+                e.kind
+            ),
+            Ok(_) => panic!("expected Err(InvalidArgument), got Ok"),
+        }
+    }
+
+    #[test]
+    fn stream_of_maps_plus_scalar_yields_run_error() {
+        // $x + 1 when $x is CSV rows: add_values(map, scalar) returns UnsupportedVectorOperation.
+        use crate::quantity::Quantity;
+        use crate::symbolic::Value;
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
+        use futures::sink::SinkExt;
+        use futures::stream::StreamExt;
+
+        let registry = default_si_registry();
+        let (mut tx, rx) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let handle_id = register(rx);
+
+        let (val, db) = run_with_stream_inputs(
+            "$x + 1",
+            &registry,
+            std::collections::HashMap::from([("x".to_string(), handle_id)]),
+        )
+        .unwrap();
+
+        let lv = match &val {
+            Value::Vector(v) => v.inner.clone(),
+            _ => panic!("expected vector"),
+        };
+
+        let row = record_to_chunk_element(vec![(
+            "a".to_string(),
+            Value::Numeric(Quantity::new(1.0, Unit::scalar())),
+        )])
+        .unwrap();
+        let chunk: Chunk = vec![Ok(row)];
+        futures::executor::block_on(tx.send(chunk)).unwrap();
+        drop(tx);
+
+        let stream = vector_into_stream(&db, lv);
+        let results: Vec<_> = futures::executor::block_on(stream.collect());
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            Err(e) => assert!(matches!(e.kind, RunErrorKind::UnsupportedVectorOperation)),
+            Ok(_) => panic!("expected Err(UnsupportedVectorOperation), got Ok"),
+        }
+    }
+
+    #[test]
+    fn stream_of_maps_compare_scalar_yields_run_error() {
+        // $x > 0 when $x is CSV rows: cmp_values(map, scalar) returns UnsupportedVectorOperation.
+        use crate::quantity::Quantity;
+        use crate::symbolic::Value;
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
+        use futures::sink::SinkExt;
+        use futures::stream::StreamExt;
+
+        let registry = default_si_registry();
+        let (mut tx, rx) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let handle_id = register(rx);
+
+        let (val, db) = run_with_stream_inputs(
+            "$x > 0",
+            &registry,
+            std::collections::HashMap::from([("x".to_string(), handle_id)]),
+        )
+        .unwrap();
+
+        let lv = match &val {
+            Value::Vector(v) => v.inner.clone(),
+            _ => panic!("expected vector"),
+        };
+
+        let row = record_to_chunk_element(vec![(
+            "a".to_string(),
+            Value::Numeric(Quantity::new(1.0, Unit::scalar())),
+        )])
+        .unwrap();
+        let chunk: Chunk = vec![Ok(row)];
+        futures::executor::block_on(tx.send(chunk)).unwrap();
+        drop(tx);
+
+        let stream = vector_into_stream(&db, lv);
+        let results: Vec<_> = futures::executor::block_on(stream.collect());
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            Err(e) => assert!(matches!(e.kind, RunErrorKind::UnsupportedVectorOperation)),
+            Ok(_) => panic!("expected Err(UnsupportedVectorOperation), got Ok"),
+        }
     }
 
     #[test]

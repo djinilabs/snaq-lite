@@ -152,45 +152,86 @@ function stripLspFraming(raw: string): string {
   return body
 }
 
-/** Split concatenated LSP frames into separate JSON bodies. */
+/** Extract position from JSON.parse SyntaxError message (e.g. "... at position 435" or "... at index 435"). */
+function getJsonParsePosition(err: unknown): number | undefined {
+  const msg = err instanceof Error ? err.message : String(err)
+  const m = /position\s+(\d+)/i.exec(msg) ?? /index\s+(\d+)/i.exec(msg)
+  return m ? parseInt(m[1], 10) : undefined
+}
+
+/**
+ * Split raw into LSP JSON-RPC bodies. Handles:
+ * - Content-Length: N\r\n\r\n{body} (one or more frames at start)
+ * - Leading plain JSON followed by more data (WASM can flush multiple messages in one postMessage).
+ */
 function splitLspFrames(raw: string): string[] {
   const out: string[] = []
-  let rest = raw
+  let rest = raw.trimStart()
   while (rest.length > 0) {
-    const { body, rest: next } = takeOneLspFrame(rest)
-    if (body.length > 0) out.push(body)
-    if (next.length === 0) break
-    rest = next
+    rest = rest.trimStart()
+    if (rest.length === 0) break
+    const match = LSP_HEADER_RE.exec(rest)
+    if (match && match.index === 0) {
+      const len = parseInt(match[1], 10)
+      const start = match[0].length
+      const body = rest.slice(start, start + len)
+      if (body.length > 0) out.push(body)
+      rest = rest.slice(start + len).trimStart()
+      continue
+    }
+    if (rest.startsWith('{')) {
+      try {
+        JSON.parse(rest)
+        out.push(rest)
+        break
+      } catch (e) {
+        const pos = getJsonParsePosition(e)
+        if (pos != null && pos > 0 && pos <= rest.length) {
+          const first = rest.slice(0, pos).trimEnd()
+          if (first.length > 0) out.push(first)
+          rest = rest.slice(pos).trimStart()
+          continue
+        }
+      }
+    }
+    if (rest.length > 0) out.push(rest)
+    break
   }
   return out
+}
+
+type LspParsedBody = {
+  method?: string
+  id?: string | number
+  params?: unknown
+  result?: unknown
+  error?: unknown
 }
 
 /**
  * Process one JSON-RPC body (after stripping LSP framing): route and optionally push to connection.
  */
 function processOneLspBody(body: string): void {
+  let parsed: LspParsedBody
   try {
-    const parsed = JSON.parse(body) as { method?: string; id?: string | number; params?: unknown }
-    if (parsed && typeof parsed.method === 'string' && parsed.id === undefined) {
-      pushE2ELspLogIn(parsed.method, parsed.params)
-    }
-  } catch {
-    // not JSON or not a notification
+    parsed = JSON.parse(body) as LspParsedBody
+  } catch (e) {
+    routeMessage(body)
+    console.error('[LSP] Incoming push error (e.g. duplicate response):', e)
+    return
+  }
+  if (typeof parsed.method === 'string' && parsed.id === undefined) {
+    pushE2ELspLogIn(parsed.method, parsed.params)
   }
   routeMessage(body)
-  try {
-    const parsed = JSON.parse(body) as { id?: string | number; result?: unknown; error?: unknown }
-    if (parsed && typeof parsed.id !== 'undefined') {
-      const id = parsed.id
-      if (deliveredResponseIds.has(id)) {
-        return
-      }
-      deliveredResponseIds.add(id)
+  if (typeof parsed.id !== 'undefined') {
+    const id = parsed.id
+    if (deliveredResponseIds.has(id)) {
+      return
     }
-    incomingLspPush?.(body)
-  } catch (e) {
-    console.error('[LSP] Incoming push error (e.g. duplicate response):', e)
+    deliveredResponseIds.add(id)
   }
+  incomingLspPush?.(body)
 }
 
 /**

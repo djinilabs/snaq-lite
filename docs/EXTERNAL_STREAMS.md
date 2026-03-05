@@ -105,6 +105,8 @@ Format is detected from the file path (extension, and optionally magic bytes for
 
 Tabular files (CSV, and Parquet/Arrow when the feature is enabled) yield a stream of maps; the language can index by column with `row.col` or `row["col"]`. The parser trait (**TabularParser**) is implemented for each format so new formats (e.g. NDJSON, Excel) can be added by implementing it and extending format detection.
 
+**Map streams and arithmetic:** Arithmetic or comparison with map values (e.g. `$x * 10` or `sin($x)` when `$x` is a CSV stream) is not supported and returns a runtime error. Use `$x.map(fn r => (r.column_name))` to get a numeric stream first, then apply arithmetic or functions.
+
 ### Example (numeric lines)
 
 With a file `numbers.txt` containing:

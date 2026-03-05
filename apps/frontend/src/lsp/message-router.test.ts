@@ -114,6 +114,84 @@ describe('message-router', () => {
         processIncomingMessage(JSON.stringify({ jsonrpc: '2.0', method: 'foo', params: {} })),
       ).not.toThrow()
     })
+
+    it('handles concatenated plain JSON + Content-Length frame without parse error', () => {
+      const push = vi.fn()
+      setIncomingLspPush(push)
+      const first = JSON.stringify({ jsonrpc: '2.0', method: 'first', params: {} })
+      const second = JSON.stringify({ jsonrpc: '2.0', method: 'second', params: {} })
+      const framed = `Content-Length: ${second.length}\r\n\r\n${second}`
+      const raw = first + framed
+      expect(() => processIncomingMessage(raw)).not.toThrow()
+      expect(push).toHaveBeenCalledTimes(2)
+      expect(push).toHaveBeenNthCalledWith(1, first)
+      expect(push).toHaveBeenNthCalledWith(2, second)
+      setIncomingLspPush(null)
+    })
+
+    it('handles single Content-Length frame', () => {
+      const push = vi.fn()
+      setIncomingLspPush(push)
+      const body = JSON.stringify({ jsonrpc: '2.0', method: 'diagnostics', params: {} })
+      const raw = `Content-Length: ${body.length}\r\n\r\n${body}`
+      expect(() => processIncomingMessage(raw)).not.toThrow()
+      expect(push).toHaveBeenCalledTimes(1)
+      expect(push).toHaveBeenCalledWith(body)
+      setIncomingLspPush(null)
+    })
+
+    it('handles two Content-Length frames in one message', () => {
+      const push = vi.fn()
+      setIncomingLspPush(push)
+      const a = JSON.stringify({ jsonrpc: '2.0', method: 'a', params: {} })
+      const b = JSON.stringify({ jsonrpc: '2.0', method: 'b', params: {} })
+      const raw = `Content-Length: ${a.length}\r\n\r\n${a}Content-Length: ${b.length}\r\n\r\n${b}`
+      expect(() => processIncomingMessage(raw)).not.toThrow()
+      expect(push).toHaveBeenCalledTimes(2)
+      expect(push).toHaveBeenNthCalledWith(1, a)
+      expect(push).toHaveBeenNthCalledWith(2, b)
+      setIncomingLspPush(null)
+    })
+
+    it('handles plain JSON + two Content-Length frames (three messages)', () => {
+      const push = vi.fn()
+      setIncomingLspPush(push)
+      const first = JSON.stringify({ jsonrpc: '2.0', method: 'first', params: {} })
+      const second = JSON.stringify({ jsonrpc: '2.0', method: 'second', params: {} })
+      const third = JSON.stringify({ jsonrpc: '2.0', method: 'third', params: {} })
+      const framed2 = `Content-Length: ${second.length}\r\n\r\n${second}`
+      const framed3 = `Content-Length: ${third.length}\r\n\r\n${third}`
+      const raw = first + framed2 + framed3
+      expect(() => processIncomingMessage(raw)).not.toThrow()
+      expect(push).toHaveBeenCalledTimes(3)
+      expect(push).toHaveBeenNthCalledWith(1, first)
+      expect(push).toHaveBeenNthCalledWith(2, second)
+      expect(push).toHaveBeenNthCalledWith(3, third)
+      setIncomingLspPush(null)
+    })
+
+    it('handles Content-Length frames with \\n only (no \\r)', () => {
+      const push = vi.fn()
+      setIncomingLspPush(push)
+      const a = JSON.stringify({ jsonrpc: '2.0', method: 'a', params: {} })
+      const b = JSON.stringify({ jsonrpc: '2.0', method: 'b', params: {} })
+      const raw = `Content-Length: ${a.length}\n\n${a}Content-Length: ${b.length}\n\n${b}`
+      expect(() => processIncomingMessage(raw)).not.toThrow()
+      expect(push).toHaveBeenCalledTimes(2)
+      expect(push).toHaveBeenNthCalledWith(1, a)
+      expect(push).toHaveBeenNthCalledWith(2, b)
+      setIncomingLspPush(null)
+    })
+
+    it('empty or whitespace-only input does not throw and does not call push', () => {
+      const push = vi.fn()
+      setIncomingLspPush(push)
+      expect(() => processIncomingMessage('')).not.toThrow()
+      expect(push).not.toHaveBeenCalled()
+      expect(() => processIncomingMessage('  \n  \r\n  ')).not.toThrow()
+      expect(push).not.toHaveBeenCalled()
+      setIncomingLspPush(null)
+    })
   })
 
   describe('createStreamInputResponse', () => {

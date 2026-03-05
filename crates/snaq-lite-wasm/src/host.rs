@@ -358,7 +358,7 @@ pub fn start_feeder_host(
             }
 
             read_count += 1;
-            if read_count % FEEDER_YIELD_EVERY == 0 {
+            if read_count.is_multiple_of(FEEDER_YIELD_EVERY) {
                 yield_to_event_loop().await;
             }
         }

@@ -655,6 +655,19 @@ fn apply_unary_builtin(
             }
         }
     }
+    // Reject types that value_to_symbolic_expr would panic on (Map, Undefined, Date).
+    match v {
+        Value::Map(_) => {
+            return Err(RunError::new(RunErrorKind::UnsupportedVectorOperation))
+        }
+        Value::Undefined => return Err(RunError::new(RunErrorKind::UndefinedResult)),
+        Value::Date(_) => {
+            return Err(RunError::new(RunErrorKind::InvalidArgument(
+                "date not supported for this function".to_string(),
+            )))
+        }
+        _ => {}
+    }
     let sym_args = vec![value_to_symbolic_expr(v)];
     Ok(functions::symbolic_call(name, &sym_args, Unit::scalar()))
 }
@@ -2846,6 +2859,8 @@ fn cmp_values(
         (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
             Err(err(RunErrorKind::UnknownFunction("function value cannot be used in comparison".to_string())))
         }
+        (Value::Map(_), _) | (_, Value::Map(_)) => Err(err(RunErrorKind::UnsupportedVectorOperation)),
+        (Value::Undefined, _) | (_, Value::Undefined) => Err(err(RunErrorKind::UndefinedResult)),
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
@@ -3025,6 +3040,11 @@ fn add_values(
         (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
             Err(err(RunErrorKind::UnknownFunction("function value cannot be used in arithmetic".to_string())))
         }
+        (Value::Map(_), _) | (_, Value::Map(_)) => Err(err(RunErrorKind::UnsupportedVectorOperation)),
+        (Value::Undefined, _) | (_, Value::Undefined) => Err(err(RunErrorKind::UndefinedResult)),
+        (Value::Date(_), _) | (_, Value::Date(_)) => Err(err(RunErrorKind::InvalidArgument(
+            "date only supports + duration, - duration, or date - date".to_string(),
+        ))),
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
@@ -3151,6 +3171,11 @@ fn sub_values(
         (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
             Err(err(RunErrorKind::UnknownFunction("function value cannot be used in arithmetic".to_string())))
         }
+        (Value::Map(_), _) | (_, Value::Map(_)) => Err(err(RunErrorKind::UnsupportedVectorOperation)),
+        (Value::Undefined, _) | (_, Value::Undefined) => Err(err(RunErrorKind::UndefinedResult)),
+        (Value::Date(_), _) | (_, Value::Date(_)) => Err(err(RunErrorKind::InvalidArgument(
+            "date only supports + duration, - duration, or date - date".to_string(),
+        ))),
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
@@ -3243,6 +3268,11 @@ fn mul_values(
         (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
             Err(err(RunErrorKind::UnknownFunction("function value cannot be used in arithmetic".to_string())))
         }
+        (Value::Map(_), _) | (_, Value::Map(_)) => Err(err(RunErrorKind::UnsupportedVectorOperation)),
+        (Value::Undefined, _) | (_, Value::Undefined) => Err(err(RunErrorKind::UndefinedResult)),
+        (Value::Date(_), _) | (_, Value::Date(_)) => Err(err(RunErrorKind::InvalidArgument(
+            "date cannot be used in multiplication".to_string(),
+        ))),
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);
@@ -3351,6 +3381,11 @@ fn div_values(
         (Value::Function(_), _) | (_, Value::Function(_)) | (Value::BuiltinFunction(_), _) | (_, Value::BuiltinFunction(_)) => {
             Err(err(RunErrorKind::UnknownFunction("function value cannot be used in arithmetic".to_string())))
         }
+        (Value::Map(_), _) | (_, Value::Map(_)) => Err(err(RunErrorKind::UnsupportedVectorOperation)),
+        (Value::Undefined, _) | (_, Value::Undefined) => Err(err(RunErrorKind::UndefinedResult)),
+        (Value::Date(_), _) | (_, Value::Date(_)) => Err(err(RunErrorKind::InvalidArgument(
+            "date cannot be used in division".to_string(),
+        ))),
         _ => {
             let (ea, ua) = value_to_expr_unit(a);
             let (eb, ub) = value_to_expr_unit(b);

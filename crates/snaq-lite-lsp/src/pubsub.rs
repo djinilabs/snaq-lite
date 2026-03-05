@@ -148,6 +148,57 @@ pub struct UnsubscribeWidgetParams {
     pub widget_id: String,
 }
 
+// ---- Result summary and fetchResultSlice ----
+
+/// Result type for Completed payload (resultType). Serialized as PascalCase to match frontend (Vector, Map, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum ResultType {
+    Scalar,
+    Vector,
+    Map,
+    Undefined,
+}
+
+/// Summary for vector (length) or map (keys or keyCount).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub length: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_count: Option<usize>,
+}
+
+/// Params for snaqlite/graph/fetchResultSlice request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchResultSliceParams {
+    pub widget_id: String,
+    /// 0-based path: empty = root; numbers = vector index; strings = map key.
+    pub path: Vec<PathSegment>,
+    pub offset: u64,
+    pub limit: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PathSegment {
+    Index(u64),
+    Key(String),
+}
+
+/// Response for snaqlite/graph/fetchResultSlice.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchResultSliceResponse {
+    pub elements: Vec<serde_json::Value>,
+    pub total_count: u64,
+    pub has_more: bool,
+}
+
 /// Serialize a single stream element (Result<Option<Value>, RunError>) to JSON for the protocol.
 /// Uses format_value_for_display for Ok(Some(Value)); undefined → null; error → { kind, message }.
 pub fn stream_element_to_json(
@@ -164,5 +215,43 @@ pub fn stream_element_to_json(
             "kind": "error",
             "message": e.to_string()
         }),
+    }
+}
+
+/// Serialize a Value to a ResultSliceElement: scalar → { display }; vector → { type, path }; map → { type, path [, keys] }.
+/// path_json is the path to this value as JSON array (numbers and strings) for client to request children.
+/// Nested vector length is omitted (client gets totalCount from first fetchResultSlice for that path).
+pub fn value_to_slice_element(
+    db: &dyn salsa::Database,
+    value: &Value,
+    path_json: &[serde_json::Value],
+) -> serde_json::Value {
+    use snaq_lite_lang::map_registry;
+    match value {
+        Value::Vector(_) => serde_json::json!({
+            "type": "vector",
+            "path": path_json
+        }),
+        Value::Map(id) => {
+            let keys: Vec<String> = map_registry::get(*id)
+                .map(|entries| entries.iter().map(|(k, _)| k.clone()).collect())
+                .unwrap_or_default();
+            let key_count = keys.len();
+            let mut obj = serde_json::json!({
+                "type": "map",
+                "path": path_json
+            });
+            let obj_map = obj.as_object_mut().unwrap();
+            if key_count <= 20 {
+                obj_map.insert("keys".to_string(), serde_json::json!(keys));
+            } else {
+                obj_map.insert("keyCount".to_string(), serde_json::json!(key_count));
+            }
+            obj
+        }
+        _ => {
+            let display = format_value_for_display(db, value).unwrap_or_else(|_| "<error>".to_string());
+            serde_json::json!({ "display": display })
+        }
     }
 }

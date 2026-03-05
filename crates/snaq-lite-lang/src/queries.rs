@@ -1228,20 +1228,21 @@ fn eval_binding_chain<'db>(
     db: &'db dyn salsa::Database,
     scope: Scope<'db>,
     expr: Expression<'db>,
+    registry: &UnitRegistry,
 ) -> Result<(Value, Scope<'db>), RunError> {
     match expr.data(db) {
         ExprData::Binding(name, rhs) => {
             if functions::param_names(name).is_some() {
                 return Err(run_err_with_span(db, expr, RunErrorKind::CannotObfuscateBuiltin(name.clone())));
             }
-            let (v, inner_scope) = eval_binding_chain(db, scope, *rhs)?;
+            let (v, inner_scope) = eval_binding_chain(db, scope, *rhs, registry)?;
             let stored = StoredValue::from_value(&v)?;
             let new_env = inner_scope.env(db).clone().extend(name.clone(), stored);
             let new_scope = Scope::new(db, new_env);
             Ok((v, new_scope))
         }
         _ => {
-            let v = value(db, scope, expr)?;
+            let v = value_inner(db, scope, expr, registry)?;
             Ok((v, scope))
         }
     }
@@ -1249,15 +1250,30 @@ fn eval_binding_chain<'db>(
 
 /// Evaluate an expression to a Value (Numeric or Symbolic). Uses the registry set by run() (thread-local).
 /// Scope is passed so variable lookups and block bindings are memoized per (scope, expr).
+/// We call with_registry only once here so that recursive evaluation does not stack with_registry
+/// frames (fixes "Maximum call stack size exceeded" on WASM where the stack is small).
 #[salsa::tracked]
 pub fn value<'db>(
     db: &'db dyn salsa::Database,
     scope: Scope<'db>,
     expr: Expression<'db>,
 ) -> Result<Value, RunError> {
+    let _data = expr.data(db);
+    let _env = scope.env(db);
+    with_registry(|registry| value_inner(db, scope, expr, registry))
+}
+
+/// Inner evaluator: same logic as value() but takes registry and recurses without with_registry,
+/// so stack depth is one frame per expression level instead of two (value + with_registry).
+fn value_inner<'db>(
+    db: &'db dyn salsa::Database,
+    scope: Scope<'db>,
+    expr: Expression<'db>,
+    registry: &UnitRegistry,
+) -> Result<Value, RunError> {
     let data = expr.data(db);
     let env = scope.env(db);
-    with_registry(|registry| match data {
+    match data {
         ExprData::Lit(q) => Ok(Value::Numeric(q.clone())),
         ExprData::LitFuzzyBool(f) => Ok(Value::FuzzyBool(f.clone())),
         ExprData::LitDate(gd) => Ok(Value::Date(gd.clone())),
@@ -1289,23 +1305,23 @@ pub fn value<'db>(
             Ok(Value::Undefined)
         }
         ExprData::Add(l, r) => {
-            let left = value(db, scope, *l)?;
-            let right = value(db, scope, *r)?;
+            let left = value_inner(db, scope, *l, registry)?;
+            let right = value_inner(db, scope, *r, registry)?;
             add_values(&left, &right, registry, Some(db), expr.span(db))
         }
         ExprData::Sub(l, r) => {
-            let left = value(db, scope, *l)?;
-            let right = value(db, scope, *r)?;
+            let left = value_inner(db, scope, *l, registry)?;
+            let right = value_inner(db, scope, *r, registry)?;
             sub_values(&left, &right, registry, Some(db), expr.span(db))
         }
         ExprData::Mul(l, r) => {
-            let left = value(db, scope, *l)?;
-            let right = value(db, scope, *r)?;
+            let left = value_inner(db, scope, *l, registry)?;
+            let right = value_inner(db, scope, *r, registry)?;
             mul_values(&left, &right, registry, Some(db), expr.span(db))
         }
         ExprData::Div(l, r) => {
-            let left = value(db, scope, *l)?;
-            let right = value(db, scope, *r)?;
+            let left = value_inner(db, scope, *l, registry)?;
+            let right = value_inner(db, scope, *r, registry)?;
             match div_values(&left, &right, registry, Some(db), expr.span(db)) {
                 Ok(v) => Ok(v),
                 Err(e) if matches!(e.kind, RunErrorKind::DivisionByZero) => Ok(Value::Undefined),
@@ -1313,38 +1329,38 @@ pub fn value<'db>(
             }
         }
         ExprData::Eq(l, r) => {
-            let left = value(db, scope, *l)?;
-            let right = value(db, scope, *r)?;
+            let left = value_inner(db, scope, *l, registry)?;
+            let right = value_inner(db, scope, *r, registry)?;
             cmp_values(CmpOp::Eq, &left, &right, registry, Some(db), expr.span(db))
         }
         ExprData::Ne(l, r) => {
-            let left = value(db, scope, *l)?;
-            let right = value(db, scope, *r)?;
+            let left = value_inner(db, scope, *l, registry)?;
+            let right = value_inner(db, scope, *r, registry)?;
             cmp_values(CmpOp::Ne, &left, &right, registry, Some(db), expr.span(db))
         }
         ExprData::Lt(l, r) => {
-            let left = value(db, scope, *l)?;
-            let right = value(db, scope, *r)?;
+            let left = value_inner(db, scope, *l, registry)?;
+            let right = value_inner(db, scope, *r, registry)?;
             cmp_values(CmpOp::Lt, &left, &right, registry, Some(db), expr.span(db))
         }
         ExprData::Le(l, r) => {
-            let left = value(db, scope, *l)?;
-            let right = value(db, scope, *r)?;
+            let left = value_inner(db, scope, *l, registry)?;
+            let right = value_inner(db, scope, *r, registry)?;
             cmp_values(CmpOp::Le, &left, &right, registry, Some(db), expr.span(db))
         }
         ExprData::Gt(l, r) => {
-            let left = value(db, scope, *l)?;
-            let right = value(db, scope, *r)?;
+            let left = value_inner(db, scope, *l, registry)?;
+            let right = value_inner(db, scope, *r, registry)?;
             cmp_values(CmpOp::Gt, &left, &right, registry, Some(db), expr.span(db))
         }
         ExprData::Ge(l, r) => {
-            let left = value(db, scope, *l)?;
-            let right = value(db, scope, *r)?;
+            let left = value_inner(db, scope, *l, registry)?;
+            let right = value_inner(db, scope, *r, registry)?;
             cmp_values(CmpOp::Ge, &left, &right, registry, Some(db), expr.span(db))
         }
         ExprData::And(l, r) => {
-            let left = value(db, scope, *l)?;
-            let right = value(db, scope, *r)?;
+            let left = value_inner(db, scope, *l, registry)?;
+            let right = value_inner(db, scope, *r, registry)?;
             match (&left, &right) {
                 (Value::FuzzyBool(f1), Value::FuzzyBool(f2)) => {
                     Ok(Value::FuzzyBool(f1.clone().and_(f2)))
@@ -1353,14 +1369,14 @@ pub fn value<'db>(
             }
         }
         ExprData::Neg(inner) => {
-            let v = value(db, scope, *inner)?;
+            let v = value_inner(db, scope, *inner, registry)?;
             neg_value(&v, expr.span(db))
         }
-        ExprData::Call(name, args) => eval_call(db, scope, name, args, registry)
+        ExprData::Call(name, args) => eval_call_with(db, scope, name, args, registry, |s, e| value_inner(db, s, e, registry))
             .map_err(|e| with_span_if_missing(e, expr.span(db))),
         ExprData::As(left, right) => {
-            let left_val = value(db, scope, *left)?;
-            let right_val = value(db, scope, *right)?;
+            let left_val = value_inner(db, scope, *left, registry)?;
+            let right_val = value_inner(db, scope, *right, registry)?;
             let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
             let target_quantity = right_val.to_quantity(&sym_reg).map_err(|_| {
                 RunError::new(RunErrorKind::UnknownUnit(
@@ -1407,7 +1423,7 @@ pub fn value<'db>(
             // creating tracked structs from outside). Store results for lazy streaming.
             let results: Vec<Result<Option<Value>, RunError>> = exprs
                 .iter()
-                .map(|e| value(db, scope, *e).map(Some))
+                .map(|e| value_inner(db, scope, *e, registry).map(Some))
                 .collect();
             Ok(Value::Vector(VectorValue::column(LazyVector::from_evaluated(
                 results,
@@ -1416,20 +1432,20 @@ pub fn value<'db>(
         ExprData::MapLiteral(entries) => {
             let evaluated: Vec<(String, Value)> = entries
                 .iter()
-                .map(|(k, e)| Ok((k.clone(), value(db, scope, *e)?)))
+                .map(|(k, e)| Ok((k.clone(), value_inner(db, scope, *e, registry)?)))
                 .collect::<Result<Vec<_>, RunError>>()?;
             let id = map_registry::register(evaluated);
             Ok(Value::Map(id))
         }
         ExprData::Transpose(inner) => {
-            let v = value(db, scope, *inner)?;
+            let v = value_inner(db, scope, *inner, registry)?;
             match v {
                 Value::Vector(v) => Ok(Value::Vector(v.transpose())),
                 _ => Err(run_err_with_span(db, expr, RunErrorKind::ExpectedVector)),
             }
         }
         ExprData::Member(base, name) => {
-            let base_val = value(db, scope, *base)?;
+            let base_val = value_inner(db, scope, *base, registry)?;
             match &base_val {
                 Value::Map(id) => {
                     let v = map_registry::get_key(*id, name);
@@ -1450,7 +1466,7 @@ pub fn value<'db>(
             }
         }
         ExprData::MethodCall(base, name, args) => {
-            let base_val = value(db, scope, *base)?;
+            let base_val = value_inner(db, scope, *base, registry)?;
             let VectorValue { inner, orientation } = match &base_val {
                 Value::Vector(v) => v.clone(),
                 _ => return Err(run_err_with_span(db, expr, RunErrorKind::ExpectedVector)),
@@ -1459,7 +1475,7 @@ pub fn value<'db>(
                 "take" => {
                     let arg_vals: Vec<Value> = args
                         .iter()
-                        .map(|(_, e)| value(db, scope, *e))
+                        .map(|(_, e)| value_inner(db, scope, *e, registry))
                         .collect::<Result<Vec<_>, _>>()?;
                     if arg_vals.len() != 2 {
                         return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(format!(
@@ -1505,7 +1521,7 @@ pub fn value<'db>(
                         ))));
                     }
                     let (_, fn_expr) = &args[0];
-                    let fn_val = value(db, scope, *fn_expr)?;
+                    let fn_val = value_inner(db, scope, *fn_expr, registry)?;
                     let collected = collect_vector_stream(db, inner);
                     let results: Vec<Result<Option<Value>, RunError>> = match &fn_val {
                         Value::Function(uf) => {
@@ -1613,7 +1629,7 @@ pub fn value<'db>(
                         ))));
                     }
                     let (_, p_expr) = &args[0];
-                    let p_val = value(db, scope, *p_expr)?;
+                    let p_val = value_inner(db, scope, *p_expr, registry)?;
                     let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
                     let p_q = p_val.to_quantity(&sym_reg).map_err(|_| {
                         RunError::new(RunErrorKind::InvalidArgument(
@@ -1653,7 +1669,7 @@ pub fn value<'db>(
                         ))));
                     }
                     let (_, other_expr) = &args[0];
-                    let other_val = value(db, scope, *other_expr)?;
+                    let other_val = value_inner(db, scope, *other_expr, registry)?;
                     let VectorValue { inner: other_inner, .. } = match &other_val {
                         Value::Vector(v) => v.clone(),
                         _ => {
@@ -1784,7 +1800,7 @@ pub fn value<'db>(
             }
         }
         ExprData::Index(base, key_string) => {
-            let base_val = value(db, scope, *base)?;
+            let base_val = value_inner(db, scope, *base, registry)?;
             let env = scope.env(db);
             match &base_val {
                 Value::Map(id) => {
@@ -1817,8 +1833,8 @@ pub fn value<'db>(
             }
         }
         ExprData::WithPrecision(left, right) => {
-            let left_val = value(db, scope, *left)?;
-            let right_val = value(db, scope, *right)?;
+            let left_val = value_inner(db, scope, *left, registry)?;
+            let right_val = value_inner(db, scope, *right, registry)?;
             let left_q = match &left_val {
                 Value::Numeric(q) => q.clone(),
                 _ => return Err(run_err_with_span(db, expr, RunErrorKind::TildeRequiresNumeric)),
@@ -1838,7 +1854,7 @@ pub fn value<'db>(
             )))
         }
         ExprData::If(cond_expr, then_expr, else_expr) => {
-            eval_if(db, scope, *cond_expr, *then_expr, *else_expr, registry)
+            eval_if_with(db, scope, *cond_expr, *then_expr, *else_expr, registry, |s, e| value_inner(db, s, e, registry))
                 .map_err(|e| with_span_if_missing(e, expr.span(db)))
         }
         ExprData::Block(exprs) => {
@@ -1877,14 +1893,14 @@ pub fn value<'db>(
                         }
                         ExprData::Binding(_, _) => {
                             let (v, new_scope) =
-                                eval_binding_chain(db, current_scope, *e)?;
+                                eval_binding_chain(db, current_scope, *e, registry)?;
                             current_scope = new_scope;
                             if i == n - 1 {
                                 return Ok(v);
                             }
                         }
                         _ => {
-                            let val = value(db, current_scope, *e)?;
+                            let val = value_inner(db, current_scope, *e, registry)?;
                             if i == n - 1 {
                                 return Ok(val);
                             }
@@ -1895,7 +1911,7 @@ pub fn value<'db>(
             }
         }
         ExprData::Binding(_, _) => {
-            let (v, _) = eval_binding_chain(db, scope, expr)?;
+            let (v, _) = eval_binding_chain(db, scope, expr, registry)?;
             Ok(v)
         }
         ExprData::Lambda(params, body) => {
@@ -1915,9 +1931,9 @@ pub fn value<'db>(
             Ok(Value::Function(Box::new(uf)))
         }
         ExprData::CallExpr(callee, args) => {
-            let callee_val = value(db, scope, *callee)?;
+            let callee_val = value_inner(db, scope, *callee, registry)?;
             match &callee_val {
-                Value::Function(uf) => eval_user_call(db, scope, uf, args, registry)
+                Value::Function(uf) => eval_user_call_with(db, scope, uf, args, registry, |s, e| value_inner(db, s, e, registry))
                     .map_err(|e| with_span_if_missing(e, expr.span(db))),
                 _ => Err(run_err_with_span(
                     db,
@@ -1928,7 +1944,7 @@ pub fn value<'db>(
                 )),
             }
         }
-    })
+    }
 }
 
 /// Convert a tracked Expression back to ExprDef (inverse of build_expression).
@@ -2084,6 +2100,7 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
 
 /// Evaluate if/then/else: crisp branch when condition is True/False, superposition when Uncertain(p).
 /// Numeric blend converts both branches to a common unit before blending mean and variance.
+#[allow(dead_code)]
 fn eval_if(
     db: &dyn salsa::Database,
     scope: Scope,
@@ -2177,21 +2194,122 @@ RunError::new(RunErrorKind::DimensionMismatch { left, right })
     Ok(Value::Symbolic(SymbolicQuantity::new(weighted, result_unit)))
 }
 
-/// Evaluate a user-defined function: bind args to params, extend closure env, evaluate body.
-fn eval_user_call(
+/// Same as [eval_if] but uses the given evaluator instead of [value], to avoid re-entering [with_registry] (WASM stack).
+fn eval_if_with<F>(
+    _db: &dyn salsa::Database,
+    scope: Scope<'_>,
+    cond_expr: Expression<'_>,
+    then_expr: Expression<'_>,
+    else_expr: Expression<'_>,
+    registry: &UnitRegistry,
+    mut eval: F,
+) -> Result<Value, RunError>
+where
+    F: FnMut(Scope<'_>, Expression<'_>) -> Result<Value, RunError>,
+{
+    use crate::fuzzy::FuzzyBool;
+    use crate::quantity::SnaqNumber;
+
+    let cond_val = eval(scope, cond_expr)?;
+    let fuzzy = match &cond_val {
+        Value::FuzzyBool(f) => f.clone(),
+        _ => return Err(RunError::new(RunErrorKind::ExpectedCondition)),
+    };
+
+    match &fuzzy {
+        FuzzyBool::True => return eval(scope, then_expr),
+        FuzzyBool::False => return eval(scope, else_expr),
+        FuzzyBool::Uncertain(_) => {}
+    }
+
+    let p = fuzzy.uncertain_probability().unwrap();
+    let then_val = eval(scope, then_expr)?;
+    let else_val = eval(scope, else_expr)?;
+
+    if matches!(&then_val, Value::FuzzyBool(_) | Value::Vector(_))
+        || matches!(&else_val, Value::FuzzyBool(_) | Value::Vector(_))
+    {
+        return Err(RunError::new(RunErrorKind::IfBranchTypeMismatch));
+    }
+
+    if let (Value::Numeric(qa), Value::Numeric(qb)) = (&then_val, &else_val) {
+        if !registry.same_dimension(qa.unit(), qb.unit()).unwrap_or(false) {
+            return Err(RunError::new(RunErrorKind::DimensionMismatch {
+                left: qa.unit().clone(),
+                right: qb.unit().clone(),
+            }));
+        }
+        let result_unit = Quantity::smaller_unit(registry, qa.unit(), qb.unit())
+            .cloned()
+            .unwrap_or_else(|| qa.unit().clone());
+        let qa_c = qa.clone().convert_to(registry, &result_unit).map_err(|e| match e {
+            crate::quantity::QuantityError::DimensionMismatch { left, right }
+            | crate::quantity::QuantityError::IncompatibleUnits(left, right) => {
+                RunError::new(RunErrorKind::DimensionMismatch { left, right })
+            }
+            _ => RunError::new(RunErrorKind::DivisionByZero),
+        })?;
+        let qb_c = qb.clone().convert_to(registry, &result_unit).map_err(|e| match e {
+            crate::quantity::QuantityError::DimensionMismatch { left, right }
+            | crate::quantity::QuantityError::IncompatibleUnits(left, right) => {
+                RunError::new(RunErrorKind::DimensionMismatch { left, right })
+            }
+            _ => RunError::new(RunErrorKind::DivisionByZero),
+        })?;
+        let mean_a = qa_c.value();
+        let var_a = qa_c.variance();
+        let mean_b = qb_c.value();
+        let var_b = qb_c.variance();
+        let blended_mean = p * mean_a + (1.0 - p) * mean_b;
+        let inner_var = p * var_a + (1.0 - p) * var_b;
+        let between_var = p * (1.0 - p) * (mean_a - mean_b).powi(2);
+        let blended_var = inner_var + between_var;
+        let q = Quantity::with_number(
+            SnaqNumber::new(blended_mean, blended_var),
+            result_unit,
+        );
+        return Ok(Value::Numeric(q));
+    }
+
+    let (ea, ua) = value_to_expr_unit(&then_val);
+    let (eb, ub) = value_to_expr_unit(&else_val);
+    if !registry.same_dimension(&ua, &ub).unwrap_or(false) {
+        return Err(RunError::new(RunErrorKind::DimensionMismatch {
+            left: ua.clone(),
+            right: ub.clone(),
+        }));
+    }
+    let result_unit = Quantity::smaller_unit(registry, &ua, &ub)
+        .cloned()
+        .unwrap_or_else(|| ua.clone());
+    let ea_scaled = scale_expr_to_unit(&then_val, &ea, &ua, &result_unit, registry)?;
+    let eb_scaled = scale_expr_to_unit(&else_val, &eb, &ub, &result_unit, registry)?;
+    let weighted = SymbolicExpr::add(
+        &SymbolicExpr::mul(&SymbolicExpr::Number(p), &ea_scaled),
+        &SymbolicExpr::mul(&SymbolicExpr::Number(1.0 - p), &eb_scaled),
+    );
+    Ok(Value::Symbolic(SymbolicQuantity::new(weighted, result_unit)))
+}
+
+/// Same as [eval_user_call] but uses the given evaluator instead of [value], to avoid re-entering [with_registry] (WASM stack).
+fn eval_user_call_with<F>(
     db: &dyn salsa::Database,
-    scope: Scope,
+    scope: Scope<'_>,
     uf: &user_function::UserFunction,
     args: &[(Option<String>, Expression<'_>)],
     _registry: &UnitRegistry,
-) -> Result<Value, RunError> {
+    mut eval: F,
+) -> Result<Value, RunError>
+where
+    F: FnMut(Scope<'_>, Expression<'_>) -> Result<Value, RunError>,
+{
     let closure_env = closure_env_get(uf.closure_env_id).ok_or_else(|| {
         RunError::new(RunErrorKind::UnknownFunction("closure env not found (wrong thread or stale id)".to_string()))
     })?;
     let param_names: Vec<String> = uf.params.iter().map(|(n, _)| n.clone()).collect();
     let mut bound: HashMap<String, Value> = HashMap::new();
     for (i, (opt_name, expr)) in args.iter().enumerate() {
-        let v = value(db, scope, *expr)?;
+        let v = eval(scope, *expr)?;
         let param = match opt_name {
             Some(n) => {
                 if !param_names.contains(n) {
@@ -2219,38 +2337,52 @@ fn eval_user_call(
             RunError::new(RunErrorKind::UnknownFunction(format!("missing argument for parameter '{name}'")))
         })?;
         let default_expr = build_expression(db, (**default_def).clone(), None);
-        let v = value(db, closure_scope, default_expr)?;
+        let v = eval(closure_scope, default_expr)?;
         bound.insert(name.clone(), v);
     }
     let mut env = closure_env;
-    // Param values must be storable; from_value rejects only Symbolic (Vector is stored via registry).
     for (name, v) in &bound {
         let stored = StoredValue::from_value(v)?;
         env = env.extend(name.clone(), stored);
     }
     let body_scope = Scope::new(db, env);
     let body_expr = build_expression(db, *uf.body.clone(), None);
-    value(db, body_scope, body_expr)
+    eval(body_scope, body_expr)
 }
 
-/// Bind call args (positional + named) to param names and evaluate.
-fn eval_call(
+/// Evaluate a user-defined function: bind args to params, extend closure env, evaluate body.
+#[allow(dead_code)]
+fn eval_user_call(
     db: &dyn salsa::Database,
     scope: Scope,
+    uf: &user_function::UserFunction,
+    args: &[(Option<String>, Expression<'_>)],
+    _registry: &UnitRegistry,
+) -> Result<Value, RunError> {
+    eval_user_call_with(db, scope, uf, args, _registry, |s, e| value(db, s, e))
+}
+
+/// Same as [eval_call] but uses the given evaluator instead of [value], to avoid re-entering [with_registry] (WASM stack).
+fn eval_call_with<F>(
+    db: &dyn salsa::Database,
+    scope: Scope<'_>,
     name: &str,
     args: &[(Option<String>, Expression<'_>)],
     registry: &UnitRegistry,
-) -> Result<Value, RunError> {
-    // Scope first: user-defined function shadows built-in.
+    mut eval: F,
+) -> Result<Value, RunError>
+where
+    F: FnMut(Scope<'_>, Expression<'_>) -> Result<Value, RunError>,
+{
     let env = scope.env(db);
     if let Some(StoredValue::Function(uf)) = env.get(name) {
-        return eval_user_call(db, scope, uf, args, registry);
+        return eval_user_call_with(db, scope, uf, args, registry, eval);
     }
     let param_names = functions::param_names(name)
         .ok_or_else(|| RunError::new(RunErrorKind::UnknownFunction(name.to_string())))?;
     let mut bound: HashMap<String, Value> = HashMap::new();
     for (i, (opt_name, expr)) in args.iter().enumerate() {
-        let v = value(db, scope, *expr)?;
+        let v = eval(scope, *expr)?;
         let param = match opt_name {
             Some(n) => {
                 if !param_names.contains(&n.as_str()) {
@@ -2427,6 +2559,18 @@ fn eval_call(
             Ok(functions::symbolic_call(name, &sym_args, Unit::scalar()))
         }
     }
+}
+
+/// Bind call args (positional + named) to param names and evaluate.
+#[allow(dead_code)]
+fn eval_call(
+    db: &dyn salsa::Database,
+    scope: Scope,
+    name: &str,
+    args: &[(Option<String>, Expression<'_>)],
+    registry: &UnitRegistry,
+) -> Result<Value, RunError> {
+    eval_call_with(db, scope, name, args, registry, |s, e| value(db, s, e))
 }
 
 fn value_to_symbolic_expr(v: &Value) -> SymbolicExpr {

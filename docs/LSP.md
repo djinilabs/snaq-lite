@@ -68,11 +68,20 @@ Running a node with graph inputs: when the server needs a node’s result (for `
 
 ### Widget subscriptions (Presentation Blocks)
 
-- **Request `snaqlite/graph/subscribeWidget`** — Params: `widgetId`, `sourceUri`. The server runs the source node with graph inputs (topological run of the subgraph, stream inputs from upstream node outputs). If the result is a vector, it streams batches to the client via `snaqlite/graph/widgetDataUpdate`; otherwise it sends a single `Completed` update.
-- **Notification `snaqlite/graph/widgetDataUpdate`** — Params: `widgetId`, `status` (`"Running"` | `"Completed"` | `"Cancelled"` | `"Error"`), optional `payload`. Same chunk protocol as `snaqlite/publishResult` (elements, offset, count for Running; totalElements or display for Completed). Notifications are flushed when the server handles the next request (e.g. hover, inlay hint, or didOpen/didChange), so the client will see pending updates on the next round-trip.
-- **Request `snaqlite/graph/unsubscribeWidget`** — Params: `widgetId`. Cancels the consumer and sends a final `widgetDataUpdate` with status `Cancelled`.
+- **Request `snaqlite/graph/subscribeWidget`** — Params: `widgetId`, `sourceUri`. The server runs the source node with graph inputs (topological run of the subgraph, stream inputs from upstream node outputs). The result is **cached** per widget. The server sends a single **Completed** notification with a summary (no streaming of vector elements). The client can then request slices via `snaqlite/graph/fetchResultSlice` for virtualized list/table views.
+- **Notification `snaqlite/graph/widgetDataUpdate`** — Params: `widgetId`, `status` (`"Running"` | `"Completed"` | `"Cancelled"` | `"Error"`), optional `payload`. For **Completed**, the payload includes:
+  - **`display`** (optional) — Formatted value for scalars or when a single value is shown.
+  - **`totalElements`** (optional) — Number of elements (vectors) or keys (maps).
+  - **`resultType`** (optional) — `"Scalar"` | `"Vector"` | `"Map"` | `"Undefined"` so the client can show a type-aware summary and open a detail modal.
+  - **`resultSummary`** (optional) — For vectors: `{ length: number }`. For maps: `{ keys?: string[], keyCount?: number }` (keys only if small).
+- **Request `snaqlite/graph/unsubscribeWidget`** — Params: `widgetId`. Removes the widget and clears its cached result; sends a final `widgetDataUpdate` with status `Cancelled`.
+- **Request `snaqlite/graph/fetchResultSlice`** — Fetches a paginated slice of the cached result at an optional **path** (for nested vectors/maps).  
+  - **Params:** `widgetId` (string), `path` (array of path segments: **0-based** numbers for vector indices, strings for map keys; empty array = root), `offset` (number), `limit` (number).  
+  - **Response:** `elements` (array of slice elements), `totalCount` (number), `hasMore` (boolean).  
+  - **Slice elements:** Scalars are `{ display: string }`. Nested vectors are `{ type: "vector", path: PathSegment[] }` so the client can request that path with offset/limit. Nested maps are `{ type: "map", path: PathSegment[], keys?: string[], keyCount?: number }`. Map rows are `{ key: string, value: ResultSliceElement }`.  
+  - Path semantics: **0-based** indices for vectors (e.g. `[5]` = 6th element). Map entries are sliced in **registration order**. If the widget is not found or the path is invalid, the server returns an error.
 
-Multiple widgets on the same node each get their own run (one consumer per widget).
+Multiple widgets on the same node each get their own run and cached result.
 
 ### Reactive invalidation
 

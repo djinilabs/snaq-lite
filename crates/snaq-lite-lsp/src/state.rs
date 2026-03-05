@@ -133,6 +133,11 @@ impl LspState {
         &self.unit_registry
     }
 
+    /// Database instance (for fetchResultSlice and other operations that need to read cached values).
+    pub fn db(&self) -> &salsa::DatabaseImpl {
+        &self.db
+    }
+
     /// Return current diagnostics for the given URI.
     pub fn diagnostics(&self, uri: &Url) -> Vec<Diagnostic> {
         self.documents

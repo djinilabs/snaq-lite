@@ -13,6 +13,8 @@ export interface WidgetState {
     count?: number
     display?: string
     totalElements?: number
+    resultType?: 'Scalar' | 'Vector' | 'Map' | 'Undefined'
+    resultSummary?: { length?: number; keys?: string[]; keyCount?: number }
     message?: string
     reason?: string
   }

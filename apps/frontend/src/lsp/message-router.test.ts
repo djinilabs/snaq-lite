@@ -183,6 +183,20 @@ describe('message-router', () => {
       setIncomingLspPush(null)
     })
 
+    it('handles single frame with concatenated JSON body (split at parse position)', () => {
+      const push = vi.fn()
+      setIncomingLspPush(push)
+      const first = JSON.stringify({ jsonrpc: '2.0', method: 'first', params: {} })
+      const second = JSON.stringify({ jsonrpc: '2.0', method: 'second', params: {} })
+      const body = first + second
+      const raw = `Content-Length: ${body.length}\r\n\r\n${body}`
+      expect(() => processIncomingMessage(raw)).not.toThrow()
+      expect(push).toHaveBeenCalledTimes(2)
+      expect(push).toHaveBeenNthCalledWith(1, first)
+      expect(push).toHaveBeenNthCalledWith(2, second)
+      setIncomingLspPush(null)
+    })
+
     it('empty or whitespace-only input does not throw and does not call push', () => {
       const push = vi.fn()
       setIncomingLspPush(push)

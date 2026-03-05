@@ -210,14 +210,24 @@ type LspParsedBody = {
 
 /**
  * Process one JSON-RPC body (after stripping LSP framing): route and optionally push to connection.
+ * If the body is concatenated JSON (e.g. WASM flushed multiple LSP messages in one frame), split
+ * at the parse error position and process each part.
  */
 function processOneLspBody(body: string): void {
   let parsed: LspParsedBody
   try {
     parsed = JSON.parse(body) as LspParsedBody
   } catch (e) {
+    const pos = getJsonParsePosition(e)
+    if (pos != null && pos > 0 && pos < body.length) {
+      const first = body.slice(0, pos).trimEnd()
+      const rest = body.slice(pos).trimStart()
+      if (first.length > 0) processOneLspBody(first)
+      if (rest.length > 0) processIncomingMessage(rest)
+      return
+    }
     routeMessage(body)
-    console.error('[LSP] Incoming push error (e.g. duplicate response):', e)
+    console.error('[LSP] Incoming push parse error:', e)
     return
   }
   if (typeof parsed.method === 'string' && parsed.id === undefined) {

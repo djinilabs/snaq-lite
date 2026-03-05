@@ -1051,6 +1051,216 @@ async fn native_subscribe_widget_then_unsubscribe_receives_cancelled() {
     let _ = server_handle.await;
 }
 
+/// subscribeWidget (vector source) then fetchResultSlice: get elements and totalCount.
+#[tokio::test]
+async fn native_subscribe_widget_vector_then_fetch_result_slice_returns_elements() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+
+    let server_handle = tokio::spawn(async move {
+        snaq_lite_lsp::run_native(server_r, server_w).await
+    });
+
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/node.sl", "[1, 2, 3]", 1).await;
+
+    let subscribe_widget = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "snaqlite/graph/subscribeWidget",
+        "params": { "widgetId": "w-slice", "sourceUri": "snaq://graph/node.sl" }
+    });
+    client_w.write_all(&lsp_message(&subscribe_widget.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut got_completed = false;
+    for _ in 0..15 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
+            assert!(v.get("error").is_none(), "subscribeWidget should succeed: {}", v);
+        }
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
+            let params = v.get("params").and_then(|p| p.as_object()).unwrap();
+            if params.get("status").and_then(|s| s.as_str()) == Some("Completed") {
+                got_completed = true;
+                break;
+            }
+        }
+    }
+    assert!(got_completed, "client should receive widgetDataUpdate Completed before fetchResultSlice");
+
+    let fetch_slice = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "snaqlite/graph/fetchResultSlice",
+        "params": { "widgetId": "w-slice", "path": [], "offset": 0, "limit": 10 }
+    });
+    client_w.write_all(&lsp_message(&fetch_slice.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut slice_response: Option<serde_json::Value> = None;
+    for _ in 0..10 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
+            assert!(v.get("error").is_none(), "fetchResultSlice should succeed: {}", v);
+            slice_response = v.get("result").cloned();
+            break;
+        }
+    }
+    let res = slice_response.expect("client should receive fetchResultSlice response");
+    let elements = res.get("elements").and_then(|e| e.as_array()).unwrap();
+    assert_eq!(elements.len(), 3, "vector [1,2,3] should yield 3 elements");
+    assert_eq!(res.get("totalCount").and_then(|c| c.as_u64()), Some(3));
+    assert_eq!(res.get("hasMore").and_then(|h| h.as_bool()), Some(false));
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+/// fetchResultSlice with path [] and offset 1, limit 1 returns the second element of the vector.
+#[tokio::test]
+async fn native_fetch_result_slice_offset_limit_returns_single_element() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+
+    let server_handle = tokio::spawn(async move {
+        snaq_lite_lsp::run_native(server_r, server_w).await
+    });
+
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/node.sl", "[10, 20, 30]", 1).await;
+
+    let subscribe_widget = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "snaqlite/graph/subscribeWidget",
+        "params": { "widgetId": "w-path", "sourceUri": "snaq://graph/node.sl" }
+    });
+    client_w.write_all(&lsp_message(&subscribe_widget.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut got_completed = false;
+    for _ in 0..15 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
+            assert!(v.get("error").is_none(), "subscribeWidget should succeed: {}", v);
+        }
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
+            let params = v.get("params").and_then(|p| p.as_object()).unwrap();
+            if params.get("status").and_then(|s| s.as_str()) == Some("Completed") {
+                got_completed = true;
+                break;
+            }
+        }
+    }
+    assert!(got_completed, "client should receive widgetDataUpdate Completed");
+
+    let fetch_slice = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "snaqlite/graph/fetchResultSlice",
+        "params": { "widgetId": "w-path", "path": [], "offset": 1, "limit": 1 }
+    });
+    client_w.write_all(&lsp_message(&fetch_slice.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut slice_response: Option<serde_json::Value> = None;
+    for _ in 0..10 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
+            assert!(v.get("error").is_none(), "fetchResultSlice should succeed: {}", v);
+            slice_response = v.get("result").cloned();
+            break;
+        }
+    }
+    let res = slice_response.expect("client should receive fetchResultSlice response");
+    let elements = res.get("elements").and_then(|e| e.as_array()).unwrap();
+    assert_eq!(elements.len(), 1, "offset 1 limit 1 should yield one element");
+    let display = elements[0]
+        .get("display")
+        .and_then(|d| d.as_str())
+        .expect("element should have display");
+    assert_eq!(display, "20", "element at offset 1 should be 20");
+    assert_eq!(res.get("totalCount").and_then(|c| c.as_u64()), Some(3));
+    assert_eq!(res.get("hasMore").and_then(|h| h.as_bool()), Some(true));
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+/// fetchResultSlice with unknown widgetId returns invalid_params error.
+#[tokio::test]
+async fn native_fetch_result_slice_unknown_widget_returns_error() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+
+    let server_handle = tokio::spawn(async move {
+        snaq_lite_lsp::run_native(server_r, server_w).await
+    });
+
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/node.sl", "[1, 2, 3]", 1).await;
+
+    let fetch_slice = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "snaqlite/graph/fetchResultSlice",
+        "params": { "widgetId": "never-subscribed", "path": [], "offset": 0, "limit": 10 }
+    });
+    client_w.write_all(&lsp_message(&fetch_slice.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut response: Option<serde_json::Value> = None;
+    for _ in 0..5 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("id").and_then(|i| i.as_u64()) == Some(1) {
+            response = Some(v);
+            break;
+        }
+    }
+    let res = response.expect("client should receive response");
+    let err = res.get("error").and_then(|e| e.as_object()).expect("response should have error");
+    assert_eq!(err.get("code").and_then(|c| c.as_i64()), Some(-32602));
+    let message = err.get("message").and_then(|m| m.as_str()).unwrap_or("");
+    assert!(
+        message.contains("Widget not found") || message.contains("result not available"),
+        "error message should mention widget/result: {}",
+        message
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
 /// subscribeWidget (vector so widget is registered) then didChange on source URI; widget receives Cancelled.
 #[tokio::test]
 async fn native_subscribe_widget_then_did_change_receives_cancelled() {
@@ -1617,6 +1827,7 @@ async fn native_downstream_widget_receives_push_update_when_source_changes() {
     client_w.flush().await.unwrap();
 
     let mut got_subscribe_ok = false;
+    let mut got_completed = false;
     for _ in 0..25 {
         let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
             .await
@@ -1637,8 +1848,11 @@ async fn native_downstream_widget_receives_push_update_when_source_changes() {
                 let display = payload.and_then(|p| p.get("display")).and_then(|s| s.as_str());
                 let total_elements = payload.and_then(|p| p.get("totalElements")).and_then(|n| n.as_u64());
                 assert!(display == Some("7") || total_elements == Some(1), "initial Completed should have display \"7\" or totalElements 1, got payload {:?}", payload);
-                break;
+                got_completed = true;
             }
+        }
+        if got_subscribe_ok && got_completed {
+            break;
         }
     }
     assert!(got_subscribe_ok, "subscribeWidget should return success (id 3)");

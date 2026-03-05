@@ -12,6 +12,7 @@ export const LSP_METHOD_GRAPH_CONNECT = 'snaqlite/graph/connect'
 export const LSP_METHOD_GRAPH_DISCONNECT = 'snaqlite/graph/disconnect'
 export const LSP_METHOD_SUBSCRIBE_WIDGET = 'snaqlite/graph/subscribeWidget'
 export const LSP_METHOD_UNSUBSCRIBE_WIDGET = 'snaqlite/graph/unsubscribeWidget'
+export const LSP_METHOD_FETCH_RESULT_SLICE = 'snaqlite/graph/fetchResultSlice'
 
 /** LSP textDocument/didOpen (shared by computation-box-editor and computation-box-node). */
 export const LSP_METHOD_DID_OPEN = 'textDocument/didOpen'
@@ -28,6 +29,9 @@ export const LSP_SUBSCRIBE_MAX_WAIT_MS = 10_000
 export const CREATE_STREAM_INPUT_TIMEOUT_MS = 10_000
 /** Delay after onBeforeSubscribe before sending subscribeWidget so worker processes didOpen first. */
 export const LSP_SUBSCRIBE_AFTER_DID_OPEN_MS = 150
+
+/** Default page size for fetchResultSlice (vectors and maps). */
+export const RESULT_SLICE_PAGE_SIZE = 50
 
 /** React Flow drag handle class names; only elements with this class start a node drag. */
 export const DRAG_HANDLE_CLASS_COMPUTATION = 'computation-drag-handle'

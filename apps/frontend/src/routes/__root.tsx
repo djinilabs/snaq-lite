@@ -12,6 +12,7 @@ import {
 } from '@tanstack/react-router'
 import { LspProvider } from '~/components/lsp-provider'
 import { ToastList } from '~/components/toast-list'
+import { ResultDetailModal } from '~/components/presentation/result-detail-modal'
 import { useProjectsIndexStore } from '~/store'
 
 function NotFoundComponent() {
@@ -90,6 +91,7 @@ function RootComponent() {
       <LspProvider>
         <Outlet />
         <ToastList />
+        <ResultDetailModal />
       </LspProvider>
     </RootDocument>
   )

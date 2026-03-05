@@ -3,10 +3,12 @@
 use std::collections::HashMap;
 use tower_lsp::lsp_types::Url;
 
-/// Per-widget entry: source URI for invalidation; cancel sender to stop the consumer task.
+/// Per-widget entry: source URI for invalidation; optional cancel sender (legacy stream consumer); cached result for fetchResultSlice.
 pub struct WidgetEntry {
     pub source_uri: Url,
     pub cancel_tx: Option<futures::channel::oneshot::Sender<()>>,
+    /// Cached result value so fetchResultSlice can serve slices without re-running. Cleared when widget is removed/invalidated.
+    pub cached_value: Option<snaq_lite_lang::Value>,
 }
 
 /// Registry of active widget subscriptions by widget_id.
@@ -32,6 +34,7 @@ impl WidgetRegistry {
             WidgetEntry {
                 source_uri,
                 cancel_tx: Some(cancel_tx),
+                cached_value: None,
             },
         );
     }
@@ -44,8 +47,31 @@ impl WidgetRegistry {
             WidgetEntry {
                 source_uri,
                 cancel_tx: None,
+                cached_value: None,
             },
         );
+    }
+
+    /// Insert a widget with a cached result value (for fetchResultSlice). No background consumer.
+    pub fn insert_with_cached_value(
+        &mut self,
+        widget_id: String,
+        source_uri: Url,
+        value: snaq_lite_lang::Value,
+    ) {
+        self.by_id.insert(
+            widget_id,
+            WidgetEntry {
+                source_uri,
+                cancel_tx: None,
+                cached_value: Some(value),
+            },
+        );
+    }
+
+    /// Get a clone of the cached value for this widget, if any.
+    pub fn get_cached_value(&self, widget_id: &str) -> Option<snaq_lite_lang::Value> {
+        self.by_id.get(widget_id).and_then(|e| e.cached_value.clone())
     }
 
     /// Remove widget by id. Returns Some(Some(cancel_tx)) if had a consumer, Some(None) for scalar, None if not found.
@@ -54,7 +80,7 @@ impl WidgetRegistry {
     }
 
     /// Take all widgets that listen to this URI (remove from registry). Returns (widget_id, cancel_tx) for each.
-    /// cancel_tx is None for scalar subscriptions. Caller can refresh and re-insert.
+    /// cancel_tx is None for scalar / cached-value subscriptions. Caller can refresh and re-insert.
     pub fn take_entries_for_uri(
         &mut self,
         uri: &Url,
@@ -71,14 +97,15 @@ impl WidgetRegistry {
         out
     }
 
-    /// Invalidate all widgets that listen to this URI. Returns (widget_id, cancel_tx) for each.
-    pub fn invalidate_uri(&mut self, uri: &Url) -> Vec<(String, futures::channel::oneshot::Sender<()>)> {
+    /// Invalidate all widgets that listen to this URI. Returns (widget_id, optional cancel_tx) for each so caller can send Cancelled to all.
+    pub fn invalidate_uri(
+        &mut self,
+        uri: &Url,
+    ) -> Vec<(String, Option<futures::channel::oneshot::Sender<()>>)> {
         let mut out = Vec::new();
         self.by_id.retain(|id, entry| {
             if entry.source_uri == *uri {
-                if let Some(tx) = entry.cancel_tx.take() {
-                    out.push((id.clone(), tx));
-                }
+                out.push((id.clone(), entry.cancel_tx.take()));
                 false
             } else {
                 true

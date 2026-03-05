@@ -108,6 +108,81 @@ test.describe('computation result (editor–worker–LSP)', () => {
     ).toBeVisible({ timeout: 15_000 })
   })
 
+  test('vector result shows View details and modal closes on Escape', async ({ page }) => {
+    await gotoCanvas(page)
+    await page.waitForFunction(
+      () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
+      { timeout: 15_000 },
+    )
+    await page.getByTestId('add-computation-btn').click()
+    const editorZone = page.getByTestId('computation-editor-zone').first()
+    await expect(editorZone).toBeVisible({ timeout: 10_000 })
+    await editorZone.click()
+    await page.waitForTimeout(200)
+    await page.keyboard.type('[1,2,3]')
+    await page.waitForTimeout(3000)
+    const resultEl = page.getByTestId('computation-result').first()
+    await expect(resultEl.getByText(/Vector \(\d+ elements\)/)).toBeVisible({ timeout: 15_000 })
+    const viewDetailsBtn = resultEl.getByTestId('view-details-btn')
+    await expect(viewDetailsBtn).toBeVisible({ timeout: 5000 })
+    await viewDetailsBtn.click()
+    await page.waitForTimeout(500)
+    const modal = page.getByTestId('result-detail-modal')
+    await expect(modal).toBeVisible({ timeout: 5000 })
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(300)
+    await expect(modal).not.toBeVisible()
+  })
+
+  test('vector result modal closes on close button', async ({ page }) => {
+    await gotoCanvas(page)
+    await page.waitForFunction(
+      () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
+      { timeout: 15_000 },
+    )
+    await page.getByTestId('add-computation-btn').click()
+    const editorZone = page.getByTestId('computation-editor-zone').first()
+    await expect(editorZone).toBeVisible({ timeout: 10_000 })
+    await editorZone.click()
+    await page.waitForTimeout(200)
+    await page.keyboard.type('[1,2,3]')
+    await page.waitForTimeout(3000)
+    const resultEl = page.getByTestId('computation-result').first()
+    await expect(resultEl.getByText(/Vector \(\d+ elements\)/)).toBeVisible({ timeout: 15_000 })
+    await resultEl.getByTestId('view-details-btn').click()
+    await page.waitForTimeout(500)
+    const modal = page.getByTestId('result-detail-modal')
+    await expect(modal).toBeVisible({ timeout: 5000 })
+    await page.getByTestId('result-detail-close-btn').click()
+    await page.waitForTimeout(300)
+    await expect(modal).not.toBeVisible()
+  })
+
+  test('vector result modal closes on overlay click', async ({ page }) => {
+    await gotoCanvas(page)
+    await page.waitForFunction(
+      () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
+      { timeout: 15_000 },
+    )
+    await page.getByTestId('add-computation-btn').click()
+    const editorZone = page.getByTestId('computation-editor-zone').first()
+    await expect(editorZone).toBeVisible({ timeout: 10_000 })
+    await editorZone.click()
+    await page.waitForTimeout(200)
+    await page.keyboard.type('[1,2,3]')
+    await page.waitForTimeout(3000)
+    const resultEl = page.getByTestId('computation-result').first()
+    await expect(resultEl.getByText(/Vector \(\d+ elements\)/)).toBeVisible({ timeout: 15_000 })
+    await resultEl.getByTestId('view-details-btn').click()
+    await page.waitForTimeout(500)
+    const modal = page.getByTestId('result-detail-modal')
+    await expect(modal).toBeVisible({ timeout: 5000 })
+    const overlay = page.getByTestId('result-detail-overlay')
+    await overlay.click({ position: { x: 5, y: 5 } })
+    await page.waitForTimeout(300)
+    await expect(modal).not.toBeVisible()
+  })
+
   test('protocol: didOpen, subscribeWidget, widgetDataUpdate over worker', async ({ page }) => {
     await page.addInitScript(() => {
       ;(window as unknown as Record<string, unknown>)[

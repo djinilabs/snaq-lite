@@ -73,7 +73,10 @@ export function PresentationBlockNode({
       nodeId={id}
     >
       <Handle type="target" position={Position.Left} id="0" data-testid="presentation-input-handle" />
-      <NodeContentZone data-testid="presentation-content">
+      <NodeContentZone
+        data-testid="presentation-content"
+        style={{ minWidth: 0, overflow: 'hidden' }}
+      >
         <PresentationBlock
           sourceUri={data.sourceUri}
           documentUri={data.uri}

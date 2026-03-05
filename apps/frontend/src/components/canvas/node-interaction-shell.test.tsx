@@ -77,6 +77,16 @@ describe('node interaction shell', () => {
       expect(html).toContain('outline')
       expect(html).toContain('var(--accent)')
     })
+
+    it('uses flex column layout so result area can shrink and long errors do not expand node', () => {
+      const html = renderToStaticMarkup(
+        <NodeFrame kind="computation" title="Computation" nodeTestId="node">
+          <div>content</div>
+        </NodeFrame>,
+      )
+      expect(html).toMatch(/display:\s*flex/)
+      expect(html).toMatch(/flex-direction:\s*column/)
+    })
   })
 
   describe('NodeContentZone', () => {

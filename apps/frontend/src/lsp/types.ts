@@ -54,6 +54,14 @@ export interface NodeSignatureUpdatedParams {
 
 export type WidgetDataStatus = 'Running' | 'Completed' | 'Cancelled' | 'Error'
 
+export type ResultType = 'Scalar' | 'Vector' | 'Map' | 'Undefined'
+
+export interface ResultSummary {
+  length?: number
+  keys?: string[]
+  keyCount?: number
+}
+
 export interface WidgetDataUpdateParams {
   widgetId: string
   status: WidgetDataStatus
@@ -63,6 +71,8 @@ export interface WidgetDataUpdateParams {
     count?: number
     display?: string
     totalElements?: number
+    resultType?: ResultType
+    resultSummary?: ResultSummary
     message?: string
     reason?: string
   }
@@ -89,3 +99,27 @@ export interface SubscribeWidgetParams {
 export interface UnsubscribeWidgetParams {
   widgetId: string
 }
+
+// ---- fetchResultSlice ----
+
+export type PathSegment = number | string
+
+export interface FetchResultSliceParams {
+  widgetId: string
+  path: PathSegment[]
+  offset: number
+  limit: number
+}
+
+export interface FetchResultSliceResponse {
+  elements: ResultSliceElement[]
+  totalCount: number
+  hasMore: boolean
+}
+
+export type ResultSliceElement =
+  | { display: string }
+  | { type: 'vector'; path: PathSegment[]; length?: number }
+  | { type: 'map'; path: PathSegment[]; keys?: string[]; keyCount?: number }
+  | { key: string; value: ResultSliceElement }
+  | null

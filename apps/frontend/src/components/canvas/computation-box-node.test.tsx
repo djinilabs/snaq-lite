@@ -35,6 +35,18 @@ describe('ComputationBoxNode', () => {
     expect(nodeBody).not.toMatch(/useWidgetStore\s*\(\s*\(\s*s\s*\)\s*=>\s*s\.byId/)
     // ComputationResultBlock should be the one that subscribes
     expect(source).toMatch(/function ComputationResultBlock/)
-    expect(source).toMatch(/ComputationResultBlock.*widgetId/)
+    expect(source).toMatch(/ComputationResultBlock\s*\(\s*\{[\s\S]*?widgetId/)
+  })
+
+  it('ComputationResultBlock result area has minWidth 0 and overflow hidden so long errors do not expand node', () => {
+    const source = readFileSync(NODE_PATH, 'utf-8')
+    const blockStart = source.indexOf('function ComputationResultBlock')
+    const blockEnd = source.indexOf('function WidgetSubscription')
+    expect(blockStart).toBeGreaterThanOrEqual(0)
+    expect(blockEnd).toBeGreaterThan(blockStart)
+    const blockSource = source.slice(blockStart, blockEnd)
+    expect(blockSource).toMatch(/minWidth:\s*0/)
+    expect(blockSource).toMatch(/overflow:\s*['"]hidden['"]/)
+    expect(blockSource).toMatch(/data-testid="computation-result"/)
   })
 })

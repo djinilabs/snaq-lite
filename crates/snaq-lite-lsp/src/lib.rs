@@ -23,8 +23,9 @@ use tower_lsp::lsp_types::{
 
 use crate::mapping::SERVER_NAME;
 use crate::pubsub::{
-    ConnectParams, DisconnectParams, NodeInputPort, NodeSignatureUpdatedNotification,
-    NodeSignatureUpdatedParams, PublishResultNotification, PublishResultParams, PublishStatus,
+    ConnectParams, DisconnectParams, FetchResultSliceParams, FetchResultSliceResponse,
+    NodeInputPort, NodeSignatureUpdatedNotification, NodeSignatureUpdatedParams, PathSegment,
+    PublishResultNotification, PublishResultParams, PublishStatus, ResultType,
     SubscribeParams, SubscribeResponse, UnsubscribeParams, SubscribeWidgetParams,
     UnsubscribeWidgetParams, WidgetDataStatus, WidgetDataUpdateNotification, WidgetDataUpdateParams,
 };
@@ -222,14 +223,16 @@ impl SnaqLiteBackend {
         }
     }
 
-    /// Invalidate all widget subscriptions for the given uri: send cancel and widgetDataUpdate(Cancelled).
+    /// Invalidate all widget subscriptions for the given uri: send cancel (if any) and widgetDataUpdate(Cancelled).
     async fn invalidate_widgets_for_uri(&self, uri: &Url) {
         let to_cancel = {
             let mut w = self.widgets.lock().await;
             w.invalidate_uri(uri)
         };
         for (widget_id, cancel_tx) in to_cancel {
-            let _ = cancel_tx.send(());
+            if let Some(tx) = cancel_tx {
+                let _ = tx.send(());
+            }
             self.client
                 .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
                     widget_id,
@@ -268,56 +271,18 @@ impl SnaqLiteBackend {
                         .insert_scalar(widget_id, uri.clone());
                 }
                 Ok((value, db)) => {
-                    match &value {
-                        snaq_lite_lang::Value::Vector(v) => {
-                            let inner = v.inner.clone();
-                            let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
-                            self.widgets.lock().await.insert(
-                                widget_id.clone(),
-                                uri.clone(),
-                                cancel_tx,
-                            );
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                let widget_tx = self.widget_notification_tx.clone();
-                                std::thread::spawn(move || {
-                                    run_stream_consumer_for_widget(db, inner, widget_id, widget_tx, cancel_rx);
-                                });
-                            }
-                            #[cfg(target_arch = "wasm32")]
-                            {
-                                let display = snaq_lite_lang::format_vector_for_widget_display(&db, v)
-                                    .unwrap_or_else(|_| "<vector>".to_string());
-                                let _ = (inner, cancel_rx);
-                                self.client
-                                    .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
-                                        widget_id: widget_id.clone(),
-                                        status: WidgetDataStatus::Completed,
-                                        payload: Some(serde_json::json!({ "display": display })),
-                                    })
-                                    .await;
-                                self.widgets
-                                    .lock()
-                                    .await
-                                    .insert_scalar(widget_id, uri.clone());
-                            }
-                        }
-                        _ => {
-                            let display = snaq_lite_lang::format_value_for_display(&db, &value)
-                                .unwrap_or_else(|_| "<error>".to_string());
-                            self.client
-                                .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
-                                    widget_id: widget_id.clone(),
-                                    status: WidgetDataStatus::Completed,
-                                    payload: Some(serde_json::json!({ "display": display })),
-                                })
-                                .await;
-                            self.widgets
-                                .lock()
-                                .await
-                                .insert_scalar(widget_id, uri.clone());
-                        }
-                    }
+                    let payload = Self::build_completed_payload(&value, &db);
+                    self.client
+                        .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                            widget_id: widget_id.clone(),
+                            status: WidgetDataStatus::Completed,
+                            payload: Some(payload),
+                        })
+                        .await;
+                    self.widgets
+                        .lock()
+                        .await
+                        .insert_with_cached_value(widget_id, uri.clone(), value);
                 }
             }
         }
@@ -555,7 +520,135 @@ impl SnaqLiteBackend {
         Ok(())
     }
 
-    /// Handle snaqlite/graph/subscribeWidget: run source node (with graph inputs when wired), stream or one-shot to widget.
+    /// Build Completed payload with resultType, resultSummary, and display/totalElements.
+    fn build_completed_payload(
+        value: &snaq_lite_lang::Value,
+        db: &salsa::DatabaseImpl,
+    ) -> serde_json::Value {
+        use crate::pubsub::ResultSummary;
+        use snaq_lite_lang::map_registry;
+        let (result_type, result_summary, display, total_elements) = match value {
+            snaq_lite_lang::Value::Vector(v) => {
+                // On WASM, avoid blocking on stream-backed vectors (e.g. CSV FromInput); use 0 so client shows vector view and fetches via fetchResultSlice.
+                #[cfg(target_arch = "wasm32")]
+                let length = match &v.inner {
+                    snaq_lite_lang::LazyVector::FromInput(_) => 0u64,
+                    _ => snaq_lite_lang::collect_vector_stream(db, v.inner.clone()).len() as u64,
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                let length = snaq_lite_lang::collect_vector_stream(db, v.inner.clone()).len() as u64;
+                (
+                    ResultType::Vector,
+                    Some(ResultSummary {
+                        length: Some(length),
+                        keys: None,
+                        key_count: None,
+                    }),
+                    None,
+                    Some(length),
+                )
+            }
+            snaq_lite_lang::Value::Map(id) => {
+                let entries = map_registry::get(*id).unwrap_or_default();
+                let key_count = entries.len();
+                let keys = if key_count <= 20 {
+                    Some(entries.into_iter().map(|(k, _)| k).collect::<Vec<_>>())
+                } else {
+                    None
+                };
+                (
+                    ResultType::Map,
+                    Some(ResultSummary {
+                        length: None,
+                        keys,
+                        key_count: Some(key_count),
+                    }),
+                    Some("<map>".to_string()),
+                    Some(key_count as u64),
+                )
+            }
+            snaq_lite_lang::Value::Undefined => (
+                ResultType::Undefined,
+                None,
+                Some("undefined".to_string()),
+                None,
+            ),
+            _ => {
+                let display =
+                    snaq_lite_lang::format_value_for_display(db, value).unwrap_or_else(|_| "<error>".to_string());
+                (
+                    ResultType::Scalar,
+                    None,
+                    Some(display),
+                    None,
+                )
+            }
+        };
+        let mut payload = serde_json::json!({
+            "resultType": result_type,
+        });
+        let obj = payload.as_object_mut().unwrap();
+        if let Some(summary) = result_summary {
+            if summary.length.is_some() || summary.keys.is_some() || summary.key_count.is_some() {
+                let mut sum = serde_json::json!({});
+                if let Some(l) = summary.length {
+                    sum["length"] = serde_json::json!(l);
+                }
+                if let Some(ref k) = summary.keys {
+                    sum["keys"] = serde_json::json!(k);
+                }
+                if let Some(c) = summary.key_count {
+                    sum["keyCount"] = serde_json::json!(c);
+                }
+                obj.insert("resultSummary".to_string(), sum);
+            }
+        }
+        if let Some(d) = display {
+            obj.insert("display".to_string(), serde_json::json!(d));
+        }
+        if let Some(t) = total_elements {
+            obj.insert("totalElements".to_string(), serde_json::json!(t));
+        }
+        serde_json::Value::Object(obj.clone())
+    }
+
+    /// Resolve path segments to a sub-value. Empty path returns Some(value). Returns None if path is invalid.
+    fn resolve_path(
+        value: &snaq_lite_lang::Value,
+        path: &[PathSegment],
+        db: &salsa::DatabaseImpl,
+    ) -> Option<snaq_lite_lang::Value> {
+        use crate::pubsub::PathSegment;
+        use snaq_lite_lang::map_registry;
+        if path.is_empty() {
+            return Some(value.clone());
+        }
+        let (head, tail) = (&path[0], &path[1..]);
+        let next = match (value, head) {
+            (snaq_lite_lang::Value::Vector(v), PathSegment::Index(i)) => {
+                let idx = *i as usize;
+                let slice =
+                    snaq_lite_lang::LazyVector::Take {
+                        source: Box::new(v.inner.clone()),
+                        start: idx,
+                        length: 1,
+                    };
+                let collected = snaq_lite_lang::collect_vector_stream(db, slice);
+                let item = collected.into_iter().next()?;
+                match item {
+                    Ok(Some(val)) => val,
+                    _ => return None,
+                }
+            }
+            (snaq_lite_lang::Value::Map(id), PathSegment::Key(k)) => {
+                map_registry::get_key(*id, k)?.clone()
+            }
+            _ => return None,
+        };
+        Self::resolve_path(&next, tail, db)
+    }
+
+    /// Handle snaqlite/graph/subscribeWidget: run source node (with graph inputs when wired), cache result and send Completed with summary.
     pub async fn subscribe_widget(
         &self,
         params: SubscribeWidgetParams,
@@ -590,60 +683,121 @@ impl SnaqLiteBackend {
                 Ok(())
             }
             Ok((value, db)) => {
-                match &value {
-                    snaq_lite_lang::Value::Vector(v) => {
-                        let inner = v.inner.clone();
-                        let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
-                        self.widgets.lock().await.insert(
-                            params.widget_id.clone(),
-                            source_uri.clone(),
-                            cancel_tx,
-                        );
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            let widget_id = params.widget_id.clone();
-                            let widget_tx = self.widget_notification_tx.clone();
-                            std::thread::spawn(move || {
-                                run_stream_consumer_for_widget(db, inner, widget_id, widget_tx, cancel_rx);
-                            });
-                        }
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            let display = snaq_lite_lang::format_vector_for_widget_display(&db, v)
-                                .unwrap_or_else(|_| "<vector>".to_string());
-                            let _ = (inner, cancel_rx);
-                            self.widgets
-                                .lock()
-                                .await
-                                .insert_scalar(params.widget_id.clone(), source_uri.clone());
-                            self.client
-                                .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
-                                    widget_id: params.widget_id,
-                                    status: WidgetDataStatus::Completed,
-                                    payload: Some(serde_json::json!({ "display": display })),
-                                })
-                                .await;
-                        }
-                    }
-                    _ => {
-                        let display = snaq_lite_lang::format_value_for_display(&db, &value)
-                            .unwrap_or_else(|_| "<error>".to_string());
-                        self.widgets
-                            .lock()
-                            .await
-                            .insert_scalar(params.widget_id.clone(), source_uri.clone());
-                        self.client
-                            .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
-                                widget_id: params.widget_id,
-                                status: WidgetDataStatus::Completed,
-                                payload: Some(serde_json::json!({ "display": display })),
-                            })
-                            .await;
-                    }
-                }
+                let payload = Self::build_completed_payload(&value, &db);
+                self.widgets
+                    .lock()
+                    .await
+                    .insert_with_cached_value(params.widget_id.clone(), source_uri.clone(), value);
+                self.client
+                    .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                        widget_id: params.widget_id,
+                        status: WidgetDataStatus::Completed,
+                        payload: Some(payload),
+                    })
+                    .await;
                 Ok(())
             }
         }
+    }
+
+    /// Handle snaqlite/graph/fetchResultSlice: return a slice of the result at the given path.
+    pub async fn fetch_result_slice(
+        &self,
+        params: FetchResultSliceParams,
+    ) -> tower_lsp::jsonrpc::Result<FetchResultSliceResponse> {
+        let value = {
+            let w = self.widgets.lock().await;
+            w.get_cached_value(&params.widget_id)
+        };
+        let value = value.ok_or_else(|| {
+            tower_lsp::jsonrpc::Error::invalid_params("Widget not found or result not available")
+        })?;
+        let path_segments: Vec<PathSegment> = params.path;
+        let path_json: Vec<serde_json::Value> = path_segments
+            .iter()
+            .map(|s| match s {
+                PathSegment::Index(i) => serde_json::json!(i),
+                PathSegment::Key(k) => serde_json::json!(k),
+            })
+            .collect();
+
+        let state = self.state.lock().await;
+        let db = state.db();
+        let sub_value = Self::resolve_path(&value, &path_segments, db).ok_or_else(|| {
+            tower_lsp::jsonrpc::Error::invalid_params("Invalid path or value not found")
+        })?;
+
+        let (elements, total_count) = match &sub_value {
+            snaq_lite_lang::Value::Vector(v) => {
+                let offset = params.offset as usize;
+                let limit = params.limit as usize;
+                let take = snaq_lite_lang::LazyVector::Take {
+                    source: Box::new(v.inner.clone()),
+                    start: offset,
+                    length: limit,
+                };
+                let slice_vec = snaq_lite_lang::collect_vector_stream(db, take);
+                let total_count = {
+                    let stream = snaq_lite_lang::vector_into_stream(db, v.inner.clone());
+                    let count = futures::executor::block_on(async move {
+                        use futures::stream::StreamExt;
+                        stream.fold(0u64, |acc, _| async move { acc + 1 }).await
+                    });
+                    count
+                };
+                let elements: Vec<serde_json::Value> = slice_vec
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, item)| {
+                        match &item {
+                            Ok(Some(val)) => {
+                                let mut elem_path = path_json.clone();
+                                elem_path.push(serde_json::json!((offset + i) as u64));
+                                crate::pubsub::value_to_slice_element(db, val, &elem_path)
+                            }
+                            Ok(None) => serde_json::Value::Null,
+                            Err(e) => serde_json::json!({
+                                "kind": "error",
+                                "message": e.to_string()
+                            }),
+                        }
+                    })
+                    .collect();
+                (elements, total_count)
+            }
+            snaq_lite_lang::Value::Map(id) => {
+                use snaq_lite_lang::map_registry;
+                let entries = map_registry::get(*id).unwrap_or_default();
+                let total_count = entries.len() as u64;
+                let offset = (params.offset as usize).min(entries.len());
+                let end = (offset + params.limit as usize).min(entries.len());
+                let slice_entries = &entries[offset..end];
+                let elements: Vec<serde_json::Value> = slice_entries
+                    .iter()
+                    .map(|(k, val)| {
+                        let mut elem_path = path_json.clone();
+                        elem_path.push(serde_json::json!(k));
+                        serde_json::json!({
+                            "key": k,
+                            "value": crate::pubsub::value_to_slice_element(db, val, &elem_path)
+                        })
+                    })
+                    .collect();
+                (elements, total_count)
+            }
+            _ => {
+                return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                    "Path does not refer to a vector or map",
+                ));
+            }
+        };
+
+        let has_more = params.offset + (elements.len() as u64) < total_count;
+        Ok(FetchResultSliceResponse {
+            elements,
+            total_count,
+            has_more,
+        })
     }
 
     /// Handle snaqlite/graph/unsubscribeWidget: cancel (if consumer) and send Cancelled.
@@ -943,7 +1097,9 @@ fn run_stream_consumer(
 }
 
 /// Native: run the stream for a widget and send WidgetDataUpdate notifications.
+/// Kept for potential backward compatibility; current flow uses cached value + fetchResultSlice.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 fn run_stream_consumer_for_widget(
     db: salsa::DatabaseImpl,
     inner: snaq_lite_lang::LazyVector,
@@ -1051,6 +1207,7 @@ pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSo
     .custom_method("snaqlite/graph/disconnect", SnaqLiteBackend::graph_disconnect)
     .custom_method("snaqlite/graph/subscribeWidget", SnaqLiteBackend::subscribe_widget)
     .custom_method("snaqlite/graph/unsubscribeWidget", SnaqLiteBackend::unsubscribe_widget)
+    .custom_method("snaqlite/graph/fetchResultSlice", SnaqLiteBackend::fetch_result_slice)
     .finish();
     (service, socket)
 }

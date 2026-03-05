@@ -14,10 +14,15 @@ interface UIState {
   toasts: Toast[]
   addToast: (message: string, kind?: Toast['kind']) => void
   removeToast: (id: string) => void
+  /** When set, the result detail modal is open for this widget (single modal at a time). */
+  resultDetailWidgetId: string | null
+  setResultDetailWidgetId: (widgetId: string | null) => void
 }
 
 export const useUIStore = create<UIState>((set) => ({
   toasts: [],
+  resultDetailWidgetId: null,
+  setResultDetailWidgetId: (widgetId) => set({ resultDetailWidgetId: widgetId }),
 
   addToast: (message, kind = 'info') =>
     set((state) => ({

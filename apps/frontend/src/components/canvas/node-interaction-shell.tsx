@@ -24,9 +24,12 @@ const NODE_BASE_STYLE: CSSProperties = {
   border: '1px solid var(--border)',
   borderRadius: 'var(--radius)',
   minWidth: 260,
+  maxWidth: 'min(90vw, 320px)',
   padding: 12,
   boxShadow: 'var(--shadow)',
   cursor: 'default',
+  display: 'flex',
+  flexDirection: 'column',
 }
 
 const DRAG_ZONE_STYLE: CSSProperties = {

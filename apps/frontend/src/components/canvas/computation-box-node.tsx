@@ -20,14 +20,20 @@ import {
 } from '~/lib/constants'
 import type { NodeInputPort } from '~/lsp/types'
 import { useSubscribeWidget } from '~/hooks/use-subscribe-widget'
-import { useGraphStore, useWidgetStore } from '~/store'
+import { useGraphStore, useUIStore, useWidgetStore } from '~/store'
 import { useWidgetContentVersionStore } from '~/store/widget-content-version-store'
 import { getLanguageClient } from '~/lsp/language-client-singleton'
 import { ComputationBoxEditor } from '~/components/editor/computation-box-editor'
 import { WidgetDataView } from '~/components/presentation/widget-data-view'
 
 /** Isolates widget store subscription so parent node does not re-render on result update (preserves editor focus). */
-function ComputationResultBlock({ widgetId }: { widgetId: string }) {
+function ComputationResultBlock({
+  widgetId,
+  onViewDetails,
+}: {
+  widgetId: string
+  onViewDetails?: (id: string) => void
+}) {
   const resultState = useWidgetStore((s) => s.byId[widgetId])
   return (
     <NodeContentZone
@@ -37,12 +43,21 @@ function ComputationResultBlock({ widgetId }: { widgetId: string }) {
         paddingTop: 8,
         borderTop: '1px solid var(--border)',
         fontSize: 12,
+        minWidth: 0,
+        width: '100%',
+        overflow: 'hidden',
       }}
     >
       <div style={{ color: 'var(--text-muted)', marginBottom: 4, fontWeight: 500 }}>
         Result
       </div>
-      <WidgetDataView state={resultState} />
+      <div style={{ minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
+        <WidgetDataView
+          state={resultState}
+          widgetId={widgetId}
+          onViewDetails={onViewDetails}
+        />
+      </div>
     </NodeContentZone>
   )
 }
@@ -102,6 +117,7 @@ export function ComputationBoxNode({
   const node = nodes.find((n) => n.id === id)
   const inputs = node?.inputs ?? []
   const widgetId = `${RESULT_WIDGET_ID_PREFIX}${id}`
+  const setResultDetailWidgetId = useUIStore((s) => s.setResultDetailWidgetId)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const getExternalStreams = useMemo(() => {
@@ -402,7 +418,10 @@ export function ComputationBoxNode({
         onBeforeSubscribe={onBeforeSubscribe}
         getExternalStreams={getExternalStreams}
       />
-      <ComputationResultBlock widgetId={widgetId} />
+      <ComputationResultBlock
+        widgetId={widgetId}
+        onViewDetails={(id) => setResultDetailWidgetId(id)}
+      />
     </NodeFrame>
   )
 }

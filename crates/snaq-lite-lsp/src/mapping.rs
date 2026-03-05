@@ -40,6 +40,26 @@ pub fn span_to_range(span: &Span, source: &str) -> Range {
     }
 }
 
+/// Fallback range when no span is available: first line of the document so the user sees an error decoration.
+pub(crate) fn fallback_range(source: &str) -> Range {
+    let end_char = source
+        .lines()
+        .next()
+        .map(|line| line.len() as u32)
+        .unwrap_or(1)
+        .max(1);
+    Range {
+        start: Position {
+            line: 0,
+            character: 0,
+        },
+        end: Position {
+            line: 0,
+            character: end_char,
+        },
+    }
+}
+
 /// Convert a RunError to an LSP Diagnostic.
 pub fn run_error_to_diagnostic(err: &RunError, source: &str) -> Diagnostic {
     let (range, message) = match &err.kind {
@@ -48,20 +68,14 @@ pub fn run_error_to_diagnostic(err: &RunError, source: &str) -> Diagnostic {
                 .span
                 .or(pe.span)
                 .map(|s| span_to_range(&s, source))
-                .unwrap_or(Range {
-                    start: Position { line: 0, character: 0 },
-                    end: Position { line: 0, character: 0 },
-                });
+                .unwrap_or_else(|| fallback_range(source));
             (range, pe.message.clone())
         }
         _ => {
             let range = err
                 .span
                 .map(|s| span_to_range(&s, source))
-                .unwrap_or(Range {
-                    start: Position { line: 0, character: 0 },
-                    end: Position { line: 0, character: 0 },
-                });
+                .unwrap_or_else(|| fallback_range(source));
             (range, format!("{err}"))
         }
     };

@@ -1369,7 +1369,37 @@ mod tests {
     }
 
     #[test]
-    fn run_error_without_span_falls_back_to_zero_range() {
+    fn fallback_range_spans_first_line() {
+        use crate::mapping::fallback_range;
+        let r = fallback_range("anything");
+        assert_eq!(r.start.line, 0);
+        assert_eq!(r.start.character, 0);
+        assert_eq!(r.end.line, 0);
+        assert_eq!(r.end.character, 8, "first line \"anything\" has 8 chars");
+    }
+
+    #[test]
+    fn fallback_range_empty_source_uses_min_length_one() {
+        use crate::mapping::fallback_range;
+        let r = fallback_range("");
+        assert_eq!(r.start.line, 0);
+        assert_eq!(r.start.character, 0);
+        assert_eq!(r.end.line, 0);
+        assert_eq!(r.end.character, 1);
+    }
+
+    #[test]
+    fn fallback_range_multiline_uses_first_line_only() {
+        use crate::mapping::fallback_range;
+        let r = fallback_range("line1\nline2\nline3");
+        assert_eq!(r.start.line, 0);
+        assert_eq!(r.start.character, 0);
+        assert_eq!(r.end.line, 0);
+        assert_eq!(r.end.character, 5);
+    }
+
+    #[test]
+    fn run_error_without_span_falls_back_to_first_line_range() {
         let err = snaq_lite_lang::RunError {
             span: None,
             kind: snaq_lite_lang::RunErrorKind::Parse(snaq_lite_lang::ParseError {
@@ -1382,7 +1412,8 @@ mod tests {
         assert_eq!(d.range.start.line, 0);
         assert_eq!(d.range.start.character, 0);
         assert_eq!(d.range.end.line, 0);
-        assert_eq!(d.range.end.character, 0);
+        // Fallback range spans the first line so the user sees an error decoration (end = first line length)
+        assert_eq!(d.range.end.character, 8);
     }
 
     // ---- state (LspState) ----

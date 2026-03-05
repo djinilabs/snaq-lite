@@ -8,6 +8,19 @@ import { nodeIdToUri } from './virtual-uri'
 
 const models = new Map<string, Monaco.editor.ITextModel>()
 
+/** Called when a new model is first created (not when returning an existing one). Used to apply pending diagnostics. */
+let onModelCreated: ((uri: string) => void) | null = null
+/** Called when a model is disposed so consumers can clear related state (e.g. pending diagnostics). */
+let onModelDisposed: ((uri: string) => void) | null = null
+
+export function setOnModelCreated(fn: (uri: string) => void): void {
+  onModelCreated = fn
+}
+
+export function setOnModelDisposed(fn: (uri: string) => void): void {
+  onModelDisposed = fn
+}
+
 export function getModel(uri: string, _monaco: typeof import('monaco-editor')): Monaco.editor.ITextModel | null {
   return models.get(uri) ?? null
 }
@@ -21,6 +34,7 @@ export function getOrCreateModel(
   if (model) return model
   model = monaco.editor.createModel(initialValue, 'snaq', monaco.Uri.parse(uri))
   models.set(uri, model)
+  onModelCreated?.(uri)
   return model
 }
 
@@ -29,6 +43,7 @@ export function disposeModel(uri: string): void {
   if (model) {
     model.dispose()
     models.delete(uri)
+    onModelDisposed?.(uri)
   }
 }
 

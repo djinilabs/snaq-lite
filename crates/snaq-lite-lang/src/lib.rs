@@ -3700,6 +3700,96 @@ mod tests {
         }
     }
 
+    /// Runs stream if (uncertain condition) then x else 0 with one chunk; used to assert IfBranchTypeMismatch for unsupported branch types.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_stream_if_uncertain_blend(
+        registry: &UnitRegistry,
+        chunk: Chunk,
+    ) -> Result<(Value, salsa::DatabaseImpl), RunError> {
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
+        use futures::sink::SinkExt;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let (tx, rx) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let handle_id = register(rx);
+        let (sync_tx, sync_rx) = mpsc::sync_channel(0);
+        let mut tx_move = tx;
+        thread::spawn(move || {
+            sync_rx.recv().unwrap();
+            futures::executor::block_on(tx_move.send(chunk)).unwrap();
+            drop(tx_move);
+        });
+        let program = "input x: Vector\nif (1 ~ 0.5) > (0.9 ~ 0.5) then x else 0";
+        sync_tx.send(()).unwrap();
+        run_with_stream_inputs(
+            program,
+            registry,
+            std::collections::HashMap::from([("x".to_string(), handle_id)]),
+        )
+    }
+
+    /// If blend path with Map in one branch: must return IfBranchTypeMismatch, not panic (WASM-safe).
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn stream_if_uncertain_then_map_else_zero_yields_if_branch_type_mismatch() {
+        use crate::map_registry::record_to_chunk_element;
+        use crate::quantity::Quantity;
+
+        let registry = default_si_registry();
+        let row = record_to_chunk_element(vec![(
+            "col".to_string(),
+            Value::Numeric(Quantity::new(1.0, Unit::scalar())),
+        )])
+        .unwrap();
+        let chunk: Chunk = vec![Ok(row)];
+        let result = run_stream_if_uncertain_blend(&registry, chunk);
+        match result {
+            Err(e) => assert!(
+                matches!(e.kind, RunErrorKind::IfBranchTypeMismatch),
+                "expected IfBranchTypeMismatch when blending if with map branch, got {:?}",
+                e.kind
+            ),
+            Ok(_) => panic!("expected Err(IfBranchTypeMismatch), got Ok"),
+        }
+    }
+
+    /// If blend path with Undefined in one branch: must return IfBranchTypeMismatch, not panic (WASM-safe).
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn stream_if_uncertain_then_undefined_else_zero_yields_if_branch_type_mismatch() {
+        let registry = default_si_registry();
+        let chunk: Chunk = vec![Ok(Some(Value::Undefined))];
+        let result = run_stream_if_uncertain_blend(&registry, chunk);
+        match result {
+            Err(e) => assert!(
+                matches!(e.kind, RunErrorKind::IfBranchTypeMismatch),
+                "expected IfBranchTypeMismatch when blending if with undefined branch, got {:?}",
+                e.kind
+            ),
+            Ok(_) => panic!("expected Err(IfBranchTypeMismatch), got Ok"),
+        }
+    }
+
+    /// If blend path with Date in one branch: must return IfBranchTypeMismatch, not panic (WASM-safe).
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn stream_if_uncertain_then_date_else_zero_yields_if_branch_type_mismatch() {
+        let registry = default_si_registry();
+        let date_val = run_with_registry("@2026-01-01", &registry).unwrap();
+        assert!(matches!(date_val, Value::Date(_)));
+        let chunk: Chunk = vec![Ok(Some(date_val))];
+        let result = run_stream_if_uncertain_blend(&registry, chunk);
+        match result {
+            Err(e) => assert!(
+                matches!(e.kind, RunErrorKind::IfBranchTypeMismatch),
+                "expected IfBranchTypeMismatch when blending if with date branch, got {:?}",
+                e.kind
+            ),
+            Ok(_) => panic!("expected Err(IfBranchTypeMismatch), got Ok"),
+        }
+    }
+
     #[test]
     fn stream_undefined_unary_func_yields_undefined_result() {
         // sin($x) when stream yields Undefined: apply_unary_builtin returns UndefinedResult.

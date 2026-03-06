@@ -214,6 +214,11 @@ type LspParsedBody = {
  * at the parse error position and process each part.
  */
 function processOneLspBody(body: string): void {
+  const trimmed = body.trimStart()
+  if (trimmed.length > 0 && trimmed[0] !== '{') {
+    // Defensive: body is not JSON (e.g. partial "Content-Length" chunk from transport). Skip to avoid parse error.
+    return
+  }
   let parsed: LspParsedBody
   try {
     parsed = JSON.parse(body) as LspParsedBody

@@ -50,7 +50,48 @@ impl AsyncRead for WasmMessageReader {
     }
 }
 
+/// LSP stdio framing: "Content-Length: N\r\n\r\n" then N bytes of body.
+/// We only send to the host when we have at least one complete frame so we never
+/// postMessage a partial header (e.g. "Conte") which would cause JSON parse errors.
+fn take_one_lsp_frame(buf: &[u8]) -> Option<(usize, usize)> {
+    const PREFIX: &[u8] = b"Content-Length: ";
+    if buf.len() < PREFIX.len() || !buf.starts_with(PREFIX) {
+        return None;
+    }
+    let after_prefix = &buf[PREFIX.len()..];
+    let mut n_digits = 0;
+    for b in after_prefix {
+        if b.is_ascii_digit() {
+            n_digits += 1;
+        } else {
+            break;
+        }
+    }
+    if n_digits == 0 {
+        return None;
+    }
+    let n: usize = std::str::from_utf8(&after_prefix[..n_digits])
+        .ok()
+        .and_then(|s| s.parse().ok())?;
+    let header_end = PREFIX.len() + n_digits;
+    let rest = &buf[header_end..];
+    let sep = if rest.starts_with(b"\r\n\r\n") {
+        4
+    } else if rest.starts_with(b"\n\n") {
+        2
+    } else {
+        return None;
+    };
+    let body_start = header_end + sep;
+    if buf.len() < body_start + n {
+        return None;
+    }
+    Some((body_start + n, n))
+}
+
 /// Writer that sends bytes to the host via postMessage (callback set by host).
+/// Buffers output until a complete LSP Content-Length frame is available so the
+/// host never receives a partial frame (e.g. "Conte" from "Content-Length: ...").
 pub struct WasmMessageWriter {
     sender: Option<js_sys::Function>,
     buffer: Vec<u8>,
@@ -80,11 +121,16 @@ impl AsyncWrite for WasmMessageWriter {
         mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
     ) -> Poll<std::io::Result<()>> {
-        if !self.buffer.is_empty() {
-            if let Some(ref send) = self.sender {
-                let s = String::from_utf8_lossy(&self.buffer);
+        // Clone sender so we don't hold an immutable borrow of self while mutating self.buffer.
+        let send = match self.sender.clone() {
+            Some(s) => s,
+            None => return Poll::Ready(Ok(())),
+        };
+        let buffer = &mut self.as_mut().get_mut().buffer;
+        while let Some((frame_len, _body_len)) = take_one_lsp_frame(buffer) {
+            let frame: Vec<u8> = buffer.drain(..frame_len).collect();
+            if let Ok(s) = String::from_utf8(frame) {
                 let _ = send.call1(&JsValue::NULL, &JsValue::from_str(&s));
-                self.buffer.clear();
             }
         }
         Poll::Ready(Ok(()))

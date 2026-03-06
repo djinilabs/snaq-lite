@@ -668,7 +668,7 @@ fn apply_unary_builtin(
         }
         _ => {}
     }
-    let sym_args = vec![value_to_symbolic_expr(v)];
+    let sym_args = vec![value_to_symbolic_expr(v)?];
     Ok(functions::symbolic_call(name, &sym_args, Unit::scalar()))
 }
 
@@ -2128,8 +2128,8 @@ fn eval_if(
     let then_val = value(db, scope, then_expr)?;
     let else_val = value(db, scope, else_expr)?;
 
-    if matches!(&then_val, Value::FuzzyBool(_) | Value::Vector(_))
-        || matches!(&else_val, Value::FuzzyBool(_) | Value::Vector(_))
+    if matches!(&then_val, Value::FuzzyBool(_) | Value::Vector(_) | Value::Map(_) | Value::Undefined | Value::Date(_) | Value::Function(_) | Value::BuiltinFunction(_))
+        || matches!(&else_val, Value::FuzzyBool(_) | Value::Vector(_) | Value::Map(_) | Value::Undefined | Value::Date(_) | Value::Function(_) | Value::BuiltinFunction(_))
     {
         return Err(RunError::new(RunErrorKind::IfBranchTypeMismatch));
     }
@@ -2174,8 +2174,8 @@ RunError::new(RunErrorKind::DimensionMismatch { left, right })
     }
 
     // Build weighted sum as SymbolicExpr (cannot create temp DB inside Salsa query).
-    let (ea, ua) = value_to_expr_unit(&then_val);
-    let (eb, ub) = value_to_expr_unit(&else_val);
+    let (ea, ua) = value_to_expr_unit(&then_val)?;
+    let (eb, ub) = value_to_expr_unit(&else_val)?;
     if !registry.same_dimension(&ua, &ub).unwrap_or(false) {
         return Err(RunError::new(RunErrorKind::DimensionMismatch {
             left: ua.clone(),
@@ -2226,8 +2226,8 @@ where
     let then_val = eval(scope, then_expr)?;
     let else_val = eval(scope, else_expr)?;
 
-    if matches!(&then_val, Value::FuzzyBool(_) | Value::Vector(_))
-        || matches!(&else_val, Value::FuzzyBool(_) | Value::Vector(_))
+    if matches!(&then_val, Value::FuzzyBool(_) | Value::Vector(_) | Value::Map(_) | Value::Undefined | Value::Date(_) | Value::Function(_) | Value::BuiltinFunction(_))
+        || matches!(&else_val, Value::FuzzyBool(_) | Value::Vector(_) | Value::Map(_) | Value::Undefined | Value::Date(_) | Value::Function(_) | Value::BuiltinFunction(_))
     {
         return Err(RunError::new(RunErrorKind::IfBranchTypeMismatch));
     }
@@ -2271,8 +2271,8 @@ where
         return Ok(Value::Numeric(q));
     }
 
-    let (ea, ua) = value_to_expr_unit(&then_val);
-    let (eb, ub) = value_to_expr_unit(&else_val);
+    let (ea, ua) = value_to_expr_unit(&then_val)?;
+    let (eb, ub) = value_to_expr_unit(&else_val)?;
     if !registry.same_dimension(&ua, &ub).unwrap_or(false) {
         return Err(RunError::new(RunErrorKind::DimensionMismatch {
             left: ua.clone(),
@@ -2555,7 +2555,7 @@ where
                     let v = bound.get(*p).unwrap();
                     value_to_symbolic_expr(v)
                 })
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(functions::symbolic_call(name, &sym_args, Unit::scalar()))
         }
     }
@@ -2573,16 +2573,20 @@ fn eval_call(
     eval_call_with(db, scope, name, args, registry, |s, e| value(db, s, e))
 }
 
-fn value_to_symbolic_expr(v: &Value) -> SymbolicExpr {
+fn value_to_symbolic_expr(v: &Value) -> Result<SymbolicExpr, RunError> {
     match v {
-        Value::Numeric(q) => SymbolicExpr::number(q.value()),
-        Value::Symbolic(sq) => sq.expr.clone(),
-        Value::FuzzyBool(_) => panic!("value_to_symbolic_expr: fuzzy boolean not supported"),
-        Value::Vector(_) => panic!("value_to_symbolic_expr: vector not supported"),
-        Value::Undefined => panic!("value_to_symbolic_expr: undefined not supported"),
-        Value::Function(_) | Value::BuiltinFunction(_) => panic!("value_to_symbolic_expr: function not supported"),
-        Value::Map(_) => panic!("value_to_symbolic_expr: map not supported"),
-        Value::Date(_) => panic!("value_to_symbolic_expr: date not supported"),
+        Value::Numeric(q) => Ok(SymbolicExpr::number(q.value())),
+        Value::Symbolic(sq) => Ok(sq.expr.clone()),
+        Value::FuzzyBool(_) => Err(RunError::new(RunErrorKind::BooleanResult)),
+        Value::Vector(_) => Err(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
+        Value::Undefined => Err(RunError::new(RunErrorKind::UndefinedResult)),
+        Value::Function(_) | Value::BuiltinFunction(_) => Err(RunError::new(
+            RunErrorKind::UnknownFunction("function value not supported here".to_string()),
+        )),
+        Value::Map(_) => Err(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
+        Value::Date(_) => Err(RunError::new(RunErrorKind::InvalidArgument(
+            "date not supported here".to_string(),
+        ))),
     }
 }
 
@@ -3006,8 +3010,8 @@ fn cmp_values(
         (Value::Map(_), _) | (_, Value::Map(_)) => Err(err(RunErrorKind::UnsupportedVectorOperation)),
         (Value::Undefined, _) | (_, Value::Undefined) => Err(err(RunErrorKind::UndefinedResult)),
         _ => {
-            let (ea, ua) = value_to_expr_unit(a);
-            let (eb, ub) = value_to_expr_unit(b);
+            let (ea, ua) = value_to_expr_unit(a)?;
+            let (eb, ub) = value_to_expr_unit(b)?;
             if !registry.same_dimension(&ua, &ub).unwrap_or(false) {
                 return Err(err(RunErrorKind::DimensionMismatch {
                     left: ua.clone(),
@@ -3190,8 +3194,8 @@ fn add_values(
             "date only supports + duration, - duration, or date - date".to_string(),
         ))),
         _ => {
-            let (ea, ua) = value_to_expr_unit(a);
-            let (eb, ub) = value_to_expr_unit(b);
+            let (ea, ua) = value_to_expr_unit(a)?;
+            let (eb, ub) = value_to_expr_unit(b)?;
             if !registry.same_dimension(&ua, &ub).unwrap_or(false) {
                 return Err(err(RunErrorKind::DimensionMismatch {
                     left: ua.clone(),
@@ -3321,8 +3325,8 @@ fn sub_values(
             "date only supports + duration, - duration, or date - date".to_string(),
         ))),
         _ => {
-            let (ea, ua) = value_to_expr_unit(a);
-            let (eb, ub) = value_to_expr_unit(b);
+            let (ea, ua) = value_to_expr_unit(a)?;
+            let (eb, ub) = value_to_expr_unit(b)?;
             if !registry.same_dimension(&ua, &ub).unwrap_or(false) {
                 return Err(err(RunErrorKind::DimensionMismatch {
                     left: ua.clone(),
@@ -3418,8 +3422,8 @@ fn mul_values(
             "date cannot be used in multiplication".to_string(),
         ))),
         _ => {
-            let (ea, ua) = value_to_expr_unit(a);
-            let (eb, ub) = value_to_expr_unit(b);
+            let (ea, ua) = value_to_expr_unit(a)?;
+            let (eb, ub) = value_to_expr_unit(b)?;
             let unit = ua.clone().mul(&ub);
             Ok(Value::Symbolic(SymbolicQuantity::new(
                 SymbolicExpr::mul(&ea, &eb),
@@ -3531,8 +3535,8 @@ fn div_values(
             "date cannot be used in division".to_string(),
         ))),
         _ => {
-            let (ea, ua) = value_to_expr_unit(a);
-            let (eb, ub) = value_to_expr_unit(b);
+            let (ea, ua) = value_to_expr_unit(a)?;
+            let (eb, ub) = value_to_expr_unit(b)?;
             let unit = ua.clone().div(&ub);
             Ok(Value::Symbolic(SymbolicQuantity::new(
                 SymbolicExpr::div(&ea, &eb),
@@ -3572,16 +3576,20 @@ fn neg_value(v: &Value, span: Option<Span>) -> Result<Value, RunError> {
     }
 }
 
-fn value_to_expr_unit(v: &Value) -> (SymbolicExpr, Unit) {
+fn value_to_expr_unit(v: &Value) -> Result<(SymbolicExpr, Unit), RunError> {
     match v {
-        Value::Numeric(q) => (SymbolicExpr::number(q.value()), q.unit().clone()),
-        Value::Symbolic(sq) => (sq.expr.clone(), sq.unit.clone()),
-        Value::FuzzyBool(_) => panic!("value_to_expr_unit: fuzzy boolean not supported"),
-        Value::Vector(_) => panic!("value_to_expr_unit: vector not supported"),
-        Value::Undefined => panic!("value_to_expr_unit: undefined not supported"),
-        Value::Function(_) | Value::BuiltinFunction(_) => panic!("value_to_expr_unit: function not supported"),
-        Value::Map(_) => panic!("value_to_expr_unit: map not supported"),
-        Value::Date(_) => panic!("value_to_expr_unit: date not supported"),
+        Value::Numeric(q) => Ok((SymbolicExpr::number(q.value()), q.unit().clone())),
+        Value::Symbolic(sq) => Ok((sq.expr.clone(), sq.unit.clone())),
+        Value::FuzzyBool(_) => Err(RunError::new(RunErrorKind::BooleanResult)),
+        Value::Vector(_) => Err(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
+        Value::Undefined => Err(RunError::new(RunErrorKind::UndefinedResult)),
+        Value::Function(_) | Value::BuiltinFunction(_) => Err(RunError::new(
+            RunErrorKind::UnknownFunction("function value not supported here".to_string()),
+        )),
+        Value::Map(_) => Err(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
+        Value::Date(_) => Err(RunError::new(RunErrorKind::InvalidArgument(
+            "date not supported here".to_string(),
+        ))),
     }
 }
 

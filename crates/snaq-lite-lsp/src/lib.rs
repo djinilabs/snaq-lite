@@ -584,10 +584,11 @@ impl SnaqLiteBackend {
                 )
             }
         };
+        // json!({ ... }) always produces an object, so as_object_mut() is safe.
         let mut payload = serde_json::json!({
             "resultType": result_type,
         });
-        let obj = payload.as_object_mut().unwrap();
+        let obj = payload.as_object_mut().expect("json! object");
         if let Some(summary) = result_summary {
             if summary.length.is_some() || summary.keys.is_some() || summary.key_count.is_some() {
                 let mut sum = serde_json::json!({});
@@ -1016,10 +1017,17 @@ fn run_node_with_graph_inputs_impl(
             output_values.insert(uri.clone(), (value, db));
         }
     }
-    Ok((
-        last_value.expect("sink in order"),
-        last_db.expect("sink in order"),
-    ))
+    let (value, db) = match (last_value, last_db) {
+        (Some(v), Some(d)) => (v, d),
+        _ => {
+            return Err(snaq_lite_lang::RunError::new(
+                snaq_lite_lang::RunErrorKind::InvalidArgument(
+                    "graph order did not contain sink node".to_string(),
+                ),
+            ))
+        }
+    };
+    Ok((value, db))
 }
 
 /// Feed one upstream value to multiple Chunk senders (one handle per edge when one source feeds multiple inputs).
@@ -1414,6 +1422,32 @@ mod tests {
         assert_eq!(d.range.end.line, 0);
         // Fallback range spans the first line so the user sees an error decoration (end = first line length)
         assert_eq!(d.range.end.character, 8);
+    }
+
+    #[test]
+    fn run_node_with_graph_inputs_impl_empty_order_returns_invalid_argument() {
+        // When order does not contain sink_uri, impl returns Err instead of panicking (WASM-safe).
+        let order: &[Url] = &[];
+        let sources: &[(Url, String)] = &[];
+        let unit_registry = snaq_lite_lang::default_si_registry();
+        let incoming_map = std::collections::HashMap::new();
+        let sink_uri = Url::parse("snaq://graph/sink.sl").unwrap();
+        let result = run_node_with_graph_inputs_impl(
+            order,
+            sources,
+            &unit_registry,
+            &incoming_map,
+            &sink_uri,
+            None,
+        );
+        match result {
+            Err(e) => assert!(
+                matches!(e.kind, snaq_lite_lang::RunErrorKind::InvalidArgument(ref msg) if msg.contains("graph order did not contain sink")),
+                "expected InvalidArgument about sink, got {:?}",
+                e.kind
+            ),
+            Ok(_) => panic!("expected Err(InvalidArgument), got Ok"),
+        }
     }
 
     // ---- state (LspState) ----

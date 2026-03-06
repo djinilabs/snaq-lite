@@ -206,6 +206,16 @@ describe('message-router', () => {
       expect(push).not.toHaveBeenCalled()
       setIncomingLspPush(null)
     })
+
+    it('skips non-JSON body (e.g. partial "Content-Length" chunk) without throwing', () => {
+      const push = vi.fn()
+      setIncomingLspPush(push)
+      expect(() => processIncomingMessage('Conte')).not.toThrow()
+      expect(push).not.toHaveBeenCalled()
+      expect(() => processIncomingMessage('Content-Length: 5')).not.toThrow()
+      expect(push).not.toHaveBeenCalled()
+      setIncomingLspPush(null)
+    })
   })
 
   describe('createStreamInputResponse', () => {

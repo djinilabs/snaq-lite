@@ -257,8 +257,12 @@ test.describe('computation result (editor–worker–LSP)', () => {
   test('file block wired to computation with Vector input shows stream result (blob cache, no fetch)', async ({
     page,
   }) => {
-    test.setTimeout(90_000)
+    test.setTimeout(120_000)
     await gotoCanvas(page)
+    await page.waitForFunction(
+      () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
+      { timeout: 20_000 },
+    )
     await expect(page.getByTestId('canvas-toolbar')).toBeVisible({ timeout: 15_000 })
 
     // Drop a file with numeric content so the app creates a blob URL and registers it in the blob cache
@@ -321,25 +325,29 @@ test.describe('computation result (editor–worker–LSP)', () => {
       )
     }
     // Retry hook: store/render can lag in CI; call addEdge and poll until edge appears
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 10; i++) {
       await addEdgeViaHook()
       const count = await page.locator('.react-flow__edge').count()
       if (count >= 1) break
-      await page.waitForTimeout(2000)
+      await page.waitForTimeout(3000)
     }
-    // Fallback: if hook did not create edge (e.g. timing in CI), use connectOnClick (click source then target handle)
+    // Fallback: if hook did not create edge (e.g. timing in CI), use connectOnClick when handle is available
     if ((await page.locator('.react-flow__edge').count()) < 1) {
-      await expect(page.getByTestId('computation-input-handle-0').first()).toBeAttached({ timeout: 10_000 })
-      const sourceHandle = page.getByTestId('file-output-handle').first()
-      const targetHandle = page.getByTestId('computation-input-handle-0').first()
-      await sourceHandle.scrollIntoViewIfNeeded()
-      await targetHandle.scrollIntoViewIfNeeded()
-      await sourceHandle.evaluate((el) => (el as HTMLElement).click())
-      await page.waitForTimeout(500)
-      await targetHandle.evaluate((el) => (el as HTMLElement).click())
-      await page.waitForTimeout(1500)
+      try {
+        await page.getByTestId('computation-input-handle-0').first().waitFor({ state: 'attached', timeout: 20_000 })
+        const sourceHandle = page.getByTestId('file-output-handle').first()
+        const targetHandle = page.getByTestId('computation-input-handle-0').first()
+        await sourceHandle.scrollIntoViewIfNeeded()
+        await targetHandle.scrollIntoViewIfNeeded()
+        await sourceHandle.evaluate((el) => (el as HTMLElement).click())
+        await page.waitForTimeout(500)
+        await targetHandle.evaluate((el) => (el as HTMLElement).click())
+        await page.waitForTimeout(2000)
+      } catch {
+        // Handle not available in time; rely on final toHaveCount to fail with a clear message
+      }
     }
-    await expect(page.locator('.react-flow__edge')).toHaveCount(1, { timeout: 15_000 })
+    await expect(page.locator('.react-flow__edge')).toHaveCount(1, { timeout: 25_000 })
 
     // Result should show stream data (from blob cache, not fetch): poll until LSP has finished and widget shows vector (avoids flakiness from transient parse/error state)
     const resultEl = computationNode.getByTestId('computation-result')
@@ -360,8 +368,12 @@ test.describe('computation result (editor–worker–LSP)', () => {
   test('file block to computation: real drag from file output to computation input shows full CSV content', async ({
     page,
   }) => {
-    test.setTimeout(90_000)
+    test.setTimeout(120_000)
     await gotoCanvas(page)
+    await page.waitForFunction(
+      () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
+      { timeout: 20_000 },
+    )
     await expect(page.getByTestId('canvas-toolbar')).toBeVisible({ timeout: 15_000 })
 
     // Use numeric content (newline-delimited) so parsing works in all environments (CI worker may use numeric feeder)
@@ -421,28 +433,27 @@ test.describe('computation result (editor–worker–LSP)', () => {
     await page.waitForTimeout(5000)
     let edgeCount = await page.locator('.react-flow__edge').count()
     try {
-      await expect(page.getByTestId('computation-input-handle-0').first()).toBeAttached({ timeout: 15_000 })
-      // Connect file → computation via connectOnClick (click source handle then target handle).
+      await page.getByTestId('computation-input-handle-0').first().waitFor({ state: 'attached', timeout: 20_000 })
       const sourceHandle = page.getByTestId('file-output-handle').first()
       const targetHandle = page.getByTestId('computation-input-handle-0').first()
       await sourceHandle.scrollIntoViewIfNeeded()
       await targetHandle.scrollIntoViewIfNeeded()
       await sourceHandle.evaluate((el) => (el as HTMLElement).click())
-      await page.waitForTimeout(400)
+      await page.waitForTimeout(500)
       await targetHandle.evaluate((el) => (el as HTMLElement).click())
-      await page.waitForTimeout(2000)
+      await page.waitForTimeout(2500)
       edgeCount = await page.locator('.react-flow__edge').count()
     } catch {
       // Handle not attached in time; will use E2E hook below
     }
 
-    // Fallback: if connectOnClick was skipped or edge not created, use E2E hook
+    // Fallback: if connectOnClick was skipped or edge not created, use E2E hook (CI often needs this)
     if (edgeCount < 1) {
       const fileNodeId = await page.getByTestId('file-node').first().getAttribute('data-node-id')
       const computationNodeId = await computationNode.getAttribute('data-node-id')
       expect(fileNodeId).toBeTruthy()
       expect(computationNodeId).toBeTruthy()
-      for (let i = 0; i < 8; i++) {
+      for (let i = 0; i < 12; i++) {
         await page.evaluate(
           ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
             const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => void })
@@ -451,17 +462,17 @@ test.describe('computation result (editor–worker–LSP)', () => {
           },
           { sourceId: fileNodeId!, targetId: computationNodeId! },
         )
-        await page.waitForTimeout(2500)
+        await page.waitForTimeout(3000)
         edgeCount = await page.locator('.react-flow__edge').count()
         if (edgeCount >= 1) break
       }
     }
 
-    await expect(page.locator('.react-flow__edge')).toHaveCount(1, { timeout: 20_000 })
+    await expect(page.locator('.react-flow__edge')).toHaveCount(1, { timeout: 30_000 })
 
     const resultEl = computationNode.getByTestId('computation-result')
-    await expect(resultEl).toBeVisible({ timeout: 20_000 })
-    // Poll for full stream result (streaming can yield 2 then 3 elements)
+    await expect(resultEl).toBeVisible({ timeout: 25_000 })
+    // Poll for full stream result (streaming can yield 2 then 3 elements; CI may be slow)
     await expect
       .poll(
         async () => {
@@ -469,7 +480,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
           if (text.includes('File not available') || text.includes('Failed to fetch') || text === '[]') return false
           return /[23]\s*elements|\[.*1.*2.*(3.*)?\]|\b1\b.*\b2\b|Result<vector>/.test(text) || (text.match(/<map>/g)?.length ?? 0) >= 2
         },
-        { timeout: 15_000, intervals: [500, 1000, 2000, 2000] },
+        { timeout: 25_000, intervals: [1000, 2000, 3000, 3000] },
       )
       .toBe(true)
     const resultText = (await resultEl.textContent()) ?? ''

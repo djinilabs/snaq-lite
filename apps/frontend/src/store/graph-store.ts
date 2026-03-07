@@ -85,8 +85,8 @@ interface GraphState {
   setPendingEdge: (edge: PendingEdge | null) => void
   clearPendingEdge: () => void
   setFocusEditorForNodeId: (id: string | null) => void
-  /** Updates only outputType from LSP. Inputs are block properties edited in the UI, not from block text. */
-  applyNodeSignature: (uri: string, _inputs: NodeInputPort[], outputType?: string | null) => void
+  /** Updates outputType and (when provided) inputs from LSP nodeSignatureUpdated. Presentation nodes get inputs from LSP; computation inputs are usually from UI. */
+  applyNodeSignature: (uri: string, inputs: NodeInputPort[], outputType?: string | null) => void
   setNodeInputs: (nodeId: string, inputs: NodeInputPort[]) => void
   /** Updates computation node's initialContent (e.g. when editor content changes). Used so connectEdge has latest content when target editor may be unmounted. Does not push undo. */
   setNodeContent: (nodeId: string, content: string) => void
@@ -183,14 +183,28 @@ export const useGraphStore = create<GraphState>((set) => ({
 
   setFocusEditorForNodeId: (focusEditorForNodeId) => set({ focusEditorForNodeId }),
 
-  applyNodeSignature: (uri, _inputs, outputType) =>
+  applyNodeSignature: (uri, inputs, outputType) =>
     set((state) => {
       const node = state.nodes.find((n) => n.uri === uri)
+      if (!node) return state
       const nextOutput = outputType ?? null
-      if (!node || node.outputType === nextOutput) return state
+      const outputUnchanged = node.outputType === nextOutput
+      // Only apply inputs from LSP for presentation nodes (they have no UI input editor; computation inputs are from setNodeInputs).
+      const shouldUpdateInputs = node.type === 'presentation' && inputs.length > 0
+      const inputsUnchanged =
+        !shouldUpdateInputs ||
+        (node.inputs?.length === inputs.length &&
+          node.inputs?.every((inp, i) => inp.name === inputs[i]?.name && inp.type === inputs[i]?.type))
+      if (outputUnchanged && inputsUnchanged) return state
       return {
         nodes: state.nodes.map((n) =>
-          n.uri === uri ? { ...n, outputType: nextOutput } : n,
+          n.uri === uri
+            ? {
+                ...n,
+                ...(nextOutput !== undefined && { outputType: nextOutput }),
+                ...(shouldUpdateInputs && { inputs }),
+              }
+            : n,
         ),
       }
     }),

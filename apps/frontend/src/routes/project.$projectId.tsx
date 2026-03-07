@@ -2,12 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
 import { GraphCanvas, type GraphCanvasViewportRef } from '~/components/canvas/graph-canvas'
 import { applyDisconnectForDeletedEdges } from '~/components/canvas/edge-delete-params'
-import { disconnectEdge } from '~/components/canvas/edge-handlers'
+import { connectEdge, disconnectEdge } from '~/components/canvas/edge-handlers'
 import { ProjectToolbar } from '~/components/project-toolbar'
 import { AutoSaveContext } from '~/contexts/auto-save-context'
 import { useProjectLoader } from '~/hooks/use-project-loader'
 import { nodeIdToUri } from '~/editor/virtual-uri'
-import { AUTO_SAVE_DEBOUNCE_MS } from '~/lib/constants'
+import { AUTO_SAVE_DEBOUNCE_MS, COMPUTATION_OUTPUT_HANDLE_RIGHT } from '~/lib/constants'
 import { buildSnapshotFromGraph, getGraphStateForUndo, setProjectSnapshot } from '~/lib/project-storage'
 import { performRedo, performUndo } from '~/lib/perform-undo-redo'
 import { buildGetExternalStreams } from '~/lib/build-external-streams'
@@ -97,15 +97,37 @@ function ProjectCanvasPage() {
     if (typeof window === 'undefined') return
     const w = window as Window & {
       __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => void
+      __E2E_GRAPH_REMOVE_EDGE__?: (targetId: string, targetInputIndex: number) => void
+      __E2E_GET_EDGES_COUNT__?: () => number
       __E2E_INCREMENT_WIDGET__?: (computationNodeId: string) => void
       __E2E_RUN_GET_EXTERNAL_STREAMS__?: (nodeId: string) => Promise<{ streams: Record<string, number>; _debug?: unknown }>
       __E2E_GET_TOAST_MESSAGES__?: () => string[]
       __E2E_SET_NODE_INPUTS__?: (nodeId: string, inputs: Array<{ name: string; type: string }>) => void
     }
-    w.__E2E_GRAPH_ADD_EDGE__ = (sourceId: string, targetId: string, targetInputIndex: number) => {
-      useGraphStore.getState().addEdge({ sourceId, targetId, targetInputIndex })
-      useWidgetContentVersionStore.getState().increment(`computation-result-${targetId}`)
+    w.__E2E_GRAPH_ADD_EDGE__ = async (
+      sourceId: string,
+      targetId: string,
+      targetInputIndex: number,
+    ): Promise<boolean> => {
+      try {
+        const sourceUri = nodeIdToUri(sourceId)
+        const targetUri = nodeIdToUri(targetId)
+        const ok = await connectEdge(
+          sourceUri,
+          targetUri,
+          targetInputIndex,
+          COMPUTATION_OUTPUT_HANDLE_RIGHT,
+        )
+        return ok === true
+      } catch {
+        return false
+      }
     }
+    w.__E2E_GRAPH_REMOVE_EDGE__ = (targetId: string, targetInputIndex: number) => {
+      useGraphStore.getState().removeEdge(targetId, targetInputIndex)
+      void disconnectEdge(nodeIdToUri(targetId), targetInputIndex)
+    }
+    w.__E2E_GET_EDGES_COUNT__ = () => useGraphStore.getState().edges.length
     w.__E2E_INCREMENT_WIDGET__ = (computationNodeId: string) => {
       useWidgetContentVersionStore.getState().increment(`computation-result-${computationNodeId}`)
     }
@@ -140,6 +162,8 @@ function ProjectCanvasPage() {
     }
     return () => {
       delete w.__E2E_GRAPH_ADD_EDGE__
+      delete w.__E2E_GRAPH_REMOVE_EDGE__
+      delete w.__E2E_GET_EDGES_COUNT__
       delete w.__E2E_INCREMENT_WIDGET__
       delete w.__E2E_RUN_GET_EXTERNAL_STREAMS__
       delete w.__E2E_GET_TOAST_MESSAGES__

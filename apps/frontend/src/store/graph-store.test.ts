@@ -210,6 +210,23 @@ describe('graph-store', () => {
     expect(useGraphStore.getState().nodes[0].outputType).toBe('Numeric')
   })
 
+  it('applyNodeSignature sets inputs for presentation nodes (from LSP)', () => {
+    useGraphStore.getState().addNode({
+      id: 'pres1',
+      position: { x: 0, y: 0 },
+      type: 'presentation',
+      uri: 'snaq://graph/pres1.sl',
+    })
+    useGraphStore.getState().applyNodeSignature(
+      'snaq://graph/pres1.sl',
+      [{ name: 'x', type: 'Undefined' }],
+      null,
+    )
+    expect(useGraphStore.getState().nodes[0].inputs).toEqual([
+      { name: 'x', type: 'Undefined' },
+    ])
+  })
+
   it('applyNodeSignature with null outputType', () => {
     useGraphStore.getState().addNode({
       id: 'n1',

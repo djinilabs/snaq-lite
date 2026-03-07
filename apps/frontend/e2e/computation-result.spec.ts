@@ -597,7 +597,6 @@ test.describe('computation result (editor–worker–LSP)', () => {
     await computationNode.scrollIntoViewIfNeeded()
     await computationNode.getByTestId('computation-add-input').click()
     await expect(computationNode.getByTestId('computation-input-name-0')).toBeAttached({ timeout: 5000 })
-    // Do NOT fill the name — leave it empty so no stream is bound
     await computationNode.getByTestId('computation-input-type-0').selectOption('Vector')
     await page.waitForTimeout(300)
     const editorZone = computationNode.getByTestId('computation-editor-zone')
@@ -605,21 +604,43 @@ test.describe('computation result (editor–worker–LSP)', () => {
     await page.waitForTimeout(200)
     await page.keyboard.type('$x')
     await page.waitForTimeout(500)
-    await page.waitForTimeout(4000)
-    // Wire file → computation (input name is '' so we skip binding)
+    await page.waitForFunction(
+      () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
+      { timeout: 15_000 },
+    )
+    await page.waitForTimeout(500)
     const fileNodeId = await page.getByTestId('file-node').first().getAttribute('data-node-id')
     const computationNodeId = await computationNode.getAttribute('data-node-id')
     expect(fileNodeId).toBeTruthy()
     expect(computationNodeId).toBeTruthy()
+    // Set input name to "x" so connectEdge accepts the wire (it rejects empty target input name)
     await page.evaluate(
-      ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
-        const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => void })
-          .__E2E_GRAPH_ADD_EDGE__
-        addEdge?.(sourceId, targetId, 0)
+      ({
+        targetId,
+        inputs,
+      }: {
+        targetId: string
+        inputs: Array<{ name: string; type: string }>
+      }) => {
+        const setInputs = (window as Window & {
+          __E2E_SET_NODE_INPUTS__?: (id: string, i: Array<{ name: string; type: string }>) => void
+        }).__E2E_SET_NODE_INPUTS__
+        setInputs?.(targetId, inputs)
+      },
+      { targetId: computationNodeId!, inputs: [{ name: 'x', type: 'Vector' }] },
+    )
+    await page.waitForTimeout(300)
+    // Wire file → computation
+    await page.evaluate(
+      async ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
+        const addEdge = (window as Window & {
+          __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => Promise<boolean>
+        }).__E2E_GRAPH_ADD_EDGE__
+        if (addEdge) await addEdge(sourceId, targetId, 0)
       },
       { sourceId: fileNodeId!, targetId: computationNodeId! },
     )
-    // Ensure computation node has one input with empty name, then run getExternalStreams
+    // Clear the input name so getExternalStreams sees file wired but no name → toast "Name the computation input"
     await page.evaluate(
       ({
         targetId,

@@ -50,11 +50,6 @@ export async function connectEdge(
   targetInputIndex: number,
   sourceHandle?: string,
 ): Promise<boolean> {
-  const langClient = await waitForLanguageClient(LSP_WAIT_MS)
-  if (!langClient) {
-    useUIStore.getState().addToast('Editor is still loading. Please try again in a moment.', 'error')
-    return false
-  }
   const state = useGraphStore.getState()
   const sourceNode = state.nodes.find((n) => n.uri === sourceUri)
   const sourceId = sourceNode?.id
@@ -81,25 +76,30 @@ export async function connectEdge(
     return true
   }
 
+  const langClient = await waitForLanguageClient(LSP_WAIT_MS)
+  if (!langClient) {
+    useUIStore.getState().addToast('Editor is still loading. Please try again in a moment.', 'error')
+    return false
+  }
+  // Ensure LSP has latest source document (e.g. "4") so run_node_with_graph_inputs gets correct upstream value.
+  if (sourceNode?.type === 'computation') {
+    const sourceContent = computationDocumentContent(sourceUri, sourceNode)
+    if (sourceContent.trim().length > 0) {
+      langClient.sendNotification(LSP_METHOD_DID_OPEN, {
+        textDocument: { uri: sourceUri, version: 1, languageId: 'snaq', text: sourceContent },
+      })
+    }
+  }
   if (targetNode?.type === 'presentation') {
     const content = presentationDocumentContent(targetNode.inputs)
     langClient.sendNotification(LSP_METHOD_DID_OPEN, {
       textDocument: { uri: targetUri, version: 1, languageId: 'snaq', text: content },
     })
     await new Promise((r) => setTimeout(r, LSP_SUBSCRIBE_AFTER_DID_OPEN_MS))
-  } else if (targetNode?.type === 'computation') {
-    let content = computationDocumentContent(targetUri, targetNode)
-    if (content.trim().length === 0) {
-      const decl = targetNode.inputs?.[targetInputIndex]
-      if (decl) content = `input ${decl.name}: ${decl.type}`
-    }
-    if (content.trim().length > 0) {
-      langClient.sendNotification(LSP_METHOD_DID_OPEN, {
-        textDocument: { uri: targetUri, version: 1, languageId: 'snaq', text: content },
-      })
-      await new Promise((r) => setTimeout(r, LSP_SUBSCRIBE_AFTER_DID_OPEN_MS))
-    }
   }
+  // Do not send didOpen for computation target: LSP did_open invalidates widgets for that URI,
+  // so refresh_widgets_for_uri would then find no subscribers and never push the bound result.
+  // Target document is already open from the node's subscribeWidget; editor sends didChange on edit.
 
   try {
     await langClient.sendRequest(LSP_METHOD_GRAPH_CONNECT, {
@@ -113,9 +113,9 @@ export async function connectEdge(
       targetInputIndex,
       sourceHandle: sourceHandle ?? COMPUTATION_OUTPUT_HANDLE_RIGHT,
     })
-    if (targetNode?.type === 'computation') {
-      useWidgetContentVersionStore.getState().increment(`${COMPUTATION_RESULT_WIDGET_ID_PREFIX}${targetId}`)
-    }
+    // Do not increment widget content version here: LSP refresh_widgets_for_uri already pushes
+    // the new result to subscribed widgets. Incrementing would trigger re-subscribe (effect
+    // cleanup → removeWidget + unsubscribe) and race with the incoming widgetDataUpdate.
     return true
   } catch (e) {
     useGraphStore.getState().clearPendingEdge()
@@ -125,18 +125,13 @@ export async function connectEdge(
 }
 
 /**
- * Optimistic disconnect: remove edge from store, then notify LSP.
+ * Optimistic disconnect: remove edge from store first (UI updates immediately), then notify LSP.
  * targetInputIndex is the 0-based index of the target's input; LSP is called with current name at that index.
  */
 export async function disconnectEdge(
   targetUri: string,
   targetInputIndex: number,
 ): Promise<void> {
-  const langClient = await waitForLanguageClient(LSP_WAIT_MS)
-  if (!langClient) {
-    useUIStore.getState().addToast('Editor is still loading. Please try again in a moment.', 'error')
-    return
-  }
   const state = useGraphStore.getState()
   const targetId = state.nodes.find((n) => n.uri === targetUri)?.id
   if (!targetId) return
@@ -149,12 +144,13 @@ export async function disconnectEdge(
   const targetNode = state.nodes.find((n) => n.id === targetId)
   const targetInputName = targetNode?.inputs?.[targetInputIndex]?.name ?? ''
 
-  if (sourceNode?.type === 'file') {
-    state.removeEdge(targetId, targetInputIndex)
-    return
-  }
-
   state.removeEdge(targetId, targetInputIndex)
+
+  if (sourceNode?.type === 'file') return
+
+  const langClient = await waitForLanguageClient(LSP_WAIT_MS)
+  if (!langClient) return
+
   try {
     await langClient.sendRequest(LSP_METHOD_GRAPH_DISCONNECT, {
       targetUri,

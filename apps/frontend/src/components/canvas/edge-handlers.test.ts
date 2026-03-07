@@ -289,10 +289,8 @@ describe('edge-handlers', () => {
   })
 
   describe('disconnectEdge', () => {
-    it('shows toast and does not remove edge when client not ready', async () => {
+    it('removes edge from store when client not ready (optimistic); does not call LSP', async () => {
       mockHasLanguageClient.mockReturnValue(false)
-      const addToast = vi.fn()
-      useUIStore.setState({ addToast })
       useGraphStore.getState().addNode({
         id: 'n1',
         position: { x: 0, y: 0 },
@@ -314,12 +312,8 @@ describe('edge-handlers', () => {
 
       await disconnectEdge('snaq://graph/n2.sl', 0)
 
-      expect(useGraphStore.getState().edges).toHaveLength(1)
+      expect(useGraphStore.getState().edges).toHaveLength(0)
       expect(mockSendRequest).not.toHaveBeenCalled()
-      expect(addToast).toHaveBeenCalledWith(
-        'Editor is still loading. Please try again in a moment.',
-        'error',
-      )
     })
 
     it('calls LSP disconnect and removes edge from store', async () => {

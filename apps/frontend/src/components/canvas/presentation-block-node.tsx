@@ -10,7 +10,7 @@ import type { Node, NodeProps } from '@xyflow/react'
 import { Handle, Position } from '@xyflow/react'
 import { DEFAULT_PRESENTATION_DOCUMENT_CONTENT, LSP_METHOD_DID_OPEN } from '~/lib/constants'
 import { buildGetExternalStreams } from '~/lib/build-external-streams'
-import { hasLanguageClient, getLanguageClient } from '~/lsp/language-client-singleton'
+import { whenLspReady } from '~/lsp/language-client-singleton'
 import { useGraphStore } from '~/store'
 import { PresentationBlock } from '~/components/presentation/presentation-block'
 import { NodeContentZone, NodeFrame } from './node-interaction-shell'
@@ -28,10 +28,10 @@ function presentationDocumentContent(inputs: { name: string; type: string }[] | 
   return inputs.map((i) => `input ${i.name}: ${i.type}\n$${i.name}`).join('\n')
 }
 
-function sendDidOpenForPresentation(uri: string, inputs: { name: string; type: string }[] | undefined): void {
-  if (!hasLanguageClient()) return
+async function sendDidOpenForPresentation(uri: string, inputs: { name: string; type: string }[] | undefined): Promise<void> {
+  const client = await whenLspReady()
   const content = presentationDocumentContent(inputs)
-  getLanguageClient().sendNotification(LSP_METHOD_DID_OPEN, {
+  client.sendNotification(LSP_METHOD_DID_OPEN, {
     textDocument: { uri, version: 1, languageId: 'snaq', text: content },
   })
 }
@@ -55,11 +55,13 @@ export function PresentationBlockNode({
   }, [id, nodes, edges])
 
   useEffect(() => {
-    sendDidOpenForPresentation(data.uri, node?.inputs)
+    void sendDidOpenForPresentation(data.uri, node?.inputs).catch((e) =>
+      console.error('[PresentationBlockNode] sendDidOpenForPresentation failed:', e),
+    )
   }, [data.uri, node?.inputs])
 
-  const onBeforeSubscribe = useCallback(() => {
-    sendDidOpenForPresentation(data.uri, node?.inputs)
+  const onBeforeSubscribe = useCallback(async () => {
+    await sendDidOpenForPresentation(data.uri, node?.inputs)
   }, [data.uri, node?.inputs])
 
   return (

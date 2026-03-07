@@ -22,7 +22,7 @@ import type { NodeInputPort } from '~/lsp/types'
 import { useSubscribeWidget } from '~/hooks/use-subscribe-widget'
 import { useGraphStore, useUIStore, useWidgetStore } from '~/store'
 import { useWidgetContentVersionStore } from '~/store/widget-content-version-store'
-import { getLanguageClient } from '~/lsp/language-client-singleton'
+import { whenLspReady, getLanguageClient } from '~/lsp/language-client-singleton'
 import { ComputationBoxEditor } from '~/components/editor/computation-box-editor'
 import { WidgetDataView } from '~/components/presentation/widget-data-view'
 
@@ -71,7 +71,7 @@ function WidgetSubscription({
 }: {
   widgetId: string
   sourceUri: string
-  onBeforeSubscribe: () => void
+  onBeforeSubscribe: () => void | Promise<void>
   getExternalStreams?: () => Promise<Record<string, number>>
 }) {
   const contentVersion = useWidgetContentVersionStore((s) => s.byWidgetId[widgetId] ?? 0)
@@ -129,8 +129,9 @@ export function ComputationBoxNode({
       : undefined
   }, [id, nodes, edges])
 
-  const onBeforeSubscribe = useCallback(() => {
+  const onBeforeSubscribe = useCallback(async () => {
     try {
+      await whenLspReady()
       const body = getModel(data.uri, undefined as never)?.getValue() ?? node?.initialContent ?? ''
       const text = buildComputationDocumentContent(body, node?.inputs)
       getLanguageClient().sendNotification(LSP_METHOD_DID_OPEN, {

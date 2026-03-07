@@ -4,11 +4,26 @@ import {
   getLanguageClient,
   hasLanguageClient,
   whenClientReady,
+  whenLspReady,
 } from './language-client-singleton'
 
 describe('language-client-singleton', () => {
   beforeEach(() => {
     setLanguageClient(null)
+  })
+
+  // Run whenLspReady tests first: they rely on the singleton promise not yet being resolved.
+  it('whenLspReady resolves with client when setLanguageClient is called', async () => {
+    const client = { sendRequest: () => Promise.resolve(), sendNotification: () => {} }
+    const p = whenLspReady()
+    setLanguageClient(client)
+    await expect(p).resolves.toBe(client)
+  })
+
+  it('whenLspReady resolves immediately when client already set', async () => {
+    const client = { sendRequest: () => Promise.resolve(), sendNotification: () => {} }
+    setLanguageClient(client)
+    await expect(whenLspReady()).resolves.toBe(client)
   })
 
   it('hasLanguageClient is false when client not set', () => {

@@ -15,11 +15,13 @@ import {
 
 const mockSendRequest = vi.fn()
 const mockSendNotification = vi.fn()
+const mockClient = {
+  sendRequest: mockSendRequest,
+  sendNotification: mockSendNotification,
+}
 vi.mock('~/lsp/language-client-singleton', () => ({
-  getLanguageClient: () => ({
-    sendRequest: mockSendRequest,
-    sendNotification: mockSendNotification,
-  }),
+  whenLspReady: () => Promise.resolve(mockClient),
+  getLanguageClient: () => mockClient,
   hasLanguageClient: () => true,
 }))
 

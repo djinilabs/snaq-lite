@@ -9,10 +9,10 @@ import {
 } from '~/lib/constants'
 
 const mockSendRequest = vi.fn()
+const mockClient = { sendRequest: mockSendRequest }
 vi.mock('~/lsp/language-client-singleton', () => ({
-  getLanguageClient: () => ({
-    sendRequest: mockSendRequest,
-  }),
+  whenLspReady: () => Promise.resolve(mockClient),
+  getLanguageClient: () => mockClient,
   hasLanguageClient: () => true,
 }))
 

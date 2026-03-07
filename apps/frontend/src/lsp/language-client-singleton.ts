@@ -2,6 +2,8 @@
  * Module singleton for the LSP language client. Set after the connection is started
  * (initialize handshake done). Used by edge-handlers and presentation-block so they
  * can sendRequest/sendNotification without React context.
+ *
+ * No LSP request or notification should be sent until whenLspReady() has resolved.
  */
 
 export interface LanguageClientLike {
@@ -14,6 +16,16 @@ let resolveClient: ((c: LanguageClientLike) => void) | null = null
 const clientPromise = new Promise<LanguageClientLike>((resolve) => {
   resolveClient = resolve
 })
+
+/**
+ * Promise that resolves with the client when LSP initialization is complete
+ * (setLanguageClient(non-null) has been called after initialize/initialized handshake).
+ * Do not send any LSP request or notification until this promise has resolved.
+ */
+export function whenLspReady(): Promise<LanguageClientLike> {
+  if (client != null) return Promise.resolve(client)
+  return clientPromise
+}
 
 /** Callbacks to run once when the client is set (e.g. pending graph sync after load). */
 const whenReadyCallbacks: Array<() => void> = []
@@ -64,7 +76,7 @@ export function hasLanguageClient(): boolean {
 export function waitForLanguageClient(timeoutMs: number): Promise<LanguageClientLike | null> {
   if (client != null) return Promise.resolve(client)
   return Promise.race([
-    clientPromise,
+    whenLspReady(),
     new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
   ])
 }

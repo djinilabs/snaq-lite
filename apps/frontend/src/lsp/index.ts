@@ -24,6 +24,8 @@ export {
   getLanguageClient,
   hasLanguageClient,
   waitForLanguageClient,
+  whenLspReady,
+  whenClientReady,
 } from './language-client-singleton'
 export type { LanguageClientLike } from './language-client-singleton'
 export * from './types'

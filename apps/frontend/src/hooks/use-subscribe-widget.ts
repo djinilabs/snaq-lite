@@ -5,7 +5,7 @@
  */
 
 import { useEffect } from 'react'
-import { getLanguageClient, hasLanguageClient } from '~/lsp/language-client-singleton'
+import { whenLspReady, getLanguageClient, hasLanguageClient } from '~/lsp/language-client-singleton'
 import {
   LSP_METHOD_SUBSCRIBE_WIDGET,
   LSP_METHOD_UNSUBSCRIBE_WIDGET,
@@ -19,8 +19,8 @@ export interface UseSubscribeWidgetParams {
   widgetId: string
   sourceUri: string
   enabled: boolean
-  /** Called immediately before each subscribeWidget request (e.g. to send didOpen). */
-  onBeforeSubscribe?: () => void
+  /** Called immediately before each subscribeWidget request (e.g. to send didOpen). May be async. */
+  onBeforeSubscribe?: () => void | Promise<void>
   /** When present, called before subscribeWidget to create/feed file-block streams; result passed as externalStreams. */
   getExternalStreams?: () => Promise<Record<string, number>>
   /** When changed, effect re-runs: unsubscribe then subscribe (e.g. after content change). */
@@ -50,13 +50,13 @@ export function useSubscribeWidget({
       didSubscribe = true
       const doSubscribe = async (): Promise<void> => {
         deferTimeoutId = null
-        if (!hasLanguageClient()) return
         try {
+          await whenLspReady()
           // Resolve stream indices before didOpen so the worker processes createStreamInput
           // before any LSP work that can block the single thread (avoids response timeout).
           const externalStreams = await getExternalStreams?.().then((m) => m ?? undefined)
           try {
-            onBeforeSubscribe?.()
+            await onBeforeSubscribe?.()
           } catch (e) {
             console.error('[useSubscribeWidget] onBeforeSubscribe failed:', e)
           }
@@ -95,9 +95,9 @@ export function useSubscribeWidget({
       if (deferTimeoutId != null) clearTimeout(deferTimeoutId)
       if (intervalId != null) clearInterval(intervalId)
       removeWidget(widgetId)
-      if (didSubscribe && hasLanguageClient()) {
-        getLanguageClient()
-          .sendRequest(LSP_METHOD_UNSUBSCRIBE_WIDGET, { widgetId })
+      if (didSubscribe) {
+        whenLspReady()
+          .then((client) => client.sendRequest(LSP_METHOD_UNSUBSCRIBE_WIDGET, { widgetId }))
           .catch(() => {})
       }
     }

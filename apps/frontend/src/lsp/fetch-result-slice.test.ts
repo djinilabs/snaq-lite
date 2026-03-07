@@ -7,10 +7,9 @@ import { fetchResultSlice } from './fetch-result-slice'
 import { LSP_METHOD_FETCH_RESULT_SLICE } from '~/lib/constants'
 
 const mockSendRequest = vi.fn()
+const mockClient = { sendRequest: mockSendRequest }
 vi.mock('./language-client-singleton', () => ({
-  getLanguageClient: () => ({
-    sendRequest: mockSendRequest,
-  }),
+  whenLspReady: () => Promise.resolve(mockClient),
 }))
 
 describe('fetchResultSlice', () => {

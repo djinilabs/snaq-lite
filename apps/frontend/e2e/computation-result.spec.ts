@@ -152,9 +152,8 @@ test.describe('computation result (editor–worker–LSP)', () => {
     await expect(modal).not.toBeVisible()
   })
 
-  // Skipped: same modal-open timing as above; close-button behavior covered by result-detail-modal.test.tsx.
-  test.skip('vector result modal closes on close button', async ({ page }) => {
-    test.setTimeout(50_000)
+  test('vector result modal closes on close button', async ({ page }) => {
+    test.setTimeout(55_000)
     await gotoCanvas(page)
     await page.waitForFunction(
       () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
@@ -174,11 +173,24 @@ test.describe('computation result (editor–worker–LSP)', () => {
       )
       .toBe(true)
     const viewDetailsBtnClose = resultEl.getByTestId('view-details-btn')
+    await expect(viewDetailsBtnClose).toBeVisible({ timeout: 5000 })
     await viewDetailsBtnClose.scrollIntoViewIfNeeded()
-    await viewDetailsBtnClose.click({ force: true })
-    await page.waitForTimeout(500)
+    await page.waitForTimeout(300)
     const modal = page.getByTestId('result-detail-modal')
-    await expect(modal).toBeVisible({ timeout: 15_000 })
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await viewDetailsBtnClose.click({ force: true })
+      await page.waitForTimeout(500)
+      const visible = await expect
+        .poll(
+          async () => await modal.isVisible(),
+          { timeout: 10_000, intervals: [200, 500, 1000] },
+        )
+        .toBe(true)
+        .then(() => true)
+        .catch(() => false)
+      if (visible) break
+      if (attempt === 2) await expect(modal).toBeVisible({ timeout: 1 })
+    }
     await page.getByTestId('result-detail-close-btn').click()
     await page.waitForTimeout(300)
     await expect(modal).not.toBeVisible()

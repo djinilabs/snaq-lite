@@ -13,7 +13,7 @@ import { getOrCreateModel } from '~/editor/text-model-registry'
 import { ensureMonacoEnvironment } from '~/monaco-environment'
 import { buildComputationDocumentContent } from '~/lib/computation-document-content'
 import { LSP_METHOD_DID_OPEN, LSP_METHOD_DID_CHANGE } from '~/lib/constants'
-import { hasLanguageClient, getLanguageClient } from '~/lsp/language-client-singleton'
+import { whenLspReady, getLanguageClient } from '~/lsp/language-client-singleton'
 import { useGraphStore } from '~/store'
 import { focusDebugEditorFocusLost, focusDebugEditorRender } from '~/lib/focus-debug'
 
@@ -115,24 +115,28 @@ export function ComputationBoxEditor({
         editor.focus()
         useGraphStore.getState().setFocusEditorForNodeId(null)
       }
-      if (hasLanguageClient()) {
-        const node = useGraphStore.getState().nodes.find((n) => n.id === nodeId)
-        const body = model.getValue()
-        const text = buildComputationDocumentContent(body, node?.inputs)
-        getLanguageClient().sendNotification(LSP_METHOD_DID_OPEN, {
-          textDocument: { uri, version: 1, languageId: 'snaq', text },
-        })
-      }
-      model.onDidChangeContent(() => {
-        if (hasLanguageClient()) {
+      void whenLspReady()
+        .then(() => {
           const node = useGraphStore.getState().nodes.find((n) => n.id === nodeId)
           const body = model.getValue()
           const text = buildComputationDocumentContent(body, node?.inputs)
-          getLanguageClient().sendNotification(LSP_METHOD_DID_CHANGE, {
-            textDocument: { uri, version: model.getVersionId() },
-            contentChanges: [{ text }],
+          getLanguageClient().sendNotification(LSP_METHOD_DID_OPEN, {
+            textDocument: { uri, version: 1, languageId: 'snaq', text },
           })
-        }
+        })
+        .catch((e) => console.error('[ComputationBoxEditor] didOpen failed:', e))
+      model.onDidChangeContent(() => {
+        void whenLspReady()
+          .then(() => {
+            const node = useGraphStore.getState().nodes.find((n) => n.id === nodeId)
+            const body = model.getValue()
+            const text = buildComputationDocumentContent(body, node?.inputs)
+            getLanguageClient().sendNotification(LSP_METHOD_DID_CHANGE, {
+              textDocument: { uri, version: model.getVersionId() },
+              contentChanges: [{ text }],
+            })
+          })
+          .catch((e) => console.error('[ComputationBoxEditor] didChange failed:', e))
         requestSaveRef.current()
         onContentChangeRef.current?.()
       })

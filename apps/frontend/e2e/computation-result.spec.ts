@@ -422,8 +422,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
       .toBe(true)
   })
 
-  // Skipped: same as above; edge/handle often not ready in CI.
-  test.skip('file block to computation: real drag from file output to computation input shows full CSV content', async ({
+  test('file block to computation: real drag from file output to computation input shows full CSV content', async ({
     page,
   }) => {
     test.setTimeout(120_000)
@@ -489,6 +488,24 @@ test.describe('computation result (editor–worker–LSP)', () => {
 
     // Wait for LSP and for computation input handle to exist (input name "x" triggers handle render)
     await page.waitForTimeout(5000)
+    const computationNodeId = await computationNode.getAttribute('data-node-id')
+    expect(computationNodeId).toBeTruthy()
+    await page.evaluate(
+      ({
+        targetId,
+        inputs,
+      }: {
+        targetId: string
+        inputs: Array<{ name: string; type: string }>
+      }) => {
+        const setInputs = (window as Window & {
+          __E2E_SET_NODE_INPUTS__?: (id: string, i: Array<{ name: string; type: string }>) => void
+        }).__E2E_SET_NODE_INPUTS__
+        setInputs?.(targetId, inputs)
+      },
+      { targetId: computationNodeId!, inputs: [{ name: 'x', type: 'Vector' }] },
+    )
+    await page.waitForTimeout(100)
     let edgeCount = await page.locator('.react-flow__edge').count()
     try {
       await page.getByTestId('computation-input-handle-0').first().waitFor({ state: 'attached', timeout: 20_000 })
@@ -505,22 +522,43 @@ test.describe('computation result (editor–worker–LSP)', () => {
       // Handle not attached in time; will use E2E hook below
     }
 
-    // Fallback: if connectOnClick was skipped or edge not created, use E2E hook (CI often needs this)
+    // Fallback: if connectOnClick was skipped or edge not created, use E2E hook (setInputs already done above)
     if (edgeCount < 1) {
       const fileNodeId = await page.getByTestId('file-node').first().getAttribute('data-node-id')
-      const computationNodeId = await computationNode.getAttribute('data-node-id')
       expect(fileNodeId).toBeTruthy()
-      expect(computationNodeId).toBeTruthy()
+      await page.evaluate(
+        ({
+          targetId,
+          inputs,
+        }: {
+          targetId: string
+          inputs: Array<{ name: string; type: string }>
+        }) => {
+          const setInputs = (window as Window & {
+            __E2E_SET_NODE_INPUTS__?: (id: string, i: Array<{ name: string; type: string }>) => void
+          }).__E2E_SET_NODE_INPUTS__
+          setInputs?.(targetId, inputs)
+        },
+        { targetId: computationNodeId!, inputs: [{ name: 'x', type: 'Vector' }] },
+      )
+      await page.waitForTimeout(100)
       for (let i = 0; i < 12; i++) {
         await page.evaluate(
-          ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
-            const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => void })
-              .__E2E_GRAPH_ADD_EDGE__
-            addEdge?.(sourceId, targetId, 0)
+          async ({
+            sourceId,
+            targetId,
+          }: {
+            sourceId: string
+            targetId: string
+          }) => {
+            const addEdge = (window as Window & {
+              __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => Promise<boolean>
+            }).__E2E_GRAPH_ADD_EDGE__
+            if (addEdge) await addEdge(sourceId, targetId, 0)
           },
           { sourceId: fileNodeId!, targetId: computationNodeId! },
         )
-        await page.waitForTimeout(3000)
+        await page.waitForTimeout(2000)
         edgeCount = await page.locator('.react-flow__edge').count()
         if (edgeCount >= 1) break
       }

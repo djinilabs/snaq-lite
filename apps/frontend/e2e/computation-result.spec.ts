@@ -108,9 +108,8 @@ test.describe('computation result (editor–worker–LSP)', () => {
     ).toBeVisible({ timeout: 15_000 })
   })
 
-  // Skipped: "View details" click often does not open the modal in E2E (store/portal timing); modal behavior covered by result-detail-modal.test.tsx.
-  test.skip('vector result shows View details and modal closes on Escape', async ({ page }) => {
-    test.setTimeout(50_000)
+  test('vector result shows View details and modal closes on Escape', async ({ page }) => {
+    test.setTimeout(55_000)
     await gotoCanvas(page)
     await page.waitForFunction(
       () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
@@ -132,10 +131,22 @@ test.describe('computation result (editor–worker–LSP)', () => {
     const viewDetailsBtn = resultEl.getByTestId('view-details-btn')
     await expect(viewDetailsBtn).toBeVisible({ timeout: 5000 })
     await viewDetailsBtn.scrollIntoViewIfNeeded()
-    await viewDetailsBtn.click({ force: true })
-    await page.waitForTimeout(500)
+    await page.waitForTimeout(300)
     const modal = page.getByTestId('result-detail-modal')
-    await expect(modal).toBeVisible({ timeout: 15_000 })
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await viewDetailsBtn.click({ force: true })
+      await page.waitForTimeout(500)
+      const visible = await expect
+        .poll(
+          async () => await modal.isVisible(),
+          { timeout: 10_000, intervals: [200, 500, 1000] },
+        )
+        .toBe(true)
+        .then(() => true)
+        .catch(() => false)
+      if (visible) break
+      if (attempt === 2) await expect(modal).toBeVisible({ timeout: 1 })
+    }
     await page.keyboard.press('Escape')
     await page.waitForTimeout(300)
     await expect(modal).not.toBeVisible()

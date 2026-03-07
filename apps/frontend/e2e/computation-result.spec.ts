@@ -674,9 +674,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
     ).toBe(true)
   })
 
-  // Toast "no numeric data" is only added when feeding uses the JS fallback (feedBlobToStreamInChunks);
-  // when blob.stream() exists we use worker feed and do not get chunkCount in main thread, so no toast.
-  test.skip('file with no numeric content: shows toast about no numeric data', async ({ page }) => {
+  test('file with no numeric content: shows toast about no numeric data', async ({ page }) => {
     test.setTimeout(90_000)
     await gotoCanvas(page)
     await expect(page.getByTestId('canvas-toolbar')).toBeVisible({ timeout: 15_000 })
@@ -723,15 +721,21 @@ test.describe('computation result (editor–worker–LSP)', () => {
     const computationNodeId = await computationNode.getAttribute('data-node-id')
     expect(fileNodeId).toBeTruthy()
     expect(computationNodeId).toBeTruthy()
+    await page.waitForFunction(
+      () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
+      { timeout: 15_000 },
+    )
+    await page.waitForTimeout(300)
     await page.evaluate(
-      ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
-        const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => void })
+      async ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
+        const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => Promise<boolean> })
           .__E2E_GRAPH_ADD_EDGE__
-        addEdge?.(sourceId, targetId, 0)
+        if (addEdge) await addEdge(sourceId, targetId, 0)
       },
       { sourceId: fileNodeId!, targetId: computationNodeId! },
     )
-    // Ensure computation has named input, then run getExternalStreams (reads file, parses, finds no numbers → toast)
+    await page.waitForTimeout(300)
+    // Ensure computation has named input for buildGetExternalStreams, then run (reads file, finds no numbers → toast)
     await page.evaluate(
       ({
         targetId,

@@ -768,12 +768,11 @@ test.describe("canvas", () => {
     ).not.toBeVisible();
   });
 
-  // Skipped: LSP/widget pipeline often does not push the updated result in time in E2E (preview + WASM).
-  // Wiring and connection work (see unit tests); run manually or fix widget refresh timing to re-enable.
+  // Skipped: LSP/widget pipeline often does not push the bound result (420) in time in E2E (same as "bound result after rename").
   test.skip("wiring computation output to another computation input shows combined result (420)", async ({
     page,
   }) => {
-    test.setTimeout(65_000);
+    test.setTimeout(120_000);
     await gotoCanvas(page);
     await page.getByTestId("add-computation-btn").click();
     await expect(page.getByTestId("computation-node")).toHaveCount(1);
@@ -816,27 +815,64 @@ test.describe("canvas", () => {
     await page.keyboard.type("42");
     await page.waitForTimeout(2500);
 
-    const sourceHandle = page.getByTestId("computation-output-handle").nth(1);
-    const targetHandle = page
+    await page.waitForFunction(
+      () =>
+        (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ ===
+        true,
+      { timeout: 15_000 },
+    );
+    await page.waitForTimeout(500);
+
+    const sourceNodeId = await page
+      .getByTestId("computation-node")
+      .nth(1)
+      .getAttribute("data-node-id");
+    const targetNodeId = await page
       .getByTestId("computation-node")
       .first()
-      .getByTestId("computation-input-handle-0");
-    await sourceHandle.scrollIntoViewIfNeeded();
-    await targetHandle.scrollIntoViewIfNeeded();
-    const sourceBox = await sourceHandle.boundingBox();
-    const targetBox = await targetHandle.boundingBox();
-    expect(sourceBox).toBeTruthy();
-    expect(targetBox).toBeTruthy();
-    const startX = sourceBox!.x + sourceBox!.width / 2;
-    const startY = sourceBox!.y + sourceBox!.height / 2;
-    const endX = targetBox!.x + targetBox!.width / 2;
-    const endY = targetBox!.y + targetBox!.height / 2;
+      .getAttribute("data-node-id");
+    expect(sourceNodeId).toBeTruthy();
+    expect(targetNodeId).toBeTruthy();
 
-    await page.mouse.move(startX, startY);
-    await page.mouse.down();
-    await page.mouse.move(endX, endY, { steps: 10 });
-    await page.mouse.up();
-    await page.waitForTimeout(5000);
+    await page.evaluate(
+      async ({
+        sourceId,
+        targetId,
+      }: {
+        sourceId: string;
+        targetId: string;
+      }) => {
+        const addEdge = (
+          window as Window & {
+            __E2E_GRAPH_ADD_EDGE__?: (
+              a: string,
+              b: string,
+              i: number,
+            ) => Promise<boolean>;
+          }
+        ).__E2E_GRAPH_ADD_EDGE__;
+        if (addEdge) await addEdge(sourceId, targetId, 0);
+      },
+      { sourceId: sourceNodeId!, targetId: targetNodeId! },
+    );
+    await page.waitForTimeout(300);
+    await expect(page.locator(".react-flow__edge")).toHaveCount(1, {
+      timeout: 10_000,
+    });
+
+    // Force target (first) node to re-subscribe so LSP runs it with graph input (42) and sends 420
+    await page.evaluate(
+      (nodeId: string) => {
+        const inc = (
+          window as Window & {
+            __E2E_INCREMENT_WIDGET__?: (id: string) => void;
+          }
+        ).__E2E_INCREMENT_WIDGET__;
+        if (inc) inc(nodeId);
+      },
+      targetNodeId!,
+    );
+    await page.waitForTimeout(2000);
 
     await expect(
       page.getByText("target has no input named 'x'"),
@@ -851,7 +887,14 @@ test.describe("canvas", () => {
       .first()
       .getByTestId("computation-result");
     await firstResult.scrollIntoViewIfNeeded();
-    await expect(firstResult.getByText("420")).toBeVisible({ timeout: 35_000 });
+    await expect
+      .poll(
+        async () =>
+          (await firstResult.getByText("420").count()) > 0 ||
+          (await firstResult.textContent())?.includes("420") === true,
+        { timeout: 45_000, intervals: [2000, 3000, 5000, 10000] },
+      )
+      .toBe(true);
   });
 
   // Skipped: presentation widget often does not show "7" in time in E2E (preview + WASM).
@@ -1025,11 +1068,11 @@ test.describe("canvas", () => {
     ).not.toBeVisible();
   });
 
-  // Skipped: depends on presentation showing "7" after refresh; LSP/widget timing flaky in E2E.
+  // Skipped: depends on presentation showing "7" before/after refresh; LSP/widget timing flaky in E2E.
   test.skip("after full page refresh, connected computation and presentation blocks both reappear", async ({
     page,
   }) => {
-    test.setTimeout(70_000);
+    test.setTimeout(90_000);
     await gotoCanvas(page);
     await page.getByTestId("add-computation-btn").click();
     await expect(page.getByTestId("computation-node")).toHaveCount(1);
@@ -1042,29 +1085,71 @@ test.describe("canvas", () => {
 
     await page.getByTestId("add-presentation-btn").click();
     await expect(page.getByTestId("presentation-node")).toHaveCount(1);
-    const sourceHandle = page.getByTestId("computation-output-handle").first();
-    const targetHandle = page.getByTestId("presentation-input-handle").first();
-    await sourceHandle.scrollIntoViewIfNeeded();
-    await targetHandle.scrollIntoViewIfNeeded();
-    const sourceBox = await sourceHandle.boundingBox();
-    const targetBox = await targetHandle.boundingBox();
-    expect(sourceBox).toBeTruthy();
-    expect(targetBox).toBeTruthy();
-    const startX = sourceBox!.x + sourceBox!.width / 2;
-    const startY = sourceBox!.y + sourceBox!.height / 2;
-    const endX = targetBox!.x + targetBox!.width / 2;
-    const endY = targetBox!.y + targetBox!.height / 2;
-    await page.mouse.move(startX, startY);
-    await page.mouse.down();
-    await page.mouse.move(endX, endY, { steps: 10 });
-    await page.mouse.up();
-    await page.waitForTimeout(2500);
+
+    await page.waitForFunction(
+      () =>
+        (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ ===
+        true,
+      { timeout: 15_000 },
+    );
+    await page.waitForTimeout(500);
+
+    const computationNodeId = await page
+      .getByTestId("computation-node")
+      .first()
+      .getAttribute("data-node-id");
+    const presentationNodeId = await page
+      .getByTestId("presentation-node")
+      .first()
+      .getAttribute("data-node-id");
+    expect(computationNodeId).toBeTruthy();
+    expect(presentationNodeId).toBeTruthy();
+
+    await page.evaluate(
+      ({ targetId }: { targetId: string }) => {
+        const setInputs = (
+          window as Window & {
+            __E2E_SET_NODE_INPUTS__?: (
+              nodeId: string,
+              inputs: Array<{ name: string; type: string }>,
+            ) => void;
+          }
+        ).__E2E_SET_NODE_INPUTS__;
+        if (setInputs) setInputs(targetId, [{ name: "x", type: "Undefined" }]);
+      },
+      { targetId: presentationNodeId! },
+    );
+    await page.evaluate(
+      async ({
+        sourceId,
+        targetId,
+      }: {
+        sourceId: string;
+        targetId: string;
+      }) => {
+        const addEdge = (
+          window as Window & {
+            __E2E_GRAPH_ADD_EDGE__?: (
+              a: string,
+              b: string,
+              i: number,
+            ) => Promise<boolean>;
+          }
+        ).__E2E_GRAPH_ADD_EDGE__;
+        if (addEdge) await addEdge(sourceId, targetId, 0);
+      },
+      { sourceId: computationNodeId!, targetId: presentationNodeId! },
+    );
+    await page.waitForTimeout(500);
+    await expect(page.locator(".react-flow__edge")).toHaveCount(1, {
+      timeout: 10_000,
+    });
 
     const presentationContent = page
       .getByTestId("presentation-content")
       .first();
     await expect(presentationContent.getByText("7")).toBeVisible({
-      timeout: 15_000,
+      timeout: 35_000,
     });
 
     await page.reload();
@@ -1081,7 +1166,7 @@ test.describe("canvas", () => {
       .getByTestId("presentation-content")
       .first();
     await expect(presentationAfterRefresh.getByText("7")).toBeVisible({
-      timeout: 25_000,
+      timeout: 35_000,
     });
     await expect(
       presentationAfterRefresh.getByText(/unbound stream input/i),

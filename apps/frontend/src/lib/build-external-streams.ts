@@ -89,6 +89,16 @@ export function getFeedFormat(url?: string, fileType?: string): FeedStreamFormat
   if (url && /\.csv$/i.test(url)) return 'csv'
   return 'numeric'
 }
+/** Returns true if the blob text has no parseable numeric data (so we can show "no numeric data" toast when using worker path). */
+async function blobHasNoNumericData(blob: Blob, fileType?: string): Promise<boolean> {
+  const rawText = await blob.text()
+  const text = stripBom(rawText)
+  const parser = chooseParser(text, fileType)
+  for (const _batch of parser === 'csv' ? parseCsvToNumbers(text) : parseNewlineDelimitedNumbers(text)) {
+    return false
+  }
+  return true
+}
 
 /**
  * Parse a single line as CSV (comma/semicolon) or single number. Pushes parsed numbers into batch; returns updated batch (may have yielded and reset).
@@ -265,6 +275,12 @@ async function feedUrlToStream(url: string, fileType?: string): Promise<number> 
     if (!blob) throw new Error('File not found in storage. Re-add the file.')
     const blobWithStream = blob as Blob & { stream?: () => ReadableStream }
     if (typeof blobWithStream.stream === 'function') {
+      if (await blobHasNoNumericData(blob, fileType)) {
+        useUIStore.getState().addToast(
+          'The file has no numeric data. Use numbers (one per line) or CSV with numeric columns.',
+          'error',
+        )
+      }
       sendFeedStreamFromReadableStream(index, blobWithStream.stream(), format)
       return index
     }
@@ -280,6 +296,12 @@ async function feedUrlToStream(url: string, fileType?: string): Promise<number> 
     }
     const blobWithStream = blob as Blob & { stream?: () => ReadableStream }
     if (typeof blobWithStream.stream === 'function') {
+      if (await blobHasNoNumericData(blob, fileType)) {
+        useUIStore.getState().addToast(
+          'The file has no numeric data. Use numbers (one per line) or CSV with numeric columns.',
+          'error',
+        )
+      }
       sendFeedStreamFromReadableStream(index, blobWithStream.stream(), format)
       return index
     }

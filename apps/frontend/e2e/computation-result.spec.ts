@@ -289,8 +289,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
     expect(statuses.some((s) => s === 'Completed'), 'at least one widgetDataUpdate should have status Completed').toBe(true)
   })
 
-  // Skipped: file→computation edge creation often fails in CI (handle/edge timing); stream wiring covered by unit tests.
-  test.skip('file block wired to computation with Vector input shows stream result (blob cache, no fetch)', async ({
+  test('file block wired to computation with Vector input shows stream result (blob cache, no fetch)', async ({
     page,
   }) => {
     test.setTimeout(120_000)
@@ -344,28 +343,50 @@ test.describe('computation result (editor–worker–LSP)', () => {
     // Wait for LSP to send node signature so buildGetExternalStreams can resolve input name
     await page.waitForTimeout(4000)
 
-    // Wire file → computation programmatically (E2E hook); avoids flaky drag-and-drop over small handles.
-    // Retry hook + wait: sometimes the first call doesn't result in a visible edge (store/render timing).
     const fileNodeId = await page.getByTestId('file-node').first().getAttribute('data-node-id')
     const computationNodeId = await computationNode.getAttribute('data-node-id')
     expect(fileNodeId).toBeTruthy()
     expect(computationNodeId).toBeTruthy()
+    // Set computation input in store before addEdge so connectEdge finds named input (avoids "Target input not found" and edge not created)
+    await page.evaluate(
+      ({
+        targetId,
+        inputs,
+      }: {
+        targetId: string
+        inputs: Array<{ name: string; type: string }>
+      }) => {
+        const setInputs = (window as Window & {
+          __E2E_SET_NODE_INPUTS__?: (id: string, i: Array<{ name: string; type: string }>) => void
+        }).__E2E_SET_NODE_INPUTS__
+        setInputs?.(targetId, inputs)
+      },
+      { targetId: computationNodeId!, inputs: [{ name: 'x', type: 'Vector' }] },
+    )
+    await page.waitForTimeout(100)
+
     const addEdgeViaHook = async () => {
       await page.evaluate(
-        ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
-          const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => void })
-            .__E2E_GRAPH_ADD_EDGE__
-          addEdge?.(sourceId, targetId, 0)
+        async ({
+          sourceId,
+          targetId,
+        }: {
+          sourceId: string
+          targetId: string
+        }) => {
+          const addEdge = (window as Window & {
+            __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => Promise<boolean>
+          }).__E2E_GRAPH_ADD_EDGE__
+          if (addEdge) await addEdge(sourceId, targetId, 0)
         },
         { sourceId: fileNodeId!, targetId: computationNodeId! },
       )
     }
-    // Retry hook: store/render can lag in CI; call addEdge and poll until edge appears
     for (let i = 0; i < 10; i++) {
       await addEdgeViaHook()
       const count = await page.locator('.react-flow__edge').count()
       if (count >= 1) break
-      await page.waitForTimeout(3000)
+      await page.waitForTimeout(2000)
     }
     // Fallback: if hook did not create edge (e.g. timing in CI), use connectOnClick when handle is available
     if ((await page.locator('.react-flow__edge').count()) < 1) {
@@ -552,20 +573,11 @@ test.describe('computation result (editor–worker–LSP)', () => {
     await page.keyboard.type('$x')
     await page.waitForTimeout(500)
     await page.waitForTimeout(4000)
-    // Wire file → computation (file has no URL so no stream will be bound)
     const fileNodeId = await page.getByTestId('file-node').first().getAttribute('data-node-id')
     const computationNodeId = await computationNode.getAttribute('data-node-id')
     expect(fileNodeId).toBeTruthy()
     expect(computationNodeId).toBeTruthy()
-    await page.evaluate(
-      ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
-        const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => void })
-          .__E2E_GRAPH_ADD_EDGE__
-        addEdge?.(sourceId, targetId, 0)
-      },
-      { sourceId: fileNodeId!, targetId: computationNodeId! },
-    )
-    // Ensure computation node has named input in store (in case fill didn't commit), then run getExternalStreams
+    // Set computation input in store before addEdge so connectEdge finds named input (avoids "Target input not found" toast)
     await page.evaluate(
       ({
         targetId,
@@ -580,6 +592,23 @@ test.describe('computation result (editor–worker–LSP)', () => {
         setInputs?.(targetId, inputs)
       },
       { targetId: computationNodeId!, inputs: [{ name: 'x', type: 'Vector' }] },
+    )
+    await page.waitForTimeout(100)
+    // Wire file → computation (file has no URL so no stream will be bound)
+    await page.evaluate(
+      async ({
+        sourceId,
+        targetId,
+      }: {
+        sourceId: string
+        targetId: string
+      }) => {
+        const addEdge = (window as Window & {
+          __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => Promise<boolean>
+        }).__E2E_GRAPH_ADD_EDGE__
+        if (addEdge) await addEdge(sourceId, targetId, 0)
+      },
+      { sourceId: fileNodeId!, targetId: computationNodeId! },
     )
     const runResult = await page.evaluate(
       async (targetId: string) => {
@@ -761,16 +790,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
       { timeout: 15_000 },
     )
     await page.waitForTimeout(300)
-    await page.evaluate(
-      async ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
-        const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => Promise<boolean> })
-          .__E2E_GRAPH_ADD_EDGE__
-        if (addEdge) await addEdge(sourceId, targetId, 0)
-      },
-      { sourceId: fileNodeId!, targetId: computationNodeId! },
-    )
-    await page.waitForTimeout(300)
-    // Ensure computation has named input for buildGetExternalStreams, then run (reads file, finds no numbers → toast)
+    // Set computation input in store before addEdge so connectEdge finds named input (avoids "Target input not found" toast)
     await page.evaluate(
       ({
         targetId,
@@ -786,6 +806,16 @@ test.describe('computation result (editor–worker–LSP)', () => {
       },
       { targetId: computationNodeId!, inputs: [{ name: 'x', type: 'Vector' }] },
     )
+    await page.waitForTimeout(100)
+    await page.evaluate(
+      async ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
+        const addEdge = (window as Window & { __E2E_GRAPH_ADD_EDGE__?: (a: string, b: string, i: number) => Promise<boolean> })
+          .__E2E_GRAPH_ADD_EDGE__
+        if (addEdge) await addEdge(sourceId, targetId, 0)
+      },
+      { sourceId: fileNodeId!, targetId: computationNodeId! },
+    )
+    await page.waitForTimeout(300)
     const runResult = await page.evaluate(
       async (targetId: string) => {
         const run = (window as Window & {

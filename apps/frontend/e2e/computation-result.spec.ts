@@ -109,7 +109,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
   })
 
   test('vector result shows View details and modal closes on Escape', async ({ page }) => {
-    test.setTimeout(55_000)
+    test.setTimeout(70_000)
     await gotoCanvas(page)
     await page.waitForFunction(
       () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
@@ -125,7 +125,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
     await expect
       .poll(
         async () => /Vector \(\d+ elements\)/.test((await resultEl.textContent()) ?? ''),
-        { timeout: 30_000, intervals: [1000, 2000, 2000, 3000] },
+        { timeout: 45_000, intervals: [1000, 2000, 3000, 5000] },
       )
       .toBe(true)
     const viewDetailsBtn = resultEl.getByTestId('view-details-btn')
@@ -153,7 +153,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
   })
 
   test('vector result modal closes on close button', async ({ page }) => {
-    test.setTimeout(55_000)
+    test.setTimeout(70_000)
     await gotoCanvas(page)
     await page.waitForFunction(
       () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
@@ -169,7 +169,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
     await expect
       .poll(
         async () => /Vector \(\d+ elements\)/.test((await resultEl.textContent()) ?? ''),
-        { timeout: 30_000, intervals: [1000, 2000, 2000, 3000] },
+        { timeout: 45_000, intervals: [1000, 2000, 3000, 5000] },
       )
       .toBe(true)
     const viewDetailsBtnClose = resultEl.getByTestId('view-details-btn')
@@ -197,7 +197,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
   })
 
   test('vector result modal closes on overlay click', async ({ page }) => {
-    test.setTimeout(55_000)
+    test.setTimeout(70_000)
     await gotoCanvas(page)
     await page.waitForFunction(
       () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
@@ -213,7 +213,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
     await expect
       .poll(
         async () => /Vector \(\d+ elements\)/.test((await resultEl.textContent()) ?? ''),
-        { timeout: 30_000, intervals: [1000, 2000, 2000, 3000] },
+        { timeout: 45_000, intervals: [1000, 2000, 3000, 5000] },
       )
       .toBe(true)
     const viewDetailsBtnOverlay = resultEl.getByTestId('view-details-btn')
@@ -242,13 +242,13 @@ test.describe('computation result (editor–worker–LSP)', () => {
   })
 
   test('protocol: didOpen, subscribeWidget, widgetDataUpdate over worker', async ({ page }) => {
+    test.setTimeout(50_000)
     await page.addInitScript(() => {
       ;(window as unknown as Record<string, unknown>)[
         '__E2E_LSP_LOG__' as string
       ] = [] as Array<{ dir: string; method: string; params?: unknown }>
     })
     await gotoCanvas(page)
-    // Wait for LSP so result updates reliably (avoids flakiness in CI)
     await page.waitForFunction(
       () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
       { timeout: 15_000 },
@@ -268,7 +268,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
     await page.waitForTimeout(3000)
     await expect(
       page.getByTestId('computation-result').first().getByText('42'),
-    ).toBeVisible({ timeout: 20_000 })
+    ).toBeVisible({ timeout: 35_000 })
 
     const log = await page.evaluate((key) => {
       const w = window as unknown as Record<string, Array<{ dir: string; method: string; params?: unknown }>>

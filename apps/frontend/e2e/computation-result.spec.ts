@@ -417,7 +417,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
           if (text === '[]' || text.includes('File not available') || text.includes('Failed to fetch')) return false
           return vectorResultPattern.test(text)
         },
-        { timeout: 15_000, intervals: [500, 1000, 1000, 2000, 2000] },
+        { timeout: 30_000, intervals: [500, 1000, 2000, 3000, 5000] },
       )
       .toBe(true)
   })

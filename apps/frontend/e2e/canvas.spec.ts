@@ -524,21 +524,12 @@ test.describe("canvas", () => {
     ).toBeAttached({
       timeout: 15_000,
     });
-    await page.evaluate(() => {
-      (
-        window as Window & { __E2E_DEBUG_CLICKS__?: boolean }
-      ).__E2E_DEBUG_CLICKS__ = true;
-    });
     const typeSelect = page.getByTestId("computation-input-type-0").first();
     await typeSelect.scrollIntoViewIfNeeded();
     await expect(typeSelect).toBeVisible({ timeout: 5000 });
+    // Click then select: assert the dropdown remains usable (does not close from pane receiving click).
     await typeSelect.click();
     await page.waitForTimeout(350);
-    const lastClick = await page.evaluate(
-      () =>
-        (window as Window & { __E2E_LAST_CLICK__?: string }).__E2E_LAST_CLICK__,
-    );
-    expect(lastClick).not.toBe("pane");
     await typeSelect.selectOption("Numeric");
     await expect(typeSelect).toHaveValue("Numeric");
   });

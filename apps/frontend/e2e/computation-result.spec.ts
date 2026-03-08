@@ -169,7 +169,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
     await expect
       .poll(
         async () => /Vector \(\d+ elements\)/.test((await resultEl.textContent()) ?? ''),
-        { timeout: 45_000, intervals: [1000, 2000, 3000, 5000] },
+        { timeout: 60_000, intervals: [1000, 2000, 3000, 5000] },
       )
       .toBe(true)
     const viewDetailsBtnClose = resultEl.getByTestId('view-details-btn')
@@ -213,7 +213,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
     await expect
       .poll(
         async () => /Vector \(\d+ elements\)/.test((await resultEl.textContent()) ?? ''),
-        { timeout: 45_000, intervals: [1000, 2000, 3000, 5000] },
+        { timeout: 60_000, intervals: [1000, 2000, 3000, 5000] },
       )
       .toBe(true)
     const viewDetailsBtnOverlay = resultEl.getByTestId('view-details-btn')

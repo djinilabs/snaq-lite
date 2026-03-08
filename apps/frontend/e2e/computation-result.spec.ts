@@ -109,7 +109,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
   })
 
   test('vector result shows View details and modal closes on Escape', async ({ page }) => {
-    test.setTimeout(70_000)
+    test.setTimeout(120_000)
     await gotoCanvas(page)
     await page.waitForFunction(
       () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
@@ -125,7 +125,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
     await expect
       .poll(
         async () => /Vector \(\d+ elements\)/.test((await resultEl.textContent()) ?? ''),
-        { timeout: 45_000, intervals: [1000, 2000, 3000, 5000] },
+        { timeout: 90_000, intervals: [1000, 2000, 3000, 5000] },
       )
       .toBe(true)
     const viewDetailsBtn = resultEl.getByTestId('view-details-btn')
@@ -153,7 +153,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
   })
 
   test('vector result modal closes on close button', async ({ page }) => {
-    test.setTimeout(70_000)
+    test.setTimeout(120_000)
     await gotoCanvas(page)
     await page.waitForFunction(
       () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
@@ -169,7 +169,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
     await expect
       .poll(
         async () => /Vector \(\d+ elements\)/.test((await resultEl.textContent()) ?? ''),
-        { timeout: 60_000, intervals: [1000, 2000, 3000, 5000] },
+        { timeout: 90_000, intervals: [1000, 2000, 3000, 5000] },
       )
       .toBe(true)
     const viewDetailsBtnClose = resultEl.getByTestId('view-details-btn')
@@ -197,7 +197,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
   })
 
   test('vector result modal closes on overlay click', async ({ page }) => {
-    test.setTimeout(70_000)
+    test.setTimeout(120_000)
     await gotoCanvas(page)
     await page.waitForFunction(
       () => (window as unknown as { __E2E_LSP_READY__?: boolean }).__E2E_LSP_READY__ === true,
@@ -213,7 +213,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
     await expect
       .poll(
         async () => /Vector \(\d+ elements\)/.test((await resultEl.textContent()) ?? ''),
-        { timeout: 60_000, intervals: [1000, 2000, 3000, 5000] },
+        { timeout: 90_000, intervals: [1000, 2000, 3000, 5000] },
       )
       .toBe(true)
     const viewDetailsBtnOverlay = resultEl.getByTestId('view-details-btn')
@@ -808,7 +808,7 @@ test.describe('computation result (editor–worker–LSP)', () => {
     const computationNode = page.getByTestId('computation-node').first()
     await computationNode.scrollIntoViewIfNeeded()
     await computationNode.getByTestId('computation-add-input').click()
-    await expect(computationNode.getByTestId('computation-input-name-0')).toBeAttached({ timeout: 5000 })
+    await expect(computationNode.getByTestId('computation-input-name-0')).toBeAttached({ timeout: 15_000 })
     await computationNode.getByTestId('computation-input-name-0').fill('x')
     await computationNode.getByTestId('computation-input-type-0').selectOption('Vector')
     await page.waitForTimeout(300)

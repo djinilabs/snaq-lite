@@ -3712,6 +3712,191 @@ mod tests {
     }
 
     #[test]
+    fn input_declaration_binding_stays_lazy_from_input() {
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
+        use crate::vector::LazyVector;
+
+        let registry = default_si_registry();
+        let (_tx, rx) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let handle_id = register(rx);
+        let stream_inputs = std::collections::HashMap::from([("x".to_string(), handle_id)]);
+        let (value, _db) = run_with_stream_inputs("input x: Vector\nx", &registry, stream_inputs)
+            .expect("run_with_stream_inputs should succeed");
+        match value {
+            Value::Vector(vec) => match vec.inner {
+                LazyVector::FromInput(id) => assert_eq!(id, handle_id),
+                other => panic!("expected LazyVector::FromInput, got {other:?}"),
+            },
+            other => panic!("expected vector value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_declaration_lazy_binding_supports_length_and_take() {
+        use crate::quantity::Quantity;
+        use crate::symbolic::Value;
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
+        use futures::sink::SinkExt;
+
+        let registry = default_si_registry();
+        let (mut tx, rx) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let handle_id = register(rx);
+        let stream_inputs = std::collections::HashMap::from([("x".to_string(), handle_id)]);
+        futures::executor::block_on(tx.send(vec![
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(10.0)))),
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(20.0)))),
+        ]))
+        .expect("send stream chunk");
+        drop(tx);
+        let (value, _db) = run_with_stream_inputs(
+            "input x: Numeric\nx.take(0, 1).length",
+            &registry,
+            stream_inputs,
+        )
+        .expect("run_with_stream_inputs should succeed");
+        let Value::Numeric(n) = value else {
+            panic!("expected numeric result for take-length");
+        };
+        assert!((n.value() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn norm_streams_from_input_declaration() {
+        use crate::quantity::Quantity;
+        use crate::symbolic::Value;
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
+        use futures::sink::SinkExt;
+
+        let registry = default_si_registry();
+        let (mut tx, rx) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let handle_id = register(rx);
+        futures::executor::block_on(tx.send(vec![
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(3.0)))),
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(4.0)))),
+        ]))
+        .expect("send stream chunk");
+        drop(tx);
+
+        let (value, _db) = run_with_stream_inputs(
+            "input x: Numeric\nx.norm()",
+            &registry,
+            std::collections::HashMap::from([("x".to_string(), handle_id)]),
+        )
+        .expect("run_with_stream_inputs should succeed");
+        let Value::Numeric(n) = value else {
+            panic!("expected numeric norm");
+        };
+        assert!((n.value() - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn corr_streams_from_input_declarations() {
+        use crate::quantity::Quantity;
+        use crate::symbolic::Value;
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
+        use futures::sink::SinkExt;
+
+        let registry = default_si_registry();
+        let (mut tx_a, rx_a) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let (mut tx_b, rx_b) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let a_id = register(rx_a);
+        let b_id = register(rx_b);
+        futures::executor::block_on(tx_a.send(vec![
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(1.0)))),
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(2.0)))),
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(3.0)))),
+        ]))
+        .expect("send a chunk");
+        futures::executor::block_on(tx_b.send(vec![
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(2.0)))),
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(4.0)))),
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(6.0)))),
+        ]))
+        .expect("send b chunk");
+        drop(tx_a);
+        drop(tx_b);
+
+        let (value, _db) = run_with_stream_inputs(
+            "input a: Numeric\ninput b: Numeric\ncorr(a, b)",
+            &registry,
+            std::collections::HashMap::from([
+                ("a".to_string(), a_id),
+                ("b".to_string(), b_id),
+            ]),
+        )
+        .expect("run_with_stream_inputs should succeed");
+        let Value::Numeric(r) = value else {
+            panic!("expected numeric correlation");
+        };
+        assert!((r.value() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn median_and_quantile_reject_non_replayable_streams() {
+        use crate::quantity::Quantity;
+        use crate::symbolic::Value;
+        use crate::stream_handle::STREAM_CHANNEL_CAPACITY;
+        use futures::sink::SinkExt;
+
+        let registry = default_si_registry();
+        let (mut tx, rx) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let handle_id = register(rx);
+        futures::executor::block_on(tx.send(vec![
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(1.0)))),
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(2.0)))),
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(3.0)))),
+        ]))
+        .expect("send stream chunk");
+        drop(tx);
+        let err = match run_with_stream_inputs(
+            "input x: Vector\nx.median()",
+            &registry,
+            std::collections::HashMap::from([("x".to_string(), handle_id)]),
+        ) {
+            Ok(_) => panic!("median should fail on non-replayable stream"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("median on non-replayable stream"),
+            "unexpected median error: {err}"
+        );
+
+        let (mut tx_q, rx_q) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let handle_q = register(rx_q);
+        futures::executor::block_on(tx_q.send(vec![
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(1.0)))),
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(2.0)))),
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(3.0)))),
+        ]))
+        .expect("send stream chunk");
+        drop(tx_q);
+        let err = match run_with_stream_inputs(
+            "input x: Vector\nx.quantile(0.5)",
+            &registry,
+            std::collections::HashMap::from([("x".to_string(), handle_q)]),
+        ) {
+            Ok(_) => panic!("quantile should fail on non-replayable stream"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("quantile on non-replayable stream"),
+            "unexpected quantile error: {err}"
+        );
+    }
+
+    #[test]
+    fn vector_literal_elements_are_evaluated_lazily_for_index_access() {
+        let registry = default_si_registry();
+        let v = run_with_registry("[1, sqrt(-1)][0]", &registry)
+            .expect("indexing first element should not evaluate failing tail element");
+        let Value::Numeric(q) = v else {
+            panic!("expected numeric result");
+        };
+        assert!((q.value() - 1.0).abs() < 1e-10);
+    }
+
+
+    #[test]
     fn external_stream_times_two_yields_map_over_from_input() {
         use crate::queries::{program, set_eval_registry, set_stream_input_registry, value};
         use crate::vector::LazyVector;

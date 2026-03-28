@@ -63,6 +63,47 @@ impl futures::stream::Stream for LiteralVectorStream {
 
 impl std::marker::Unpin for LiteralVectorStream {}
 
+/// Evaluate one deferred vector-literal element inside a tracked query context.
+#[salsa::tracked]
+fn eval_deferred_vector_element(
+    db: &dyn salsa::Database,
+    env: Env,
+    def: ExprDef,
+) -> Result<Option<Value>, RunError> {
+    let registry = EVAL_REGISTRY.with(|r| {
+        r.borrow()
+            .clone()
+            .unwrap_or_else(crate::unit_registry::default_si_registry)
+    });
+    let scope = Scope::new(db, env);
+    let expr = build_expression(db, def, None);
+    value_inner(db, scope, expr, &registry).map(Some)
+}
+
+/// Stream that lazily evaluates literal element ExprDefs using a captured lexical environment.
+pub struct DeferredLiteralVectorStream<'a> {
+    db: &'a dyn salsa::Database,
+    env: Env,
+    defs: std::vec::IntoIter<ExprDef>,
+}
+
+impl<'a> futures::stream::Stream for DeferredLiteralVectorStream<'a> {
+    type Item = Result<Option<Value>, RunError>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let Some(def) = this.defs.next() else {
+            return Poll::Ready(None);
+        };
+        Poll::Ready(Some(eval_deferred_vector_element(this.db, this.env.clone(), def)))
+    }
+}
+
+impl std::marker::Unpin for DeferredLiteralVectorStream<'_> {}
+
 /// Empty stream (for transpose/transform stubs). Unpin.
 pub struct EmptyVectorStream;
 
@@ -515,6 +556,7 @@ fn apply_binary_op(
 /// Unified stream type for vector elements (literal, mapped, empty, transposed, zipped, outer, take, or from external input).
 pub enum VectorStream<'a> {
     Literal(LiteralVectorStream),
+    DeferredLiteral(DeferredLiteralVectorStream<'a>),
     Mapped(MappedVectorStream<'a>),
     Empty(EmptyVectorStream),
     Transposed(TransposedVectorStream<'a>),
@@ -536,6 +578,7 @@ impl<'a> futures::stream::Stream for VectorStream<'a> {
     ) -> Poll<Option<Self::Item>> {
         match self.get_mut() {
             VectorStream::Literal(s) => Pin::new(s).poll_next(cx),
+            VectorStream::DeferredLiteral(s) => Pin::new(s).poll_next(cx),
             VectorStream::Mapped(s) => Pin::new(s).poll_next(cx),
             VectorStream::Empty(s) => Pin::new(s).poll_next(cx),
             VectorStream::Transposed(s) => Pin::new(s).poll_next(cx),
@@ -696,6 +739,13 @@ pub fn vector_into_stream<'db>(
         LazyVector::FromEvaluated(results) => VectorStream::Literal(LiteralVectorStream {
             results: results.into_iter(),
         }),
+        LazyVector::FromExprsWithEnv { defs, env } => {
+            VectorStream::DeferredLiteral(DeferredLiteralVectorStream {
+                db,
+                env,
+                defs: defs.into_iter(),
+            })
+        }
         LazyVector::Map { source, op } => {
             let inner = vector_into_stream(db, *source);
             VectorStream::Mapped(MappedVectorStream {
@@ -796,9 +846,8 @@ fn vector_index_stream(
     })
 }
 
-/// Consume a stream input handle once and return its value (single element → that value; multiple → Vector).
-/// Used when binding a declared input (InputDecl) from the stream input registry during Block evaluation.
-/// Not used on WASM (would deadlock); use $name in the expression there.
+/// Consume a stream input handle once and return its value (single element -> that value; multiple -> Vector).
+/// Used by scalar-friendly native input declaration binding paths.
 #[cfg(not(target_arch = "wasm32"))]
 fn stream_input_to_value(handle_id: crate::stream_handle::StreamHandleId) -> Result<Value, RunError> {
     use futures::stream::StreamExt;
@@ -1469,15 +1518,16 @@ fn value_inner<'db>(
             }
         }
         ExprData::VecLiteral(exprs) => {
-            // Evaluate all elements while we're inside this tracked query (Salsa does not allow
-            // creating tracked structs from outside). Store results for lazy streaming.
-            let results: Vec<Result<Option<Value>, RunError>> = exprs
+            let defs = exprs
                 .iter()
-                .map(|e| value_inner(db, scope, *e, registry).map(Some))
-                .collect();
-            Ok(Value::Vector(VectorValue::column(LazyVector::from_evaluated(
-                results,
-            ))))
+                .map(|e| expression_to_def(db, *e))
+                .collect::<Vec<_>>();
+            Ok(Value::Vector(VectorValue::column(
+                LazyVector::FromExprsWithEnv {
+                    defs,
+                    env: scope.env(db).clone(),
+                },
+            )))
         }
         ExprData::MapLiteral(entries) => {
             let evaluated: Vec<(String, Value)> = entries
@@ -1672,6 +1722,16 @@ fn value_inner<'db>(
                             "median takes no arguments".to_string(),
                         )));
                     }
+                    if matches!(inner, LazyVector::FromInput(_)) {
+                        return Err(run_err_with_span(
+                            db,
+                            expr,
+                            RunErrorKind::InvalidArgument(
+                                "median on non-replayable stream requires explicit materialization upstream"
+                                    .to_string(),
+                            ),
+                        ));
+                    }
                     let collected = collect_vector_stream(db, inner);
                     median_from_collected(&collected, registry)
                         .map_err(|e| with_span_if_missing(e, expr.span(db)))
@@ -1692,6 +1752,16 @@ fn value_inner<'db>(
                         ))
                     })?;
                     let p = p_q.value();
+                    if matches!(inner, LazyVector::FromInput(_)) {
+                        return Err(run_err_with_span(
+                            db,
+                            expr,
+                            RunErrorKind::InvalidArgument(
+                                "quantile on non-replayable stream requires explicit materialization upstream"
+                                    .to_string(),
+                            ),
+                        ));
+                    }
                     let collected = collect_vector_stream(db, inner);
                     quantile_from_collected(&collected, p, registry)
                         .map_err(|e| with_span_if_missing(e, expr.span(db)))
@@ -1823,15 +1893,21 @@ fn value_inner<'db>(
                             "norm takes no arguments".to_string(),
                         )));
                     }
-                    let collected = collect_vector_stream(db, inner);
+                    use futures::stream::StreamExt;
+                    let mut stream = vector_into_stream(db, inner);
                     let mut sum_sq = Value::Numeric(Quantity::from_scalar(0.0));
-                    for r in &collected {
-                        let opt = r.as_ref().map_err(|e| e.clone())?;
-                        if let Some(v) = opt {
-                            let sq = mul_values(v, v, registry, None, None)?;
-                            sum_sq = add_values(&sum_sq, &sq, registry, None, None)?;
+                    futures::executor::block_on(async {
+                        while let Some(item) = stream.next().await {
+                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            if let Some(v) = opt {
+                                let sq = mul_values(&v, &v, registry, None, expr.span(db))
+                                    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                                sum_sq = add_values(&sum_sq, &sq, registry, None, expr.span(db))
+                                    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            }
                         }
-                    }
+                        Ok::<(), RunError>(())
+                    })?;
                     let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
                     let sum_sq_q = sum_sq.to_quantity(&sym_reg).map_err(|_| {
                         RunError::new(RunErrorKind::UnknownMethod(
@@ -2063,7 +2139,7 @@ fn value_inner<'db>(
                 let n = exprs.len();
                 for (i, e) in exprs.iter().enumerate() {
                     match e.data(db) {
-                        ExprData::InputDecl(name, _param_id, _type_name) => {
+                        ExprData::InputDecl(name, _param_id, type_name) => {
                             if !seen_input_names.insert(name.clone()) {
                                 return Err(with_span_if_missing(
                                     RunError::new(RunErrorKind::InvalidArgument(format!(
@@ -2072,42 +2148,33 @@ fn value_inner<'db>(
                                     e.span(db),
                                 ));
                             }
-                            // Bind declared input names into scope so blocks behave like functions.
-                            // Native keeps the existing scalar-friendly behavior by consuming single-value
-                            // streams when possible; WASM stays non-blocking by binding stream handles lazily.
+                            // Bind declared input names. Vector-typed declarations stay lazy.
+                            // Other declarations preserve scalar-friendly native behavior.
+                            let handle_id = STREAM_INPUT_REGISTRY.with(|r| {
+                                let reg = r.borrow();
+                                reg.as_ref().and_then(|registry| registry.inputs(db).get(name).copied())
+                            });
                             #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                let handle_id = STREAM_INPUT_REGISTRY.with(|r| {
-                                    let reg = r.borrow();
-                                    reg.as_ref().and_then(|registry| registry.inputs(db).get(name).copied())
-                                });
-                                let input_value = if let Some(handle_id) = handle_id {
-                                    stream_input_to_value(handle_id)
-                                        .map_err(|err| with_span_if_missing(err, e.span(db)))?
-                                } else {
-                                    Value::Undefined
-                                };
-                                let stored = StoredValue::from_value(&input_value)
-                                    .map_err(|err| with_span_if_missing(err, e.span(db)))?;
-                                let new_env = current_scope.env(db).clone().extend(name.clone(), stored);
-                                current_scope = Scope::new(db, new_env);
-                            }
-                            #[cfg(target_arch = "wasm32")]
-                            {
-                                let handle_id = STREAM_INPUT_REGISTRY.with(|r| {
-                                    let reg = r.borrow();
-                                    reg.as_ref().and_then(|registry| registry.inputs(db).get(name).copied())
-                                });
-                                let input_value = if let Some(handle_id) = handle_id {
+                            let input_value = if let Some(handle_id) = handle_id {
+                                if type_name == "Vector" {
                                     Value::Vector(VectorValue::column(LazyVector::FromInput(handle_id)))
                                 } else {
-                                    Value::Undefined
-                                };
-                                let stored = StoredValue::from_value(&input_value)
-                                    .map_err(|err| with_span_if_missing(err, e.span(db)))?;
-                                let new_env = current_scope.env(db).clone().extend(name.clone(), stored);
-                                current_scope = Scope::new(db, new_env);
-                            }
+                                    stream_input_to_value(handle_id)
+                                        .map_err(|err| with_span_if_missing(err, e.span(db)))?
+                                }
+                            } else {
+                                Value::Undefined
+                            };
+                            #[cfg(target_arch = "wasm32")]
+                            let input_value = if let Some(handle_id) = handle_id {
+                                Value::Vector(VectorValue::column(LazyVector::FromInput(handle_id)))
+                            } else {
+                                Value::Undefined
+                            };
+                            let stored = StoredValue::from_value(&input_value)
+                                .map_err(|err| with_span_if_missing(err, e.span(db)))?;
+                            let new_env = current_scope.env(db).clone().extend(name.clone(), stored);
+                            current_scope = Scope::new(db, new_env);
                             // Declaration item itself does not produce a value.
                             if i == n - 1 {
                                 return Ok(Value::Undefined);
@@ -2668,9 +2735,7 @@ where
             Value::Vector(v) => v.clone(),
             _ => return Err(RunError::new(RunErrorKind::ExpectedVector)),
         };
-        let a_elems = collect_vector_stream(db, a_inner);
-        let b_elems = collect_vector_stream(db, b_inner);
-        let r = pearson_correlation(&a_elems, &b_elems, registry)?;
+        let r = pearson_correlation_stream(db, a_inner, b_inner, registry)?;
         return Ok(Value::Numeric(Quantity::new(r, Unit::scalar())));
     }
     // take(vector, start, length): first arg is vector, second and third are non-negative integers.
@@ -2899,69 +2964,108 @@ fn compute_variance_value(
     sub_values(&mean_sq_val, &mean_sq_mean, registry, None, None)
 }
 
-/// Pearson correlation of two collected vectors. Both must have same length and numeric elements (same dimension).
-/// Returns dimensionless scalar in [-1, 1]. Errors if length < 2 or length mismatch.
-fn pearson_correlation(
-    a_elems: &[Result<Option<Value>, RunError>],
-    b_elems: &[Result<Option<Value>, RunError>],
+/// Pearson correlation of two vectors, streamed in lock-step.
+/// Requires same vector length; skips sparse pairs where at least one side is undefined.
+fn pearson_correlation_stream(
+    db: &dyn salsa::Database,
+    a: LazyVector,
+    b: LazyVector,
     registry: &UnitRegistry,
 ) -> Result<f64, RunError> {
-    if a_elems.len() != b_elems.len() {
-        return Err(RunError::new(RunErrorKind::VectorLengthMismatch {
-            left_len: a_elems.len(),
-            right_len: b_elems.len(),
-        }));
-    }
+    use futures::stream::StreamExt;
     let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
-    let mut xs: Vec<f64> = Vec::new();
-    let mut ys: Vec<f64> = Vec::new();
-    for (ra, rb) in a_elems.iter().zip(b_elems.iter()) {
-        let va = ra.as_ref().map_err(|e| e.clone())?.clone();
-        let vb = rb.as_ref().map_err(|e| e.clone())?.clone();
-        let Some(va) = va else { continue };
-        let Some(vb) = vb else { continue };
-        let qa = va.to_quantity(&sym_reg).map_err(|_| {
-            RunError::new(RunErrorKind::InvalidArgument(
-                "corr: elements must be numeric (same dimension)".to_string(),
-            ))
-        })?;
-        let qb = vb.to_quantity(&sym_reg).map_err(|_| {
-            RunError::new(RunErrorKind::InvalidArgument(
-                "corr: elements must be numeric (same dimension)".to_string(),
-            ))
-        })?;
-        if !registry.same_dimension(qa.unit(), qb.unit()).unwrap_or(false) {
-            return Err(RunError::new(RunErrorKind::DimensionMismatch {
-                left: qa.unit().clone(),
-                right: qb.unit().clone(),
-            }));
+    let mut a_stream = vector_into_stream(db, a);
+    let mut b_stream = vector_into_stream(db, b);
+    let mut left_len = 0usize;
+    let mut right_len = 0usize;
+    let mut n = 0f64;
+    let mut mean_x = 0.0f64;
+    let mut mean_y = 0.0f64;
+    let mut s_xx = 0.0f64;
+    let mut s_yy = 0.0f64;
+    let mut s_xy = 0.0f64;
+    futures::executor::block_on(async {
+        loop {
+            let la = a_stream.next().await;
+            let rb = b_stream.next().await;
+            match (la, rb) {
+                (Some(Ok(left_opt)), Some(Ok(right_opt))) => {
+                    left_len += 1;
+                    right_len += 1;
+                    let (Some(left), Some(right)) = (left_opt, right_opt) else {
+                        continue;
+                    };
+                    let qa = left.to_quantity(&sym_reg).map_err(|_| {
+                        RunError::new(RunErrorKind::InvalidArgument(
+                            "corr: elements must be numeric (same dimension)".to_string(),
+                        ))
+                    })?;
+                    let qb = right.to_quantity(&sym_reg).map_err(|_| {
+                        RunError::new(RunErrorKind::InvalidArgument(
+                            "corr: elements must be numeric (same dimension)".to_string(),
+                        ))
+                    })?;
+                    if !registry.same_dimension(qa.unit(), qb.unit()).unwrap_or(false) {
+                        return Err(RunError::new(RunErrorKind::DimensionMismatch {
+                            left: qa.unit().clone(),
+                            right: qb.unit().clone(),
+                        }));
+                    }
+                    let common = Quantity::smaller_unit(registry, qa.unit(), qb.unit())
+                        .cloned()
+                        .unwrap_or_else(|| qa.unit().clone());
+                    let x = qa
+                        .convert_to(registry, &common)
+                        .map_err(|_| {
+                            RunError::new(RunErrorKind::DimensionMismatch {
+                                left: qa.unit().clone(),
+                                right: common.clone(),
+                            })
+                        })?
+                        .value();
+                    let y = qb
+                        .convert_to(registry, &common)
+                        .map_err(|_| {
+                            RunError::new(RunErrorKind::DimensionMismatch {
+                                left: qb.unit().clone(),
+                                right: common.clone(),
+                            })
+                        })?
+                        .value();
+                    n += 1.0;
+                    let dx = x - mean_x;
+                    mean_x += dx / n;
+                    let dy = y - mean_y;
+                    mean_y += dy / n;
+                    s_xx += dx * (x - mean_x);
+                    s_yy += dy * (y - mean_y);
+                    s_xy += dx * (y - mean_y);
+                }
+                (Some(Err(e)), _) | (_, Some(Err(e))) => return Err(e),
+                (None, None) => break,
+                (None, Some(_)) => {
+                    return Err(RunError::new(RunErrorKind::VectorLengthMismatch {
+                        left_len,
+                        right_len: right_len + 1,
+                    }));
+                }
+                (Some(_), None) => {
+                    return Err(RunError::new(RunErrorKind::VectorLengthMismatch {
+                        left_len: left_len + 1,
+                        right_len,
+                    }));
+                }
+            }
         }
-        let common = Quantity::smaller_unit(registry, qa.unit(), qb.unit()).cloned().unwrap_or_else(|| qa.unit().clone());
-        let x = qa.convert_to(registry, &common).map_err(|_| RunError::new(RunErrorKind::DimensionMismatch {
-            left: qa.unit().clone(),
-            right: common.clone(),
-        }))?.value();
-        let y = qb.convert_to(registry, &common).map_err(|_| RunError::new(RunErrorKind::DimensionMismatch {
-            left: qb.unit().clone(),
-            right: common.clone(),
-        }))?.value();
-        xs.push(x);
-        ys.push(y);
-    }
-    let n = xs.len() as f64;
+        Ok::<(), RunError>(())
+    })?;
     if n < 2.0 {
         return Err(RunError::new(RunErrorKind::InvalidArgument(
             "corr: need at least 2 pairs".to_string(),
         )));
     }
-    let sum_x: f64 = xs.iter().sum();
-    let sum_y: f64 = ys.iter().sum();
-    let sum_xy: f64 = xs.iter().zip(ys.iter()).map(|(a, b)| a * b).sum();
-    let sum_x2: f64 = xs.iter().map(|x| x * x).sum();
-    let sum_y2: f64 = ys.iter().map(|y| y * y).sum();
-    let num = n * sum_xy - sum_x * sum_y;
-    let den = ((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y)).sqrt();
-    let r = if den > 0.0 { num / den } else { 0.0 };
+    let den = (s_xx * s_yy).sqrt();
+    let r = if den > 0.0 { s_xy / den } else { 0.0 };
     Ok(r.clamp(-1.0, 1.0))
 }
 

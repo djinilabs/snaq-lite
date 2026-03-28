@@ -2,6 +2,12 @@
 
 ## Just completed
 
+- **Bridge lazy evaluation + streaming gaps (phase execution):**
+  - `crates/snaq-lite-lsp/src/lib.rs`: `recompute_and_push` now propagates downstream only when node output fingerprint changes, reducing no-op didChange fanout. Added integration tests for changed-output propagation and same-output no-propagation.
+  - `crates/snaq-lite-lang/src/queries.rs`: vector-typed input declarations now bind lazily to `LazyVector::FromInput` across native and WASM, while native keeps scalar-friendly binding for non-vector declarations; `norm` and `corr` now stream in single pass, and `median`/`quantile` now reject non-replayable `FromInput` streams explicitly.
+  - `crates/snaq-lite-lang/src/queries.rs` + `src/vector.rs`: vector literals now support deferred lazy element evaluation with captured lexical env (`FromExprsWithEnv`) consumed via `vector_into_stream`, enabling short-circuit access without eagerly evaluating tail elements.
+  - `crates/snaq-lite-lsp/src/lib.rs`: `fetchResultSlice` no longer upgrades `FromInput` to `FromEvaluated`; non-replayable random-access (`offset>0` or cursor use) is rejected with `invalid_params` instead of materializing.
+  - Docs updated: `docs/LSP.md` and `docs/VECTORS.md` for value-change recompute gating, input declaration laziness parity, non-replayable slice limits, lazy vector literals, and reducer semantics.
 - **Node result handle + cursor pagination flow:** Added canonical handle-based transport in `snaq-lite-lsp` so node/widget completed payloads include `resultHandle`, and `snaqlite/graph/fetchResultSlice` accepts either `{ widgetId }` (compat) or `{ resultHandle, cursor }` (canonical) with `nextCursor` continuation.
 - **Result handle lifecycle registry:** Added `crates/snaq-lite-lsp/src/result_handle_registry.rs` to manage URI-scoped result handles and one-time cursor tokens with TTL/eviction, invalidated on recompute, close/reset/import/shutdown.
 - **Deferred connect validation behavior:** `graph/connect` now allows attach when source output type is temporarily unknown and preserves existing hard type mismatch rejection when source type is known incompatible.

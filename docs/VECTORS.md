@@ -7,6 +7,7 @@ This document describes vector literals, transpose, orientation, and how vectors
 - **Syntax:** `[ expr, expr, ... ]` or `[]`.
 - Elements are expressions separated by commas. They can be any expression (scalars, quantities, symbols, or nested vectors).
 - **Nested vectors** are allowed: e.g. `[[1, 2], [3, 4]]` is a vector whose elements are two vectors.
+- Vector literal elements are evaluated **lazily** when consumed. This means partial consumers (for example index access) can return without evaluating later elements.
 
 By default, a vector literal has **column** orientation: it is treated as a single column of elements.
 
@@ -84,17 +85,17 @@ Vectors support **properties** (no arguments) and **methods** (with arguments) u
   - **`V.mean()`** — arithmetic mean (sum / length). Empty vector → error.
   - **`V.min()`**, **`V.max()`** — minimum or maximum element (scalar). Empty vector → error. Elements must be numeric, same dimension.
   - **`V.dot(other)`** — dot product with another vector (element-wise pairing; same length required). Returns a scalar.
-  - **`V.norm()`** — L2 norm (Euclidean length): √(sum of squares of elements). Empty vector → `0`. Same dimension required.
+  - **`V.norm()`** — L2 norm (Euclidean length): √(sum of squares of elements). Empty vector → `0`. Same dimension required. Computed as a streaming reduction.
   - **`V.product()`** — product of all elements (scalar). Empty vector → `1`. Same dimension required.
   - **`V.variance()`** — population variance (mean of squares minus square of mean). Empty vector → error. Result has squared dimension (e.g. m² for lengths in m).
   - **`V.stddev()`** — standard deviation (√ of variance). Empty vector → error.
-  - **`V.median()`** — median of elements (middle value or average of two middles). Empty vector → error. Same dimension required.
-  - **`V.quantile(p)`** — sample quantile; `p` in [0, 1] (e.g. 0.5 for median). Empty vector → error. Same dimension required.
+  - **`V.median()`** — median of elements (middle value or average of two middles). Empty vector → error. Same dimension required. For non-replayable streams (for example direct input-handle streams), this returns an error because exact median requires replay/materialization.
+  - **`V.quantile(p)`** — sample quantile; `p` in [0, 1] (e.g. 0.5 for median). Empty vector → error. Same dimension required. For non-replayable streams, this returns an error because exact quantile requires replay/materialization.
   - **`V.all()`** — true if every element is true; **`V.any()`** — true if any element is true. Elements must be boolean (e.g. from comparisons). Empty vector: `all()` → true, `any()` → false.
 
 Numeric index access (e.g. `V.0`, `V.1`) is unchanged: use a **number** after the dot for single-element access; use an **identifier** (e.g. `length`, `map`) for property or method access. Unknown property or method names return **unknown property** or **unknown method**.
 
-Reduction methods are evaluated by consuming vector streams; they do not require vectors to be pre-materialized in memory before computation starts.
+Reduction methods are evaluated by consuming vector streams; they do not require vectors to be pre-materialized in memory before computation starts. The exact-order statistics methods (`median`, `quantile`) are the intentional exception for non-replayable streams.
 
 ### Math and statistics (for students)
 

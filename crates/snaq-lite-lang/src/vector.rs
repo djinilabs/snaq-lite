@@ -12,6 +12,7 @@
 
 use crate::error::RunError;
 use crate::ir::ExprDef;
+use crate::scope::Env;
 use crate::stream_handle::StreamHandleId;
 use crate::symbolic::Value;
 use crate::user_function;
@@ -130,6 +131,12 @@ pub enum LazyVector {
     FromExprs(Vec<ExprDef>),
     /// Pre-evaluated elements (from a literal evaluated inside a Salsa query; stream yields these).
     FromEvaluated(Vec<Result<Option<Value>, RunError>>),
+    /// Deferred literal elements with captured lexical environment.
+    /// Elements are evaluated lazily through a tracked query at stream-consume time.
+    FromExprsWithEnv {
+        defs: Vec<ExprDef>,
+        env: Env,
+    },
     /// Element-wise map: when streamed (via [crate::queries::vector_into_stream]), each element is transformed by [VectorMapOp].
     Map {
         source: Box<LazyVector>,
@@ -185,6 +192,7 @@ impl LazyVector {
             LazyVector::FromEvaluated(r) => Some(r),
             LazyVector::Map { .. }
             | LazyVector::FromExprs(_)
+            | LazyVector::FromExprsWithEnv { .. }
             | LazyVector::Transpose { .. }
             | LazyVector::ZipMap { .. }
             | LazyVector::Outer { .. }
@@ -200,6 +208,7 @@ impl LazyVector {
             LazyVector::FromExprs(defs) => Some(defs),
             LazyVector::Map { .. }
             | LazyVector::FromEvaluated(_)
+            | LazyVector::FromExprsWithEnv { .. }
             | LazyVector::Transpose { .. }
             | LazyVector::ZipMap { .. }
             | LazyVector::Outer { .. }
@@ -224,6 +233,10 @@ impl LazyVector {
             LazyVector::FromEvaluated(results) => Box::new(stream::iter(results)),
             LazyVector::Map { .. } => {
                 // Stub: yield nothing (or could return an error)
+                Box::new(stream::iter(std::iter::empty::<Result<Option<Value>, RunError>>()))
+            }
+            LazyVector::FromExprsWithEnv { .. } => {
+                // Streamed via vector_into_stream in queries (needs db + tracked query access).
                 Box::new(stream::iter(std::iter::empty::<Result<Option<Value>, RunError>>()))
             }
             LazyVector::Transpose { source } => (*source).into_stream(ctx),

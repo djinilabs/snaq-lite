@@ -7,6 +7,7 @@ use tower_lsp::lsp_types::Url;
 pub struct NodeResultEntry {
     pub value: Option<snaq_lite_lang::Value>,
     pub error: Option<String>,
+    pub fingerprint: String,
     pub revision: u64,
 }
 
@@ -35,23 +36,35 @@ impl NodeResultRegistry {
     }
 
     pub fn upsert_value(&mut self, uri: Url, value: snaq_lite_lang::Value) -> u64 {
-        let revision = self
-            .by_uri
-            .get(&uri)
-            .map(|e| e.revision.saturating_add(1))
-            .unwrap_or(1);
-        self.by_uri.insert(
-            uri,
-            NodeResultEntry {
-                value: Some(value),
-                error: None,
-                revision,
-            },
-        );
-        revision
+        self.upsert_value_if_changed(uri, value).0
     }
 
     pub fn upsert_error(&mut self, uri: Url, error: String) -> u64 {
+        self.upsert_error_if_changed(uri, error).0
+    }
+
+    pub fn upsert_value_if_changed(&mut self, uri: Url, value: snaq_lite_lang::Value) -> (u64, bool) {
+        let fingerprint = format!("value:{value:?}");
+        self.upsert_entry(uri, Some(value), None, fingerprint)
+    }
+
+    pub fn upsert_error_if_changed(&mut self, uri: Url, error: String) -> (u64, bool) {
+        let fingerprint = format!("error:{error}");
+        self.upsert_entry(uri, None, Some(error), fingerprint)
+    }
+
+    fn upsert_entry(
+        &mut self,
+        uri: Url,
+        value: Option<snaq_lite_lang::Value>,
+        error: Option<String>,
+        fingerprint: String,
+    ) -> (u64, bool) {
+        if let Some(prev) = self.by_uri.get(&uri) {
+            if prev.fingerprint == fingerprint {
+                return (prev.revision, false);
+            }
+        }
         let revision = self
             .by_uri
             .get(&uri)
@@ -60,12 +73,13 @@ impl NodeResultRegistry {
         self.by_uri.insert(
             uri,
             NodeResultEntry {
-                value: None,
-                error: Some(error),
+                value,
+                error,
+                fingerprint,
                 revision,
             },
         );
-        revision
+        (revision, true)
     }
 
     pub fn get(&self, uri: &Url) -> Option<&NodeResultEntry> {
@@ -137,5 +151,19 @@ mod tests {
         let right = store.get(&uri).expect("right read").revision;
         assert_eq!(rev, left);
         assert_eq!(left, right);
+    }
+
+    #[test]
+    fn unchanged_fingerprint_keeps_revision_stable() {
+        let mut store = NodeResultRegistry::new();
+        let uri = Url::parse("snaq://graph/same.sl").unwrap();
+        let (rev1, changed1) =
+            store.upsert_value_if_changed(uri.clone(), Value::Numeric(Quantity::from_scalar(3.0)));
+        let (rev2, changed2) =
+            store.upsert_value_if_changed(uri.clone(), Value::Numeric(Quantity::from_scalar(3.0)));
+        assert!(changed1);
+        assert!(!changed2);
+        assert_eq!(rev1, 1);
+        assert_eq!(rev2, 1);
     }
 }

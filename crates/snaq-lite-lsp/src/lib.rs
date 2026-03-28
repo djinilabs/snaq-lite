@@ -978,11 +978,12 @@ impl SnaqLiteBackend {
 
     /// Eager recompute for changed URIs + descendants and push update events.
     async fn recompute_and_push(&self, changed: &[Url]) {
-        let impacted = {
+        let (docs, impacted) = {
             let state = self.state.lock().await;
             let docs = state.document_uris();
             let graph = self.graph_state.lock().await;
-            graph.impacted_from_changed_nodes(changed, &docs)
+            let impacted = graph.impacted_from_changed_nodes(changed, &docs);
+            (docs, impacted)
         };
         let impacted_set: std::collections::HashSet<Url> = impacted.iter().cloned().collect();
         let mut shared_cache = {
@@ -992,22 +993,36 @@ impl SnaqLiteBackend {
             }
             cache.clone()
         };
-        for uri in impacted {
+        let mut queue: std::collections::VecDeque<Url> = std::collections::VecDeque::new();
+        let mut queued: std::collections::HashSet<Url> = std::collections::HashSet::new();
+        // Seed only changed roots; descendants are queued strictly when upstream output changes.
+        for uri in changed {
+            if docs.contains(uri) && queued.insert(uri.clone()) {
+                queue.push_back(uri.clone());
+            }
+        }
+        while let Some(uri) = queue.pop_front() {
             let result = self
                 .run_node_with_graph_inputs_cached(&uri, None, &mut shared_cache)
                 .await;
-            let (revision, result_handle) = {
+            let (revision, result_handle, changed_output) = {
                 let mut store = self.node_results.lock().await;
                 match &result {
                     Ok((value, _)) => {
-                        let rev = store.upsert_value(uri.clone(), value.clone());
-                        (Some(rev), Some((rev, value.clone())))
+                        let (rev, changed) =
+                            store.upsert_value_if_changed(uri.clone(), value.clone());
+                        (Some(rev), Some((rev, value.clone())), changed)
                     }
                     Err(e) => {
-                        (Some(store.upsert_error(uri.clone(), e.to_string())), None)
+                        let (rev, changed) =
+                            store.upsert_error_if_changed(uri.clone(), e.to_string());
+                        (Some(rev), None, changed)
                     }
                 }
             };
+            if !changed_output {
+                continue;
+            }
             let result_handle = if let Some((rev, value)) = result_handle {
                 Some(self.upsert_result_handle_for_uri(&uri, rev, value).await)
             } else {
@@ -1023,6 +1038,14 @@ impl SnaqLiteBackend {
             .await;
             self.update_document_subscribers_for_uri(&uri, result, revision, result_handle.as_deref())
                 .await;
+            let downstream = { self.graph_state.lock().await.targets_from_source(&uri) };
+            for target in downstream {
+                if !docs.contains(&target) || !queued.insert(target.clone()) {
+                    continue;
+                }
+                shared_cache.remove(&target);
+                queue.push_back(target);
+            }
         }
         let mut cache = self.run_cache.lock().await;
         *cache = shared_cache;
@@ -1832,6 +1855,9 @@ impl SnaqLiteBackend {
                         Some(collected.len() as u64)
                     }
                     snaq_lite_lang::LazyVector::FromExprs(defs) => Some(defs.len() as u64),
+                    snaq_lite_lang::LazyVector::FromExprsWithEnv { defs, .. } => {
+                        Some(defs.len() as u64)
+                    }
                     _ => None,
                 };
                 (
@@ -2018,7 +2044,7 @@ impl SnaqLiteBackend {
         &self,
         params: FetchResultSliceParams,
     ) -> tower_lsp::jsonrpc::Result<FetchResultSliceResponse> {
-        let (mut value, source_uri, source_handle) = if let Some(handle) = params.result_handle.clone() {
+        let (value, source_uri, source_handle) = if let Some(handle) = params.result_handle.clone() {
             let entry = {
                 let handles = self.result_handles.lock().await;
                 handles.get(&handle).cloned()
@@ -2085,38 +2111,19 @@ impl SnaqLiteBackend {
             let state = self.state.lock().await;
             state.db().clone()
         };
-        let (elements, total_count) = {
-            // For stream-backed root values under a resultHandle, materialize once and upgrade
-            // the handle to a replayable value for deterministic cursor pagination.
-            if let Some(handle) = source_handle.as_deref() {
-                if path_segments.is_empty() {
-                    if let snaq_lite_lang::Value::Vector(v) = &value {
-                        if matches!(v.inner, snaq_lite_lang::LazyVector::FromInput(_)) {
-                            let collected = snaq_lite_lang::collect_vector_stream(&db, v.inner.clone());
-                            let replayable = snaq_lite_lang::Value::Vector(snaq_lite_lang::VectorValue {
-                                inner: snaq_lite_lang::LazyVector::FromEvaluated(collected),
-                                orientation: v.orientation,
-                            });
-                            let revision = {
-                                let handles = self.result_handles.lock().await;
-                                handles.get(handle).map(|e| e.revision).unwrap_or(1)
-                            };
-                            let _ = self
-                                .result_handles
-                                .lock()
-                                .await
-                                .update_handle_value(handle, revision, replayable.clone());
-                            value = replayable;
-                        }
-                    }
-                }
-            }
+        let (elements, total_count, supports_cursor) = {
             let sub_value = Self::resolve_path(&value, &path_segments, &db).ok_or_else(|| {
                 tower_lsp::jsonrpc::Error::invalid_params("Invalid path or value not found")
             })?;
 
-            let (elements, total_count) = match &sub_value {
+            let (elements, total_count, supports_cursor) = match &sub_value {
                 snaq_lite_lang::Value::Vector(v) => {
+                    let non_replayable = matches!(v.inner, snaq_lite_lang::LazyVector::FromInput(_));
+                    if non_replayable && source_handle.is_some() && (params.cursor.is_some() || params.offset > 0) {
+                        return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                            "non-replayable stream slice only supports offset=0 without cursor",
+                        ));
+                    }
                     let offset = params.offset as usize;
                     let limit = params.limit as usize;
 
@@ -2155,7 +2162,7 @@ impl SnaqLiteBackend {
                             }),
                         })
                         .collect();
-                    (elements, total_count)
+                    (elements, total_count, !non_replayable)
                 }
                 snaq_lite_lang::Value::Map(id) => {
                     use snaq_lite_lang::map_registry;
@@ -2175,7 +2182,7 @@ impl SnaqLiteBackend {
                             })
                         })
                         .collect();
-                    (elements, total_count)
+                    (elements, total_count, true)
                 }
                 _ => {
                     return Err(tower_lsp::jsonrpc::Error::invalid_params(
@@ -2183,11 +2190,11 @@ impl SnaqLiteBackend {
                     ));
                 }
             };
-            (elements, total_count)
+            (elements, total_count, supports_cursor)
         };
 
         let has_more = params.offset + (elements.len() as u64) < total_count;
-        let next_cursor = if has_more {
+        let next_cursor = if has_more && supports_cursor {
             if let Some(handle) = source_handle.as_deref() {
                 Some(
                     self.result_handles

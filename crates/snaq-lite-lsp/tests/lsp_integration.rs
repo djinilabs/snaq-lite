@@ -3071,6 +3071,14 @@ async fn did_change_on_source_recomputes_transitive_descendants() {
 }
 
 #[tokio::test]
+async fn did_change_on_source_with_changed_output_propagates_to_descendants() {
+    // Acceptance label: didChange_on_source_with_changed_output_propagates_to_descendants
+    tokio::task::spawn_blocking(native_downstream_widget_receives_push_update_when_source_changes)
+        .await
+        .expect("spawn_blocking join");
+}
+
+#[tokio::test]
 async fn widget_subscription_id_stable_across_recompute() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
@@ -3334,20 +3342,42 @@ async fn param_add_preserves_existing_edges_and_updates_signature() {
     client_w.write_all(&lsp_message(&did_change.to_string())).await.unwrap();
     client_w.flush().await.unwrap();
 
+    let sub2 = serde_json::json!({
+        "jsonrpc":"2.0","id":59,"method":"snaqlite/subscribeNode",
+        "params":{"sourceUri":"snaq://graph/d.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&sub2.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 59).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let subscription_id = v["result"]["subscriptionId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!subscription_id.is_empty(), "expected subscription id");
     let mut got_completed = false;
     for _ in 0..25 {
         let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await.expect("timeout").unwrap();
+            .await
+            .expect("timeout")
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/publishNodeResult")
+            && v["params"]["subscriptionId"].as_str() == Some(subscription_id.as_str())
             && v["params"]["status"].as_str() == Some("Completed")
-            && v["params"]["payload"]["display"].as_str() == Some("6")
+            && v["params"]["data"]["display"].as_str() == Some("6")
         {
             got_completed = true;
             break;
         }
     }
-    assert!(got_completed, "adding extra param should preserve existing x edge result");
+    assert!(
+        got_completed,
+        "adding extra param should preserve existing x edge result"
+    );
     server_handle.abort();
     let _ = server_handle.await;
 }
@@ -3703,6 +3733,97 @@ async fn graph_runtime_recomputes_without_widget_subscriptions() {
         }
     }
     assert!(got_10, "expected recomputed downstream value 10");
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn did_change_on_source_with_same_output_does_not_recompute_descendants() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/src-same.sl", "2", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/mid-same.sl",
+        "input x: Numeric\nx + 1",
+        1,
+    )
+    .await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/tgt-same.sl",
+        "input y: Numeric\ny * 2",
+        1,
+    )
+    .await;
+
+    let connect_src_mid = serde_json::json!({
+        "jsonrpc":"2.0","id":556,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/src-same.sl","targetUri":"snaq://graph/mid-same.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_src_mid.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 556).await;
+
+    let connect_mid_tgt = serde_json::json!({
+        "jsonrpc":"2.0","id":557,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/mid-same.sl","targetUri":"snaq://graph/tgt-same.sl","targetInputName":"y"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_mid_tgt.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 557).await;
+
+    let sub = serde_json::json!({
+        "jsonrpc":"2.0","id":558,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-same-output","sourceUri":"snaq://graph/tgt-same.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&sub.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 558).await;
+
+    let did_change = serde_json::json!({
+        "jsonrpc":"2.0","method":"textDocument/didChange",
+        "params":{"textDocument":{"uri":"snaq://graph/src-same.sl","version":2},"contentChanges":[{"text":"(2)"}]}
+    });
+    client_w
+        .write_all(&lsp_message(&did_change.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut got_descendant_update = false;
+    for _ in 0..10 {
+        let maybe = timeout(Duration::from_millis(500), read_one_lsp_message_async(&mut client_r)).await;
+        let Ok(Ok(body)) = maybe else {
+            continue;
+        };
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["widgetId"].as_str() == Some("w-same-output")
+            && v["params"]["status"].as_str() == Some("Completed")
+        {
+            got_descendant_update = true;
+            break;
+        }
+    }
+    assert!(
+        !got_descendant_update,
+        "didChange with unchanged source output should not recompute downstream widget"
+    );
     server_handle.abort();
     let _ = server_handle.await;
 }
@@ -4847,6 +4968,82 @@ async fn fetch_result_slice_accepts_result_handle_and_cursor_continuation() {
     assert_eq!(elems.len(), 2);
     assert_eq!(elems[0]["display"].as_str(), Some("3"));
     assert_eq!(elems[1]["display"].as_str(), Some("4"));
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn fetch_result_slice_rejects_random_access_for_non_replayable_result_handle() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/nonreplay-src.sl",
+        "[1,2,3,4]",
+        1,
+    )
+    .await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/nonreplay-tgt.sl",
+        "input x: Vector\nx",
+        1,
+    )
+    .await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":204,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/nonreplay-src.sl","targetUri":"snaq://graph/nonreplay-tgt.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 204).await;
+
+    let sub_req = serde_json::json!({
+        "jsonrpc":"2.0","id":205,"method":"snaqlite/subscribeNode",
+        "params":{"sourceUri":"snaq://graph/nonreplay-tgt.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&sub_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 205).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let result_handle = v["result"]["resultHandle"]
+        .as_str()
+        .map(ToString::to_string)
+        .expect("subscribeNode should return resultHandle");
+
+    let fetch = serde_json::json!({
+        "jsonrpc":"2.0","id":206,"method":"snaqlite/graph/fetchResultSlice",
+        "params":{"resultHandle": result_handle, "path":[],"offset":1,"limit":2}
+    });
+    client_w
+        .write_all(&lsp_message(&fetch.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 206).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"]["code"].as_i64(), Some(-32602));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("non-replayable stream slice only supports offset=0 without cursor"),
+        "expected explicit non-replayable random-access rejection: {v}"
+    );
 
     server_handle.abort();
     let _ = server_handle.await;

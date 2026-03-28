@@ -2,6 +2,7 @@
 
 pub mod graph;
 pub mod mapping;
+pub mod node_result_registry;
 pub mod position;
 pub mod pubsub;
 pub mod state;
@@ -34,6 +35,7 @@ use crate::pubsub::{
 };
 use crate::subscription::SubscriptionRegistry;
 use crate::widget_registry::WidgetRegistry;
+use crate::node_result_registry::NodeResultRegistry;
 #[cfg(not(target_arch = "wasm32"))]
 use tower_lsp::Server;
 use tower_lsp::{Client, LanguageServer, LspService};
@@ -51,6 +53,7 @@ pub type SharedGraphState = Arc<Mutex<graph::GraphState>>;
 
 /// Shared widget registry (subscribeWidget / unsubscribeWidget).
 pub type SharedWidgetRegistry = Arc<Mutex<WidgetRegistry>>;
+pub type SharedNodeResults = Arc<Mutex<NodeResultRegistry>>;
 
 /// Channel to send publish notifications from background consumer to the backend.
 pub type NotificationSender =
@@ -70,6 +73,7 @@ pub struct SnaqLiteBackend {
     pub subscriptions: SharedSubscriptions,
     pub graph_state: SharedGraphState,
     pub widgets: SharedWidgetRegistry,
+    pub node_results: SharedNodeResults,
     pub notification_tx: NotificationSender,
     /// Locked receiver for draining pending publishResult notifications (sent by consumer threads).
     pub notification_rx: Arc<Mutex<NotificationReceiver>>,
@@ -152,9 +156,8 @@ impl LanguageServer for SnaqLiteBackend {
         let mut state = self.state.lock().await;
         state.update_document(uri.clone(), version, &text);
         drop(state);
-        self.invalidate_subscriptions_for_uri(&uri).await;
-        self.invalidate_widgets_for_uri(&uri).await;
-        self.refresh_downstream_widgets(&uri).await;
+        self.reconcile_graph_for_uri(&uri).await;
+        self.recompute_and_push(std::slice::from_ref(&uri)).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
         self.publish_diagnostics(uri.clone()).await;
@@ -169,9 +172,8 @@ impl LanguageServer for SnaqLiteBackend {
             state.apply_document_changes(uri.clone(), version, &params.content_changes);
         }
         drop(state);
-        self.invalidate_subscriptions_for_uri(&uri).await;
-        self.invalidate_widgets_for_uri(&uri).await;
-        self.refresh_downstream_widgets(&uri).await;
+        self.reconcile_graph_for_uri(&uri).await;
+        self.recompute_and_push(std::slice::from_ref(&uri)).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
         self.publish_diagnostics(uri.clone()).await;
@@ -360,81 +362,180 @@ impl SnaqLiteBackend {
         }
     }
 
-    /// Invalidate all widget subscriptions for the given uri: send cancel (if any) and widgetDataUpdate(Cancelled).
-    async fn invalidate_widgets_for_uri(&self, uri: &Url) {
-        let to_cancel = {
-            let mut w = self.widgets.lock().await;
-            w.invalidate_uri(uri)
-        };
-        for (widget_id, cancel_tx) in to_cancel {
-            if let Some(tx) = cancel_tx {
-                let _ = tx.send(());
-            }
-            self.client
-                .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
-                    widget_id,
-                    status: WidgetDataStatus::Cancelled,
-                    payload: Some(serde_json::json!({ "reason": "Document changed" })),
+    /// Reconcile edges that target the given URI against the current input declaration names.
+    async fn reconcile_graph_for_uri(&self, uri: &Url) {
+        let maybe_valid_inputs: Option<std::collections::HashSet<String>> = {
+            let state = self.state.lock().await;
+            state
+                .get_document(uri)
+                .and_then(|d| {
+                    if !d.parse_succeeded {
+                        return None;
+                    }
+                    d.root_def.as_ref().map(|root| {
+                        snaq_lite_lang::extract_input_decls_from_block(root)
+                            .into_iter()
+                            .map(|(name, _)| name)
+                            .collect()
+                    })
                 })
-                .await;
-        }
+        };
+        let Some(valid_inputs) = maybe_valid_inputs else {
+            // Keep existing graph wiring when the target document is temporarily invalid.
+            return;
+        };
+        let _removed = {
+            let mut graph = self.graph_state.lock().await;
+            graph.reconcile_target_inputs(uri, &valid_inputs)
+        };
     }
 
-    /// Refresh all widgets subscribed to this URI: re-run the node with current graph and push result.
-    /// Used when an edge is added (graph/connect) so a presentation that already subscribed gets the bound stream.
-    /// On WASM the client receives the updated value immediately. On native, scalar-fed streams are consumed
-    /// in a background thread (receiver is thread-local), so this path is most reliable in the browser.
-    async fn refresh_widgets_for_uri(&self, uri: &Url) {
-        let entries = {
-            let mut w = self.widgets.lock().await;
-            w.take_entries_for_uri(uri)
-        };
-        for (widget_id, cancel_tx) in entries {
-            if let Some(tx) = cancel_tx {
-                let _ = tx.send(());
-            }
-            match self.run_node_with_graph_inputs(uri, None).await {
-                Err(e) => {
+    async fn update_widget_subscribers_for_uri(
+        &self,
+        uri: &Url,
+        result: Result<(snaq_lite_lang::Value, salsa::DatabaseImpl), snaq_lite_lang::RunError>,
+    ) {
+        let widget_ids = { self.widgets.lock().await.ids_for_uri(uri) };
+        if widget_ids.is_empty() {
+            return;
+        }
+        match result {
+            Ok((value, db)) => {
+                let payload = Self::build_completed_payload(&value, &db);
+                for widget_id in widget_ids {
+                    self.widgets
+                        .lock()
+                        .await
+                        .set_cached_value(&widget_id, Some(value.clone()));
                     self.client
                         .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
-                            widget_id: widget_id.clone(),
+                            widget_id,
+                            status: WidgetDataStatus::Completed,
+                            payload: Some(payload.clone()),
+                        })
+                        .await;
+                }
+            }
+            Err(e) => {
+                for widget_id in widget_ids {
+                    self.widgets.lock().await.set_cached_value(&widget_id, None);
+                    self.client
+                        .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                            widget_id,
                             status: WidgetDataStatus::Error,
                             payload: Some(serde_json::json!({ "message": e.to_string() })),
                         })
                         .await;
-                    self.widgets
-                        .lock()
-                        .await
-                        .insert_scalar(widget_id, uri.clone());
-                }
-                Ok((value, db)) => {
-                    let payload = Self::build_completed_payload(&value, &db);
-                    self.client
-                        .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
-                            widget_id: widget_id.clone(),
-                            status: WidgetDataStatus::Completed,
-                            payload: Some(payload),
-                        })
-                        .await;
-                    self.widgets.lock().await.insert_with_cached_value(
-                        widget_id,
-                        uri.clone(),
-                        value,
-                    );
                 }
             }
         }
     }
 
-    /// Refresh downstream widgets: re-run each target document and push new result to subscribed widgets.
-    /// No Cancelled is sent; the client keeps the same subscription and receives the updated result.
-    async fn refresh_downstream_widgets(&self, source_uri: &Url) {
-        let downstream: Vec<Url> = {
+    async fn update_document_subscribers_for_uri(
+        &self,
+        uri: &Url,
+        result: Result<(snaq_lite_lang::Value, salsa::DatabaseImpl), snaq_lite_lang::RunError>,
+    ) {
+        let ids = { self.subscriptions.lock().await.ids_for_uri(uri) };
+        for subscription_id in ids {
+            // Stop previous stream consumer for this subscription before pushing fresh value.
+            if let Some(tx) = self.subscriptions.lock().await.take_cancel_tx(&subscription_id) {
+                let _ = tx.send(());
+            }
+            match result.clone() {
+                Ok((value, db)) => match value {
+                    snaq_lite_lang::Value::Vector(v) => {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            let inner = v.inner.clone();
+                            let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
+                            self.subscriptions
+                                .lock()
+                                .await
+                                .set_cancel_tx(&subscription_id, Some(cancel_tx));
+                            let sid = subscription_id.clone();
+                            let notification_tx = self.notification_tx.clone();
+                            std::thread::spawn(move || {
+                                run_stream_consumer(db, inner, sid, notification_tx, cancel_rx);
+                            });
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            let display = snaq_lite_lang::format_vector_for_widget_display(&db, &v)
+                                .unwrap_or_else(|_| "<vector>".to_string());
+                            self.client
+                                .send_notification::<PublishResultNotification>(
+                                    PublishResultParams {
+                                        subscription_id: subscription_id.clone(),
+                                        status: PublishStatus::Completed,
+                                        data: Some(serde_json::json!({ "display": display })),
+                                    },
+                                )
+                                .await;
+                            self.subscriptions
+                                .lock()
+                                .await
+                                .set_cancel_tx(&subscription_id, None);
+                        }
+                    }
+                    _ => {
+                        let display = snaq_lite_lang::format_value_for_display(&db, &value)
+                            .unwrap_or_else(|_| "<error>".to_string());
+                        self.client
+                            .send_notification::<PublishResultNotification>(PublishResultParams {
+                                subscription_id: subscription_id.clone(),
+                                status: PublishStatus::Completed,
+                                data: Some(serde_json::json!({ "display": display })),
+                            })
+                            .await;
+                        self.subscriptions
+                            .lock()
+                            .await
+                            .set_cancel_tx(&subscription_id, None);
+                    }
+                },
+                Err(e) => {
+                    self.client
+                        .send_notification::<PublishResultNotification>(PublishResultParams {
+                            subscription_id: subscription_id.clone(),
+                            status: PublishStatus::Error,
+                            data: Some(serde_json::json!({ "message": e.to_string() })),
+                        })
+                        .await;
+                    self.subscriptions
+                        .lock()
+                        .await
+                        .set_cancel_tx(&subscription_id, None);
+                }
+            }
+        }
+    }
+
+    /// Eager recompute for changed URIs + descendants and push update events.
+    async fn recompute_and_push(&self, changed: &[Url]) {
+        let impacted = {
+            let state = self.state.lock().await;
+            let docs = state.document_uris();
             let graph = self.graph_state.lock().await;
-            graph.targets_from_source(source_uri)
+            graph.impacted_from_changed_nodes(changed, &docs)
         };
-        for target_uri in downstream {
-            self.refresh_widgets_for_uri(&target_uri).await;
+        for uri in impacted {
+            let result = self.run_node_with_graph_inputs(&uri, None).await;
+            {
+                let mut store = self.node_results.lock().await;
+                match &result {
+                    Ok((value, _)) => {
+                        store.upsert_value(uri.clone(), value.clone());
+                    }
+                    Err(e) => {
+                        store.upsert_error(uri.clone(), e.to_string());
+                    }
+                }
+            }
+            self.update_widget_subscribers_for_uri(&uri, result.clone())
+                .await;
+            self.update_document_subscribers_for_uri(&uri, result)
+                .await;
         }
     }
 
@@ -479,24 +580,6 @@ impl SnaqLiteBackend {
             .await;
     }
 
-    /// Invalidate all subscriptions for the given uri: send cancel and publishResult(Cancelled).
-    async fn invalidate_subscriptions_for_uri(&self, uri: &Url) {
-        let to_cancel = {
-            let mut subs = self.subscriptions.lock().await;
-            subs.invalidate_uri(uri)
-        };
-        for (id, cancel_tx) in to_cancel {
-            let _ = cancel_tx.send(());
-            self.client
-                .send_notification::<PublishResultNotification>(PublishResultParams {
-                    subscription_id: id,
-                    status: PublishStatus::Cancelled,
-                    data: Some(serde_json::json!({ "reason": "Document changed" })),
-                })
-                .await;
-        }
-    }
-
     /// Handle snaqlite/subscribe: run document (root-only), return subscription id; if root is a vector, spawn consumer and stream batches.
     pub async fn subscribe(
         &self,
@@ -523,16 +606,18 @@ impl SnaqLiteBackend {
             ))),
             Ok((value, db)) => {
                 let subscription_id = uuid::Uuid::new_v4().to_string();
+                self.subscriptions
+                    .lock()
+                    .await
+                    .insert(subscription_id.clone(), uri.clone(), version, None);
                 match &value {
                     snaq_lite_lang::Value::Vector(v) => {
                         let inner = v.inner.clone();
                         let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
-                        self.subscriptions.lock().await.insert(
-                            subscription_id.clone(),
-                            uri.clone(),
-                            version,
-                            cancel_tx,
-                        );
+                        self.subscriptions
+                            .lock()
+                            .await
+                            .set_cancel_tx(&subscription_id, Some(cancel_tx));
                         #[cfg(not(target_arch = "wasm32"))]
                         {
                             let sid = subscription_id.clone();
@@ -580,7 +665,7 @@ impl SnaqLiteBackend {
     pub async fn unsubscribe(&self, params: UnsubscribeParams) -> tower_lsp::jsonrpc::Result<()> {
         self.drain_notifications().await;
         let mut subs = self.subscriptions.lock().await;
-        if let Some(cancel_tx) = subs.remove(&params.subscription_id) {
+        if let Some(Some(cancel_tx)) = subs.remove(&params.subscription_id) {
             let _ = cancel_tx.send(());
         }
         Ok(())
@@ -644,8 +729,9 @@ impl SnaqLiteBackend {
             let mut graph = self.graph_state.lock().await;
             graph.connect(source_uri, target_uri.clone(), params.target_input_name);
         }
-        self.refresh_widgets_for_uri(&target_uri).await;
+        self.recompute_and_push(std::slice::from_ref(&target_uri)).await;
         self.drain_widget_notifications().await;
+        self.drain_notifications().await;
         Ok(())
     }
 
@@ -660,8 +746,9 @@ impl SnaqLiteBackend {
             let mut graph = self.graph_state.lock().await;
             graph.disconnect(&target_uri, &params.target_input_name);
         }
-        self.invalidate_widgets_for_uri(&target_uri).await;
+        self.recompute_and_push(std::slice::from_ref(&target_uri)).await;
         self.drain_widget_notifications().await;
+        self.drain_notifications().await;
         Ok(())
     }
 
@@ -914,6 +1001,13 @@ impl SnaqLiteBackend {
                                 payload,
                             };
                             (len, slice_vec, Some(pending))
+                        }
+                        (snaq_lite_lang::LazyVector::FromEvaluated(collected), _) => {
+                            let total_count = collected.len() as u64;
+                            let start = offset.min(collected.len());
+                            let end = (offset + limit).min(collected.len());
+                            let slice_vec: Vec<_> = collected[start..end].to_vec();
+                            (total_count, slice_vec, None)
                         }
                         (_, _) => {
                             let total_count = {
@@ -1389,6 +1483,7 @@ pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSo
     let subscriptions: SharedSubscriptions = Arc::new(Mutex::new(SubscriptionRegistry::new()));
     let graph_state: SharedGraphState = Arc::new(Mutex::new(graph::GraphState::new()));
     let widgets: SharedWidgetRegistry = Arc::new(Mutex::new(WidgetRegistry::new()));
+    let node_results: SharedNodeResults = Arc::new(Mutex::new(NodeResultRegistry::new()));
     let (notification_tx, notification_rx) = futures::channel::mpsc::unbounded();
     let (widget_notification_tx, widget_notification_rx) = futures::channel::mpsc::unbounded();
     let (service, socket) = LspService::build(move |client| SnaqLiteBackend {
@@ -1397,6 +1492,7 @@ pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSo
         subscriptions: Arc::clone(&subscriptions),
         graph_state: Arc::clone(&graph_state),
         widgets: Arc::clone(&widgets),
+        node_results: Arc::clone(&node_results),
         notification_tx,
         notification_rx: Arc::new(Mutex::new(notification_rx)),
         widget_notification_tx,
@@ -1696,9 +1792,9 @@ mod tests {
         let mut reg = subscription::SubscriptionRegistry::new();
         let uri = Url::parse("file:///doc.snaq").unwrap();
         let (tx, _rx) = futures::channel::oneshot::channel();
-        reg.insert("sub-1".to_string(), uri.clone(), Some(1), tx);
+        reg.insert("sub-1".to_string(), uri.clone(), Some(1), Some(tx));
         let removed = reg.remove("sub-1");
-        assert!(removed.is_some());
+        assert!(removed.is_some_and(|x| x.is_some()));
         assert!(reg.remove("sub-1").is_none());
     }
 
@@ -1709,8 +1805,8 @@ mod tests {
         let other = Url::parse("file:///other.snaq").unwrap();
         let (tx1, _rx1) = futures::channel::oneshot::channel();
         let (tx2, _rx2) = futures::channel::oneshot::channel();
-        reg.insert("sub-a".to_string(), uri.clone(), Some(1), tx1);
-        reg.insert("sub-b".to_string(), other, Some(1), tx2);
+        reg.insert("sub-a".to_string(), uri.clone(), Some(1), Some(tx1));
+        reg.insert("sub-b".to_string(), other, Some(1), Some(tx2));
         let cancelled = reg.invalidate_uri(&uri);
         assert_eq!(cancelled.len(), 1);
         assert_eq!(cancelled[0].0, "sub-a");
@@ -1777,8 +1873,8 @@ mod tests {
         let uri = Url::parse("file:///doc.snaq").unwrap();
         let (tx1, _rx1) = futures::channel::oneshot::channel();
         let (tx2, _rx2) = futures::channel::oneshot::channel();
-        reg.insert("sub-1".to_string(), uri.clone(), Some(1), tx1);
-        reg.insert("sub-2".to_string(), uri, Some(1), tx2);
+        reg.insert("sub-1".to_string(), uri.clone(), Some(1), Some(tx1));
+        reg.insert("sub-2".to_string(), uri, Some(1), Some(tx2));
         let cancelled = reg.invalidate_all();
         assert_eq!(cancelled.len(), 2);
         let ids: std::collections::HashSet<_> =
@@ -1879,6 +1975,42 @@ mod tests {
         assert!(order.is_none(), "cycle a->b->a should yield None");
     }
 
+    #[test]
+    fn impacted_from_changed_nodes_returns_full_closure() {
+        let mut graph = graph::GraphState::new();
+        let a = Url::parse("snaq://graph/a.sl").unwrap();
+        let b = Url::parse("snaq://graph/b.sl").unwrap();
+        let c = Url::parse("snaq://graph/c.sl").unwrap();
+        let d = Url::parse("snaq://graph/d.sl").unwrap();
+        graph.connect(a.clone(), b.clone(), "x".to_string());
+        graph.connect(b.clone(), c.clone(), "x".to_string());
+        graph.connect(a.clone(), d.clone(), "x".to_string());
+        let docs: std::collections::HashSet<_> =
+            [a.clone(), b.clone(), c.clone(), d.clone()].into_iter().collect();
+        let impacted = graph.impacted_from_changed_nodes(std::slice::from_ref(&a), &docs);
+        assert_eq!(impacted.len(), 4);
+        assert!(impacted.contains(&a));
+        assert!(impacted.contains(&b));
+        assert!(impacted.contains(&c));
+        assert!(impacted.contains(&d));
+    }
+
+    #[test]
+    fn reconcile_target_inputs_prunes_stale_edges() {
+        let mut graph = graph::GraphState::new();
+        let a = Url::parse("snaq://graph/a.sl").unwrap();
+        let b = Url::parse("snaq://graph/b.sl").unwrap();
+        graph.connect(a.clone(), b.clone(), "x".to_string());
+        graph.connect(a, b.clone(), "y".to_string());
+        let valid: std::collections::HashSet<String> = ["y".to_string()].into_iter().collect();
+        let removed = graph.reconcile_target_inputs(&b, &valid);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].target_input_name, "x");
+        let incoming = graph.incoming(&b);
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].0, "y");
+    }
+
     // ---- widget registry ----
 
     #[test]
@@ -1926,6 +2058,19 @@ mod tests {
             cancelled.iter().map(|(id, _)| id.as_str()).collect();
         assert!(ids.contains("w1"));
         assert!(ids.contains("w2"));
+    }
+
+    #[test]
+    fn fetch_slice_has_more_and_total_count_consistency() {
+        let total_count = 10_u64;
+        let offset = 4_u64;
+        let elements_len = 3_u64;
+        let has_more = offset + elements_len < total_count;
+        assert!(has_more);
+        let offset2 = 8_u64;
+        let elements_len2 = 2_u64;
+        let has_more2 = offset2 + elements_len2 < total_count;
+        assert!(!has_more2);
     }
 
     // ---- pubsub wire format (camelCase) ----

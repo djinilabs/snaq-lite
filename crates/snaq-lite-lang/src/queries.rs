@@ -1862,31 +1862,57 @@ fn value_inner<'db>(
                 Ok(Value::Undefined)
             } else {
                 let mut current_scope = scope;
+                let mut seen_input_names: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 let n = exprs.len();
                 for (i, e) in exprs.iter().enumerate() {
                     match e.data(db) {
-                        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
                         ExprData::InputDecl(name, _type_name) => {
-                            // If this input has a stream, consume it once and bind name in scope.
-                            // On WASM we skip binding: stream_input_to_value uses block_on, which would
-                            // deadlock the single thread (the feeder runs in another spawn_local).
-                            // Use $name in the expression to reference the stream (e.g. $aa * 10).
+                            if !seen_input_names.insert(name.clone()) {
+                                return Err(with_span_if_missing(
+                                    RunError::new(RunErrorKind::InvalidArgument(format!(
+                                        "duplicate input declaration: {name}"
+                                    ))),
+                                    e.span(db),
+                                ));
+                            }
+                            // Bind declared input names into scope so blocks behave like functions.
+                            // Native keeps the existing scalar-friendly behavior by consuming single-value
+                            // streams when possible; WASM stays non-blocking by binding stream handles lazily.
                             #[cfg(not(target_arch = "wasm32"))]
                             {
                                 let handle_id = STREAM_INPUT_REGISTRY.with(|r| {
                                     let reg = r.borrow();
                                     reg.as_ref().and_then(|registry| registry.inputs(db).get(name).copied())
                                 });
-                                if let Some(handle_id) = handle_id {
-                                    let input_value = stream_input_to_value(handle_id)
-                                        .map_err(|err| with_span_if_missing(err, e.span(db)))?;
-                                    let stored = StoredValue::from_value(&input_value)
-                                        .map_err(|err| with_span_if_missing(err, e.span(db)))?;
-                                    let new_env = current_scope.env(db).clone().extend(name.clone(), stored);
-                                    current_scope = Scope::new(db, new_env);
-                                }
+                                let input_value = if let Some(handle_id) = handle_id {
+                                    stream_input_to_value(handle_id)
+                                        .map_err(|err| with_span_if_missing(err, e.span(db)))?
+                                } else {
+                                    Value::Undefined
+                                };
+                                let stored = StoredValue::from_value(&input_value)
+                                    .map_err(|err| with_span_if_missing(err, e.span(db)))?;
+                                let new_env = current_scope.env(db).clone().extend(name.clone(), stored);
+                                current_scope = Scope::new(db, new_env);
                             }
-                            // Metadata only; skip for return value. If this is the last item, block value is Undefined.
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                let handle_id = STREAM_INPUT_REGISTRY.with(|r| {
+                                    let reg = r.borrow();
+                                    reg.as_ref().and_then(|registry| registry.inputs(db).get(name).copied())
+                                });
+                                let input_value = if let Some(handle_id) = handle_id {
+                                    Value::Vector(VectorValue::column(LazyVector::FromInput(handle_id)))
+                                } else {
+                                    Value::Undefined
+                                };
+                                let stored = StoredValue::from_value(&input_value)
+                                    .map_err(|err| with_span_if_missing(err, e.span(db)))?;
+                                let new_env = current_scope.env(db).clone().extend(name.clone(), stored);
+                                current_scope = Scope::new(db, new_env);
+                            }
+                            // Declaration item itself does not produce a value.
                             if i == n - 1 {
                                 return Ok(Value::Undefined);
                             }

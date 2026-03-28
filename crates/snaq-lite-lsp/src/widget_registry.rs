@@ -81,6 +81,22 @@ impl WidgetRegistry {
         }
     }
 
+    /// List widget ids bound to a source URI.
+    pub fn ids_for_uri(&self, uri: &Url) -> Vec<String> {
+        self.by_id
+            .iter()
+            .filter(|(_, e)| e.source_uri == *uri)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Update cached value by widget id if present.
+    pub fn set_cached_value(&mut self, widget_id: &str, value: Option<snaq_lite_lang::Value>) {
+        if let Some(entry) = self.by_id.get_mut(widget_id) {
+            entry.cached_value = value;
+        }
+    }
+
     /// Remove widget by id. Returns Some(Some(cancel_tx)) if had a consumer, Some(None) for scalar, None if not found.
     pub fn remove(&mut self, widget_id: &str) -> Option<Option<futures::channel::oneshot::Sender<()>>> {
         self.by_id.remove(widget_id).map(|e| e.cancel_tx)

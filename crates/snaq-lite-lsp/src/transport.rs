@@ -176,3 +176,39 @@ pub fn start_snaq_lite_lsp(post_message_callback: js_sys::Function) {
         server.serve(service).await;
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::take_one_lsp_frame;
+
+    #[test]
+    fn writer_emits_only_complete_lsp_frames() {
+        let body = r#"{"jsonrpc":"2.0","id":1}"#;
+        let msg = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        let bytes = msg.as_bytes();
+        let full = take_one_lsp_frame(bytes);
+        assert!(full.is_some());
+        let partial = take_one_lsp_frame(&bytes[..bytes.len() - 1]);
+        assert!(partial.is_none());
+    }
+
+    #[test]
+    fn reader_handles_back_to_back_framed_messages() {
+        let body1 = r#"{"jsonrpc":"2.0","id":1}"#;
+        let body2 = r#"{"jsonrpc":"2.0","id":2}"#;
+        let msg1 = format!("Content-Length: {}\r\n\r\n{}", body1.len(), body1);
+        let msg2 = format!("Content-Length: {}\r\n\r\n{}", body2.len(), body2);
+        let bytes = [msg1.as_bytes(), msg2.as_bytes()].concat();
+        let first = take_one_lsp_frame(&bytes).expect("first frame");
+        let second = take_one_lsp_frame(&bytes[first.0..]).expect("second frame");
+        assert!(second.0 > 0);
+    }
+
+    #[test]
+    fn control_messages_do_not_corrupt_lsp_frame_stream() {
+        assert!(take_one_lsp_frame(br#"{"type":"init"}"#).is_none());
+        let body = r#"{"jsonrpc":"2.0","id":3}"#;
+        let msg = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        assert!(take_one_lsp_frame(msg.as_bytes()).is_some());
+    }
+}

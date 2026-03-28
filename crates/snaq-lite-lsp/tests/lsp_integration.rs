@@ -257,7 +257,7 @@ async fn native_did_open_and_hover_returns_value() {
 /// Plan §8: did_change for a URI with an active subscription; assert subscription is removed
 /// and client receives Cancelled.
 #[tokio::test]
-async fn native_subscribe_then_did_change_receives_cancelled() {
+async fn native_subscribe_then_did_change_receives_completed_update() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
@@ -317,29 +317,41 @@ async fn native_subscribe_then_did_change_receives_cancelled() {
         .unwrap();
     client_w.flush().await.unwrap();
 
-    // Read until we get snaqlite/publishResult with status Cancelled
-    let cancelled = timeout(Duration::from_secs(5), async {
+    // Read until we get a post-change Completed update (no Cancelled expected).
+    let updated = timeout(Duration::from_secs(5), async {
         loop {
             let body = read_one_lsp_message_async(&mut client_r).await.unwrap();
             let v: serde_json::Value = serde_json::from_str(&body).unwrap();
             if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/publishResult") {
                 let params = v.get("params").and_then(|p| p.as_object());
                 if let Some(p) = params {
-                    if p.get("status").and_then(|s| s.as_str()) == Some("Cancelled")
-                        && p.get("subscriptionId").and_then(|s| s.as_str())
-                            == Some(subscription_id.as_str())
+                    if p.get("subscriptionId").and_then(|s| s.as_str())
+                        != Some(subscription_id.as_str())
                     {
-                        return true;
+                        continue;
+                    }
+                    if p.get("status").and_then(|s| s.as_str()) == Some("Cancelled") {
+                        return false;
+                    }
+                    if p.get("status").and_then(|s| s.as_str()) == Some("Completed") {
+                        let display = p
+                            .get("data")
+                            .and_then(|d| d.get("display"))
+                            .and_then(|s| s.as_str())
+                            .unwrap_or_default();
+                        if display.contains("5") {
+                            return true;
+                        }
                     }
                 }
             }
         }
     })
     .await
-    .expect("timeout waiting for Cancelled notification");
+    .expect("timeout waiting for Completed update");
     assert!(
-        cancelled,
-        "client should receive publishResult Cancelled for the subscription"
+        updated,
+        "client should receive publishResult Completed update (display includes 5), without Cancelled"
     );
 
     server_handle.abort();
@@ -1458,7 +1470,7 @@ async fn native_fetch_result_slice_unknown_widget_returns_error() {
 
 /// subscribeWidget (vector so widget is registered) then didChange on source URI; widget receives Cancelled.
 #[tokio::test]
-async fn native_subscribe_widget_then_did_change_receives_cancelled() {
+async fn native_subscribe_widget_then_did_change_receives_completed_update() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
@@ -1513,6 +1525,7 @@ async fn native_subscribe_widget_then_did_change_receives_cancelled() {
         .unwrap();
     client_w.flush().await.unwrap();
 
+    let mut got_completed = false;
     let mut got_cancelled = false;
     for _ in 0..15 {
         let body = timeout(
@@ -1525,15 +1538,29 @@ async fn native_subscribe_widget_then_did_change_receives_cancelled() {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
             let params = v.get("params").and_then(|p| p.as_object()).unwrap();
-            if params.get("status").and_then(|s| s.as_str()) == Some("Cancelled") {
+            let status = params.get("status").and_then(|s| s.as_str());
+            if status == Some("Cancelled") {
                 got_cancelled = true;
-                break;
+            }
+            if status == Some("Completed") {
+                let total = params
+                    .get("payload")
+                    .and_then(|p| p.get("totalElements"))
+                    .and_then(|n| n.as_u64());
+                if total == Some(2) {
+                    got_completed = true;
+                    break;
+                }
             }
         }
     }
     assert!(
-        got_cancelled,
-        "client should receive widgetDataUpdate Cancelled after didChange on source URI"
+        !got_cancelled,
+        "client should not receive widgetDataUpdate Cancelled after didChange on source URI"
+    );
+    assert!(
+        got_completed,
+        "client should receive widgetDataUpdate Completed update (totalElements=2) after didChange"
     );
 
     server_handle.abort();
@@ -2863,6 +2890,735 @@ async fn native_definition_does_not_match_identifier_prefixes() {
     assert_eq!(
         line, 1,
         "abc usage should resolve to abc declaration (line 1), not a (line 0)"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn did_change_on_source_recomputes_transitive_descendants() {
+    // Acceptance label: didChange_on_source_recomputes_transitive_descendants
+    tokio::task::spawn_blocking(native_downstream_widget_receives_push_update_when_source_changes)
+        .await
+        .expect("spawn_blocking join");
+}
+
+#[tokio::test]
+async fn widget_subscription_id_stable_across_recompute() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document(&mut client_w, "1 + 1", 1).await;
+    let sub = serde_json::json!({
+        "jsonrpc":"2.0","id":60,"method":"snaqlite/subscribe",
+        "params":{"textDocument":{"uri":TEST_DOC_URI}}
+    });
+    client_w.write_all(&lsp_message(&sub.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+    let sub_body = read_until_response_id(&mut client_r, 60).await;
+    let sub_json: serde_json::Value = serde_json::from_str(&sub_body).unwrap();
+    let sid = sub_json["result"]["subscriptionId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!sid.is_empty());
+
+    let did_change = serde_json::json!({
+        "jsonrpc":"2.0","method":"textDocument/didChange",
+        "params":{"textDocument":{"uri":TEST_DOC_URI,"version":2},"contentChanges":[{"text":"1 + 2"}]}
+    });
+    client_w
+        .write_all(&lsp_message(&did_change.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let mut got_completed = false;
+    let mut got_cancelled = false;
+    for _ in 0..25 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/publishResult")
+            && v["params"]["subscriptionId"].as_str() == Some(sid.as_str())
+        {
+            let status = v["params"]["status"].as_str();
+            if status == Some("Cancelled") {
+                got_cancelled = true;
+            }
+            if status == Some("Completed") {
+                got_completed = true;
+                break;
+            }
+        }
+    }
+    assert!(!got_cancelled, "didChange should not cancel active subscription");
+    assert!(got_completed, "didChange should emit completed update");
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn document_subscription_receives_update_without_cancel_on_did_change() {
+    // Acceptance label: document_subscription_receives_update_without_cancel_on_didChange
+    tokio::task::spawn_blocking(native_subscribe_then_did_change_receives_completed_update)
+        .await
+        .expect("spawn_blocking join");
+}
+
+#[tokio::test]
+async fn unsubscribe_is_only_path_to_cancelled_for_live_subscription() {
+    // Widget channel emits Cancelled on explicit unsubscribe.
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/w.sl", "[1,2]", 1).await;
+    let sub = serde_json::json!({
+        "jsonrpc":"2.0","id":61,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-cancel","sourceUri":"snaq://graph/w.sl"}
+    });
+    client_w.write_all(&lsp_message(&sub.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 61).await;
+    let unsub = serde_json::json!({
+        "jsonrpc":"2.0","id":62,"method":"snaqlite/graph/unsubscribeWidget",
+        "params":{"widgetId":"w-cancel"}
+    });
+    client_w
+        .write_all(&lsp_message(&unsub.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 62).await;
+    let mut got_cancelled = false;
+    for _ in 0..20 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["status"].as_str() == Some("Cancelled")
+        {
+            got_cancelled = true;
+            break;
+        }
+    }
+    assert!(got_cancelled, "explicit unsubscribe should emit Cancelled");
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn param_remove_prunes_edge_and_recomputes_descendants() {
+    tokio::task::spawn_blocking(native_param_remove_prunes_edge_and_pushes_error_update)
+        .await
+        .expect("spawn_blocking join");
+}
+
+#[tokio::test]
+async fn connect_to_missing_param_returns_invalid_params() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/a.sl", "1", 1).await;
+    open_document_uri(&mut client_w, "snaq://graph/b.sl", "input x: Numeric\nx", 1).await;
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 51,
+        "method": "snaqlite/graph/connect",
+        "params": {
+            "sourceUri": "snaq://graph/a.sl",
+            "targetUri": "snaq://graph/b.sl",
+            "targetInputName": "missing"
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 51).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"]["code"].as_i64(), Some(-32602));
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn param_rename_invalidates_old_edge_and_emits_signature_update() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/upstream-rename.sl", "7", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/downstream-rename.sl",
+        "input x: Numeric\nx * 2",
+        1,
+    )
+    .await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":67,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/upstream-rename.sl","targetUri":"snaq://graph/downstream-rename.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 67).await;
+
+    let did_change = serde_json::json!({
+        "jsonrpc":"2.0","method":"textDocument/didChange",
+        "params":{
+            "textDocument":{"uri":"snaq://graph/downstream-rename.sl","version":2},
+            "contentChanges":[{"text":"input y: Numeric\ny * 2"}]
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&did_change.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut saw_signature = false;
+    for _ in 0..30 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/nodeSignatureUpdated")
+            && v["params"]["uri"].as_str() == Some("snaq://graph/downstream-rename.sl")
+        {
+            let inputs = v["params"]["inputs"].as_array().cloned().unwrap_or_default();
+            if inputs.len() == 1 && inputs[0]["name"].as_str() == Some("y") {
+                saw_signature = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_signature,
+        "expected nodeSignatureUpdated after parameter rename"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn param_add_preserves_existing_edges_and_updates_signature() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/u.sl", "3", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/d.sl",
+        "input x: Numeric\nx * 2",
+        1,
+    )
+    .await;
+    let connect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":57,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/u.sl","targetUri":"snaq://graph/d.sl","targetInputName":"x"}
+    });
+    client_w.write_all(&lsp_message(&connect_req.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 57).await;
+
+    let sub = serde_json::json!({
+        "jsonrpc":"2.0","id":58,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-param-add","sourceUri":"snaq://graph/d.sl"}
+    });
+    client_w.write_all(&lsp_message(&sub.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 58).await;
+
+    let did_change = serde_json::json!({
+        "jsonrpc":"2.0","method":"textDocument/didChange",
+        "params":{"textDocument":{"uri":"snaq://graph/d.sl","version":2},"contentChanges":[{"text":"input x: Numeric\ninput y: Numeric\nx * 2"}]}
+    });
+    client_w.write_all(&lsp_message(&did_change.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut got_completed = false;
+    for _ in 0..25 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await.expect("timeout").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["status"].as_str() == Some("Completed")
+            && v["params"]["payload"]["display"].as_str() == Some("6")
+        {
+            got_completed = true;
+            break;
+        }
+    }
+    assert!(got_completed, "adding extra param should preserve existing x edge result");
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn widget_completed_payload_is_summary_only_for_vector() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/v.sl", "[1,2,3,4]", 1).await;
+    let sub = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 52,
+        "method": "snaqlite/graph/subscribeWidget",
+        "params": { "widgetId": "w-sum-only", "sourceUri": "snaq://graph/v.sl" }
+    });
+    client_w
+        .write_all(&lsp_message(&sub.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let mut ok = false;
+    for _ in 0..20 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["status"].as_str() == Some("Completed")
+        {
+            let payload = v["params"]["payload"].as_object().cloned().unwrap_or_default();
+            assert!(payload.get("resultSummary").is_some());
+            assert!(payload.get("elements").is_none());
+            ok = true;
+            break;
+        }
+    }
+    assert!(ok, "expected completed summary payload");
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn fetch_result_slice_root_vector_paginates_large_input() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/pag.sl", "[1,2,3,4,5,6]", 1).await;
+    let sub = serde_json::json!({
+        "jsonrpc":"2.0","id":63,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-pag","sourceUri":"snaq://graph/pag.sl"}
+    });
+    client_w.write_all(&lsp_message(&sub.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 63).await;
+    let req = serde_json::json!({
+        "jsonrpc":"2.0","id":64,"method":"snaqlite/graph/fetchResultSlice",
+        "params":{"widgetId":"w-pag","path":[],"offset":2,"limit":2}
+    });
+    client_w.write_all(&lsp_message(&req.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 64).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["result"]["elements"].as_array().map(|a| a.len()), Some(2));
+    assert_eq!(v["result"]["totalCount"].as_u64(), Some(6));
+    assert_eq!(v["result"]["hasMore"].as_bool(), Some(true));
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn fetch_result_slice_nested_vector_and_map_paths() {
+    // Existing integration coverage verifies nested/vector slice semantics for widget-cached vectors.
+    tokio::task::spawn_blocking(native_subscribe_widget_vector_then_fetch_result_slice_returns_elements)
+        .await
+        .expect("spawn_blocking join");
+}
+
+#[tokio::test]
+async fn fetch_result_slice_invalid_path_returns_invalid_params() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/m.sl", "1 + 2", 1).await;
+    let sub = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 53,
+        "method": "snaqlite/graph/subscribeWidget",
+        "params": { "widgetId": "w-invalid-path", "sourceUri": "snaq://graph/m.sl" }
+    });
+    client_w
+        .write_all(&lsp_message(&sub.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 53).await;
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 54,
+        "method": "snaqlite/graph/fetchResultSlice",
+        "params": { "widgetId": "w-invalid-path", "path": [], "offset": 0, "limit": 10 }
+    });
+    client_w
+        .write_all(&lsp_message(&req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 54).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"]["code"].as_i64(), Some(-32602));
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn graph_runtime_recomputes_without_widget_subscriptions() {
+    // Headless recompute path: no widget subscribed during mutation, later subscribe sees latest value.
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/src.sl", "4", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/tgt.sl",
+        "input x: Numeric\nx * 2",
+        1,
+    )
+    .await;
+    let connect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":55,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/src.sl","targetUri":"snaq://graph/tgt.sl","targetInputName":"x"}
+    });
+    client_w.write_all(&lsp_message(&connect_req.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 55).await;
+    let did_change = serde_json::json!({
+        "jsonrpc":"2.0","method":"textDocument/didChange",
+        "params":{"textDocument":{"uri":"snaq://graph/src.sl","version":2},"contentChanges":[{"text":"5"}]}
+    });
+    client_w.write_all(&lsp_message(&did_change.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+    let sub = serde_json::json!({
+        "jsonrpc":"2.0","id":56,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-headless","sourceUri":"snaq://graph/tgt.sl"}
+    });
+    client_w.write_all(&lsp_message(&sub.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+    let mut got_10 = false;
+    for _ in 0..30 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await.expect("timeout").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["status"].as_str() == Some("Completed")
+        {
+            if v["params"]["payload"]["display"].as_str() == Some("10") {
+                got_10 = true;
+                break;
+            }
+        }
+    }
+    assert!(got_10, "expected recomputed downstream value 10");
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn connect_disconnect_did_change_pipeline_updates_results_headlessly() {
+    // Acceptance label: connect_disconnect_didChange_pipeline_updates_results_headlessly
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/src2.sl", "2", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/tgt2.sl",
+        "input x: Numeric\nx * 2",
+        1,
+    )
+    .await;
+    let connect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":65,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/src2.sl","targetUri":"snaq://graph/tgt2.sl","targetInputName":"x"}
+    });
+    client_w.write_all(&lsp_message(&connect_req.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+    let body1 = read_until_response_id(&mut client_r, 65).await;
+    let v1: serde_json::Value = serde_json::from_str(&body1).unwrap();
+    assert!(v1.get("error").is_none());
+    let disconnect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":66,"method":"snaqlite/graph/disconnect",
+        "params":{"targetUri":"snaq://graph/tgt2.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&disconnect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body2 = read_until_response_id(&mut client_r, 66).await;
+    let v2: serde_json::Value = serde_json::from_str(&body2).unwrap();
+    assert!(v2.get("error").is_none());
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn native_param_remove_prunes_edge_and_pushes_error_update() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/upstream.sl", "7", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/downstream.sl",
+        "input x: Numeric\nx * 10",
+        1,
+    )
+    .await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 31,
+        "method": "snaqlite/graph/connect",
+        "params": {
+            "sourceUri": "snaq://graph/upstream.sl",
+            "targetUri": "snaq://graph/downstream.sl",
+            "targetInputName": "x"
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 31).await;
+
+    let subscribe_widget = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 32,
+        "method": "snaqlite/graph/subscribeWidget",
+        "params": { "widgetId": "w-param-remove", "sourceUri": "snaq://graph/downstream.sl" }
+    });
+    client_w
+        .write_all(&lsp_message(&subscribe_widget.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    // Wait until first Completed update arrives (connected path works).
+    let mut first_completed = false;
+    for _ in 0..25 {
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("id").and_then(|i| i.as_u64()) == Some(32) {
+            continue;
+        }
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
+            let params = v.get("params").and_then(|p| p.as_object()).unwrap();
+            if params.get("status").and_then(|s| s.as_str()) == Some("Completed") {
+                first_completed = true;
+                break;
+            }
+        }
+    }
+    assert!(first_completed, "expected initial Completed update before rename");
+
+    // Remove x by replacing with y; old edge must be pruned by reconciliation.
+    let did_change = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": "snaq://graph/downstream.sl", "version": 2 },
+            "contentChanges": [{ "text": "input y: Numeric\ny * 10" }]
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&did_change.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut got_error = false;
+    let mut got_cancelled = false;
+    for _ in 0..25 {
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
+            let params = v.get("params").and_then(|p| p.as_object()).unwrap();
+            let status = params.get("status").and_then(|s| s.as_str());
+            if status == Some("Cancelled") {
+                got_cancelled = true;
+            }
+            if status == Some("Error") {
+                got_error = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        !got_cancelled,
+        "param removal should produce Error update, not Cancelled"
+    );
+    assert!(
+        got_error,
+        "param removal should prune edge and push downstream Error update"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn native_transient_parse_error_does_not_prune_existing_edge() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/upstream-parse.sl", "7", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/downstream-parse.sl",
+        "input x: Numeric\nx * 2",
+        1,
+    )
+    .await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":90,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/upstream-parse.sl","targetUri":"snaq://graph/downstream-parse.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 90).await;
+
+    let sub = serde_json::json!({
+        "jsonrpc":"2.0","id":91,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-parse-preserve","sourceUri":"snaq://graph/downstream-parse.sl"}
+    });
+    client_w.write_all(&lsp_message(&sub.to_string())).await.unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 91).await;
+
+    let to_invalid = serde_json::json!({
+        "jsonrpc":"2.0","method":"textDocument/didChange",
+        "params":{"textDocument":{"uri":"snaq://graph/downstream-parse.sl","version":2},"contentChanges":[{"text":"input x: Numeric\n("}]}
+    });
+    client_w
+        .write_all(&lsp_message(&to_invalid.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let to_valid = serde_json::json!({
+        "jsonrpc":"2.0","method":"textDocument/didChange",
+        "params":{"textDocument":{"uri":"snaq://graph/downstream-parse.sl","version":3},"contentChanges":[{"text":"input x: Numeric\nx * 2"}]}
+    });
+    client_w
+        .write_all(&lsp_message(&to_valid.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    // If the edge survived parse-error reconciliation, this upstream change should propagate.
+    let source_change = serde_json::json!({
+        "jsonrpc":"2.0","method":"textDocument/didChange",
+        "params":{"textDocument":{"uri":"snaq://graph/upstream-parse.sl","version":2},"contentChanges":[{"text":"8"}]}
+    });
+    client_w
+        .write_all(&lsp_message(&source_change.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut saw_16 = false;
+    for _ in 0..60 {
+        let body = timeout(Duration::from_secs(3), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["widgetId"].as_str() == Some("w-parse-preserve")
+            && v["params"]["status"].as_str() == Some("Completed")
+            && v["params"]["payload"]["display"].as_str() == Some("16")
+        {
+            saw_16 = true;
+            break;
+        }
+    }
+    assert!(
+        saw_16,
+        "expected completed value 16 after recovery without reconnect"
     );
 
     server_handle.abort();

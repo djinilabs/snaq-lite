@@ -43,6 +43,55 @@ impl GraphState {
             .collect()
     }
 
+    /// Full downstream closure for a source URI (BFS), excluding the source itself.
+    pub fn descendants_from_source(
+        &self,
+        source_uri: &Url,
+        documents: &HashSet<Url>,
+    ) -> Vec<Url> {
+        let mut out = Vec::new();
+        let mut visited: HashSet<Url> = HashSet::new();
+        let mut q: VecDeque<Url> = VecDeque::new();
+        q.push_back(source_uri.clone());
+        visited.insert(source_uri.clone());
+        while let Some(cur) = q.pop_front() {
+            for next in self
+                .edges
+                .iter()
+                .filter(|e| e.source_uri == cur)
+                .map(|e| e.target_uri.clone())
+            {
+                if !documents.contains(&next) || !visited.insert(next.clone()) {
+                    continue;
+                }
+                out.push(next.clone());
+                q.push_back(next);
+            }
+        }
+        out
+    }
+
+    /// Return changed roots plus all their downstream descendants, deduplicated.
+    pub fn impacted_from_changed_nodes(
+        &self,
+        changed: &[Url],
+        documents: &HashSet<Url>,
+    ) -> Vec<Url> {
+        let mut impacted = Vec::new();
+        let mut seen = HashSet::new();
+        for root in changed {
+            if documents.contains(root) && seen.insert(root.clone()) {
+                impacted.push(root.clone());
+            }
+            for d in self.descendants_from_source(root, documents) {
+                if seen.insert(d.clone()) {
+                    impacted.push(d);
+                }
+            }
+        }
+        impacted
+    }
+
     /// Add or replace edge: at most one source per (target_uri, target_input_name).
     pub fn connect(&mut self, source_uri: Url, target_uri: Url, target_input_name: String) {
         self.disconnect(&target_uri, &target_input_name);
@@ -57,6 +106,24 @@ impl GraphState {
     pub fn disconnect(&mut self, target_uri: &Url, target_input_name: &str) {
         self.edges
             .retain(|e| !(e.target_uri == *target_uri && e.target_input_name == target_input_name));
+    }
+
+    /// Remove edges whose target input no longer exists on the target node.
+    /// Returns removed edges so caller can emit invalidation metadata if needed.
+    pub fn reconcile_target_inputs(
+        &mut self,
+        target_uri: &Url,
+        valid_inputs: &HashSet<String>,
+    ) -> Vec<GraphEdge> {
+        let mut removed = Vec::new();
+        self.edges.retain(|e| {
+            let keep = e.target_uri != *target_uri || valid_inputs.contains(&e.target_input_name);
+            if !keep {
+                removed.push(e.clone());
+            }
+            keep
+        });
+        removed
     }
 
     /// Topological order of URIs that are ancestors of `sink` (including sink). Returns None if cycle.

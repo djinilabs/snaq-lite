@@ -32,21 +32,49 @@ impl SubscriptionRegistry {
         id: SubscriptionId,
         uri: Url,
         version: Option<i32>,
-        cancel_tx: futures::channel::oneshot::Sender<()>,
+        cancel_tx: Option<futures::channel::oneshot::Sender<()>>,
     ) {
         self.by_id.insert(
             id,
             SubscriptionEntry {
                 uri,
                 version,
-                cancel_tx: Some(cancel_tx),
+                cancel_tx,
             },
         );
     }
 
     /// Remove subscription by id. Returns the cancel sender if present (caller may send to cancel).
-    pub fn remove(&mut self, id: &str) -> Option<futures::channel::oneshot::Sender<()>> {
-        self.by_id.remove(id).and_then(|e| e.cancel_tx)
+    pub fn remove(&mut self, id: &str) -> Option<Option<futures::channel::oneshot::Sender<()>>> {
+        self.by_id.remove(id).map(|e| e.cancel_tx)
+    }
+
+    /// List active subscription ids for a document URI.
+    pub fn ids_for_uri(&self, uri: &Url) -> Vec<SubscriptionId> {
+        self.by_id
+            .iter()
+            .filter(|(_, e)| e.uri == *uri)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Take current cancel sender for a subscription id.
+    pub fn take_cancel_tx(
+        &mut self,
+        id: &str,
+    ) -> Option<futures::channel::oneshot::Sender<()>> {
+        self.by_id.get_mut(id).and_then(|e| e.cancel_tx.take())
+    }
+
+    /// Replace cancel sender for an existing subscription id.
+    pub fn set_cancel_tx(
+        &mut self,
+        id: &str,
+        cancel_tx: Option<futures::channel::oneshot::Sender<()>>,
+    ) {
+        if let Some(entry) = self.by_id.get_mut(id) {
+            entry.cancel_tx = cancel_tx;
+        }
     }
 
     /// Invalidate all subscriptions for the given uri. Returns list of (id, cancel_tx) for each

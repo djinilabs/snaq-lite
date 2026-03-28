@@ -3369,6 +3369,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn input_decl_name_resolves_as_scoped_variable_native() {
+        use futures::sink::SinkExt;
+
+        let (handle_id, mut sender) = create_stream_input();
+        let q = Quantity::from_scalar(5.0);
+        let _ = futures::executor::block_on(sender.send(vec![Ok(Some(Value::Numeric(q)))]));
+        drop(sender);
+        let stream_inputs = std::collections::HashMap::from([("x".to_string(), handle_id)]);
+        let (value, _db) = run_with_stream_inputs(
+            "input x: Numeric\nx + 1",
+            &default_si_registry(),
+            stream_inputs,
+        )
+        .expect("run_with_stream_inputs should succeed");
+        let Value::Numeric(q) = value else {
+            panic!("expected numeric result");
+        };
+        assert!((q.value() - 6.0).abs() < 1e-10, "expected 6, got {}", q.value());
+    }
+
     /// Two inputs (abc, ggg) each bound from a separate stream handle with the same scalar data (42).
     /// Ensures one-output-to-two-inputs works at the lang layer: two handles, two consumes, result abc * ggg = 1764.
     #[test]
@@ -3433,6 +3454,115 @@ mod tests {
             "expected 12 (sum([1,2,3])+sum([1,2,3])), got {}",
             q.value()
         );
+    }
+
+    #[test]
+    fn run_input_decl_without_binding_is_undefined() {
+        let program = "input abc: Numeric\nabc";
+        let (value, _db) =
+            run_with_stream_inputs(program, &default_si_registry(), std::collections::HashMap::new())
+                .expect("run_with_stream_inputs should succeed");
+        assert!(
+            matches!(value, Value::Undefined),
+            "declared input should be in scope as undefined when no binding is provided, got {:?}",
+            value
+        );
+    }
+
+    #[test]
+    fn run_declared_input_and_dollar_input_are_equivalent_for_bound_scalar() {
+        use futures::sink::SinkExt;
+
+        let (h_decl, mut s_decl) = create_stream_input();
+        let (h_dollar, mut s_dollar) = create_stream_input();
+        let q42 = Quantity::from_scalar(42.0);
+        let chunk = vec![Ok(Some(Value::Numeric(q42)))];
+        let _ = futures::executor::block_on(s_decl.send(chunk.clone()));
+        let _ = futures::executor::block_on(s_dollar.send(chunk));
+        drop(s_decl);
+        drop(s_dollar);
+
+        let (v_decl, _db1) = run_with_stream_inputs(
+            "input abc: Numeric\nabc * 10",
+            &default_si_registry(),
+            std::collections::HashMap::from([("abc".to_string(), h_decl)]),
+        )
+        .expect("declared-input path should run");
+        let (v_dollar, _db2) = run_with_stream_inputs(
+            "$abc.sum() * 10",
+            &default_si_registry(),
+            std::collections::HashMap::from([("abc".to_string(), h_dollar)]),
+        )
+        .expect("dollar-input path should run");
+
+        let Value::Numeric(q_decl) = v_decl else {
+            panic!("expected numeric declared-input result");
+        };
+        let Value::Numeric(q_dollar) = v_dollar else {
+            panic!("expected numeric dollar-input result");
+        };
+        assert!(
+            (q_decl.value() - q_dollar.value()).abs() < 1e-10,
+            "declared-input and dollar-input should match: {} vs {}",
+            q_decl.value(),
+            q_dollar.value()
+        );
+    }
+
+    #[test]
+    fn declared_input_and_dollar_input_are_equivalent_during_transition() {
+        run_declared_input_and_dollar_input_are_equivalent_for_bound_scalar();
+    }
+
+    #[test]
+    fn duplicate_input_decl_fails_with_clear_error() {
+        let result = run_with_stream_inputs(
+            "input x: Numeric\ninput x: Numeric\nx",
+            &default_si_registry(),
+            std::collections::HashMap::new(),
+        );
+        let err = match result {
+            Ok(_) => panic!("duplicate input declarations should error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("duplicate input declaration: x"),
+            "error should mention exact duplicate declaration name: {err}"
+        );
+    }
+
+    #[test]
+    fn wasm_input_binding_path_does_not_block() {
+        // Regression guard: declared inputs with no bound stream should complete immediately.
+        let (value, _db) = run_with_stream_inputs(
+            "input x: Vector\nx",
+            &default_si_registry(),
+            std::collections::HashMap::new(),
+        )
+        .expect("run_with_stream_inputs should complete without blocking");
+        assert!(matches!(value, Value::Undefined));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn input_decl_name_resolves_as_scoped_variable_wasm() {
+        // On wasm, declared inputs bind lazily from stream handles without blocking.
+        use futures::sink::SinkExt;
+        let (handle_id, mut sender) = create_stream_input();
+        let q = Quantity::from_scalar(3.0);
+        let _ = futures::executor::block_on(sender.send(vec![Ok(Some(Value::Numeric(q)))]));
+        drop(sender);
+        let stream_inputs = std::collections::HashMap::from([("x".to_string(), handle_id)]);
+        let (value, _db) = run_with_stream_inputs(
+            "input x: Numeric\nx.length",
+            &default_si_registry(),
+            stream_inputs,
+        )
+        .expect("run_with_stream_inputs should succeed");
+        let Value::Numeric(n) = value else {
+            panic!("expected numeric result for vector length");
+        };
+        assert!((n.value() - 1.0).abs() < 1e-10);
     }
 
     #[test]

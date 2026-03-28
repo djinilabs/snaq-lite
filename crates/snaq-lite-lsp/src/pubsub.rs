@@ -255,3 +255,32 @@ pub fn value_to_slice_element(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use snaq_lite_lang::Value;
+
+    #[test]
+    fn value_to_slice_element_preserves_path_contract() {
+        let (value, db) = snaq_lite_lang::run_with_stream_inputs(
+            "[1, 2, 3]",
+            &snaq_lite_lang::default_si_registry(),
+            std::collections::HashMap::new(),
+        )
+        .unwrap();
+        let path = vec![serde_json::json!(3_u64), serde_json::json!("x")];
+        let elem = value_to_slice_element(&db, &value, &path);
+        assert_eq!(elem["type"].as_str(), Some("vector"));
+        assert_eq!(elem["path"], serde_json::json!(path));
+
+        // Scalar elements intentionally include display only.
+        let scalar = value_to_slice_element(
+            &db,
+            &Value::Numeric(snaq_lite_lang::Quantity::from_scalar(2.0)),
+            &path,
+        );
+        assert_eq!(scalar["display"].as_str(), Some("2"));
+        assert!(scalar.get("path").is_none());
+    }
+}

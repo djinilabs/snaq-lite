@@ -19,6 +19,9 @@ pub struct DocumentEntry {
     pub version: Option<i32>,
     pub root_def: Option<ExprDef>,
     pub root_spanned: Option<snaq_lite_lang::SpannedExprDef>,
+    /// True when parse() succeeded for this document version.
+    /// Reconciliation logic uses this to avoid pruning graph edges on transient syntax errors.
+    pub parse_succeeded: bool,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -87,16 +90,17 @@ impl LspState {
                 version: Some(version),
                 root_def: Some(empty_block_def()),
                 root_spanned: None,
+                parse_succeeded: true,
                 diagnostics: Vec::new(),
             };
         }
 
         let mut diags = Vec::new();
-        let (root_def, root_spanned) = match parse(text) {
+        let (root_def, root_spanned, parse_succeeded) = match parse(text) {
             Err(pe) => {
                 let err = snaq_lite_lang::RunError::from(pe);
                 diags.push(run_error_to_diagnostic(&err, text));
-                (empty_block_def(), None)
+                (empty_block_def(), None, false)
             }
             Ok(spanned) => {
                 set_eval_registry(self.unit_registry.clone());
@@ -107,13 +111,13 @@ impl LspState {
                 match snaq_lite_lang::resolve::resolve(spanned.clone(), &self.unit_registry) {
                     Err(e) => {
                         diags.push(run_error_to_diagnostic(&e, text));
-                        (spanned.to_expr_def(), Some(spanned))
+                        (spanned.to_expr_def(), Some(spanned), true)
                     }
                     Ok(resolved) => {
                         match cas::simplify_symbolic(resolved.clone(), &self.unit_registry) {
                             Err(e) => {
                                 diags.push(run_error_to_diagnostic(&e, text));
-                                (resolved.to_expr_def(), Some(resolved))
+                                (resolved.to_expr_def(), Some(resolved), true)
                             }
                             Ok(simplified) => {
                                 let root_def = simplified.to_expr_def();
@@ -123,7 +127,7 @@ impl LspState {
                                     Some(simplified.clone()),
                                 );
                                 let _root_expr = program(&self.db, program_def);
-                                (root_def, Some(simplified))
+                                (root_def, Some(simplified), true)
                             }
                         }
                     }
@@ -136,6 +140,7 @@ impl LspState {
             version: Some(version),
             root_def: Some(root_def),
             root_spanned,
+            parse_succeeded,
             diagnostics: diags,
         }
     }

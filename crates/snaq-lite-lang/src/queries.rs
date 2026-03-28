@@ -131,7 +131,11 @@ impl<'a> futures::stream::Stream for MappedVectorStream<'a> {
 impl std::marker::Unpin for MappedVectorStream<'_> {}
 
 /// Stream state for 2D transpose. Created by [vector_into_stream] for [crate::vector::LazyVector::Transpose].
-/// Collects the source stream in [poll_next] (no blocking), then yields columns if every element was a vector, else yields the same elements (1D identity).
+/// Collects source rows in poll-based steps, then yields columns if every element is a vector,
+/// else yields the original 1D stream content.
+///
+/// Note: true transpose requires row buffering; we avoid eager API-level materialization,
+/// but row contents must still be buffered to emit columns.
 pub struct TransposedVectorStream<'a> {
     db: &'a dyn salsa::Database,
     inner: Box<VectorStream<'a>>,
@@ -317,6 +321,9 @@ impl std::marker::Unpin for ZippedVectorStream<'_> {}
 
 /// Stream for outer product (column × row): yields one column vector per right (row) element.
 /// Column j = [left_0 op right_j, left_1 op right_j, ...], so matrix(i,j) = left_i op right_j.
+///
+/// Note: each emitted column depends on the full left input, so the left stream is buffered once
+/// and reused while the right stream is consumed.
 pub struct OuterProductVectorStream<'a> {
     left_buffer: Vec<Result<Option<Value>, RunError>>,
     right: Box<VectorStream<'a>>,
@@ -565,9 +572,12 @@ fn apply_user_map_element(
     let stored = StoredValue::from_value(&elem)
         .map_err(|_| RunError::new(RunErrorKind::BindingValueNotSupported("map: function parameter value cannot be stored".to_string())))?;
     let env = closure_env.extend(param_name, stored);
+    // Build the lambda body through `program()` so tracked node construction happens
+    // inside a tracked query, then evaluate in the same database/scope.
     let scope = Scope::new(db, env);
-    let body_expr = build_expression(db, *uf.body.clone(), None);
-    value(db, scope, body_expr)
+    let program_def = ProgramDef::new(db, *uf.body.clone(), None);
+    let root = program(db, program_def);
+    value(db, scope, root)
 }
 
 fn apply_map_op(
@@ -1573,27 +1583,11 @@ fn value_inner<'db>(
                                     )),
                                 ));
                             }
-                            // Keep user-function mapping eager because user-call evaluation requires
-                            // tracked expression creation within a query context.
-                            let collected = collect_vector_stream(db, inner);
-                            let results: Vec<Result<Option<Value>, RunError>> = collected
-                                .into_iter()
-                                .map(|r| {
-                                    r.and_then(|opt| {
-                                        opt.map(|elem| {
-                                            apply_user_map_element(db, uf, elem, registry).map(Some)
-                                        })
-                                        .unwrap_or(Ok(None))
-                                    })
-                                })
-                                .collect();
-                            let ok_results: Vec<Option<Value>> = results
-                                .into_iter()
-                                .collect::<Result<Vec<_>, _>>()
-                                .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            let results = ok_results.into_iter().map(Ok).collect();
                             Ok(Value::Vector(VectorValue {
-                                inner: LazyVector::FromEvaluated(results),
+                                inner: LazyVector::Map {
+                                    source: Box::new(inner),
+                                    op: VectorMapOp::UserMap(uf.clone()),
+                                },
                                 orientation,
                             }))
                         }
@@ -1632,9 +1626,13 @@ fn value_inner<'db>(
                             "sum takes no arguments".to_string(),
                         )));
                     }
-                    let collected = collect_vector_stream(db, inner);
-                    let sum_val = sum_vector_elements(&collected, registry)
-                        .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                    let (sum_val, _count) = sum_and_count_vector_stream(
+                        db,
+                        inner,
+                        registry,
+                        expr.span(db),
+                    )
+                    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
                     Ok(sum_val)
                 }
                 "mean" => {
@@ -1643,16 +1641,28 @@ fn value_inner<'db>(
                             "mean takes no arguments".to_string(),
                         )));
                     }
-                    let collected = collect_vector_stream(db, inner);
-                    let n = collected
-                        .iter()
-                        .filter(|r| r.as_ref().is_ok_and(|o| o.is_some()))
-                        .count();
+                    use futures::stream::StreamExt;
+                    let mut stream = vector_into_stream(db, inner);
+                    let mut n = 0usize;
+                    let mut sum_val = Value::Numeric(Quantity::from_scalar(0.0));
+                    futures::executor::block_on(async {
+                        while let Some(item) = stream.next().await {
+                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            if let Some(v) = opt {
+                                n += 1;
+                                sum_val = add_values(&sum_val, &v, registry, None, expr.span(db))
+                                    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            }
+                        }
+                        Ok::<(), RunError>(())
+                    })?;
                     if n == 0 {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::EmptyVectorReduction("mean".to_string())));
+                        return Err(run_err_with_span(
+                            db,
+                            expr,
+                            RunErrorKind::EmptyVectorReduction("mean".to_string()),
+                        ));
                     }
-                    let sum_val = sum_vector_elements(&collected, registry)
-                        .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
                     let len_val = Value::Numeric(Quantity::from_exact_scalar(n as f64));
                     div_values(&sum_val, &len_val, registry, None, expr.span(db))
                 }
@@ -1692,9 +1702,50 @@ fn value_inner<'db>(
                             "min takes no arguments".to_string(),
                         )));
                     }
-                    let collected = collect_vector_stream(db, inner);
-                    reduce_min_max(&collected, registry, false, "min")
-                        .map_err(|e| with_span_if_missing(e, expr.span(db)))
+                    use futures::stream::StreamExt;
+                    let mut stream = vector_into_stream(db, inner);
+                    let mut acc: Option<Quantity> = None;
+                    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+                    futures::executor::block_on(async {
+                        while let Some(item) = stream.next().await {
+                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            let Some(v) = opt else { continue };
+                            let q = v.to_quantity(&sym_reg).map_err(|_| {
+                                run_err_with_span(
+                                    db,
+                                    expr,
+                                    RunErrorKind::UnknownMethod(
+                                        "min: elements must be numeric (same dimension)"
+                                            .to_string(),
+                                    ),
+                                )
+                            })?;
+                            acc = Some(match acc.take() {
+                                None => q,
+                                Some(prev) => functions::call_builtin("min", &[prev, q], registry)?
+                                    .to_quantity(&sym_reg)
+                                    .map_err(|_| {
+                                        run_err_with_span(
+                                            db,
+                                            expr,
+                                            RunErrorKind::UnknownMethod(
+                                                "min: elements must be numeric (same dimension)"
+                                                    .to_string(),
+                                            ),
+                                        )
+                                    })?,
+                            });
+                        }
+                        Ok::<(), RunError>(())
+                    })?;
+                    match acc {
+                        Some(q) => Ok(Value::Numeric(q)),
+                        None => Err(run_err_with_span(
+                            db,
+                            expr,
+                            RunErrorKind::EmptyVectorReduction("min".to_string()),
+                        )),
+                    }
                 }
                 "max" => {
                     if !args.is_empty() {
@@ -1702,9 +1753,50 @@ fn value_inner<'db>(
                             "max takes no arguments".to_string(),
                         )));
                     }
-                    let collected = collect_vector_stream(db, inner);
-                    reduce_min_max(&collected, registry, true, "max")
-                        .map_err(|e| with_span_if_missing(e, expr.span(db)))
+                    use futures::stream::StreamExt;
+                    let mut stream = vector_into_stream(db, inner);
+                    let mut acc: Option<Quantity> = None;
+                    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+                    futures::executor::block_on(async {
+                        while let Some(item) = stream.next().await {
+                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            let Some(v) = opt else { continue };
+                            let q = v.to_quantity(&sym_reg).map_err(|_| {
+                                run_err_with_span(
+                                    db,
+                                    expr,
+                                    RunErrorKind::UnknownMethod(
+                                        "max: elements must be numeric (same dimension)"
+                                            .to_string(),
+                                    ),
+                                )
+                            })?;
+                            acc = Some(match acc.take() {
+                                None => q,
+                                Some(prev) => functions::call_builtin("max", &[prev, q], registry)?
+                                    .to_quantity(&sym_reg)
+                                    .map_err(|_| {
+                                        run_err_with_span(
+                                            db,
+                                            expr,
+                                            RunErrorKind::UnknownMethod(
+                                                "max: elements must be numeric (same dimension)"
+                                                    .to_string(),
+                                            ),
+                                        )
+                                    })?,
+                            });
+                        }
+                        Ok::<(), RunError>(())
+                    })?;
+                    match acc {
+                        Some(q) => Ok(Value::Numeric(q)),
+                        None => Err(run_err_with_span(
+                            db,
+                            expr,
+                            RunErrorKind::EmptyVectorReduction("max".to_string()),
+                        )),
+                    }
                 }
                 "dot" => {
                     if args.len() != 1 {
@@ -1754,9 +1846,20 @@ fn value_inner<'db>(
                             "product takes no arguments".to_string(),
                         )));
                     }
-                    let collected = collect_vector_stream(db, inner);
-                    product_vector_elements(&collected, registry)
-                        .map_err(|e| with_span_if_missing(e, expr.span(db)))
+                    use futures::stream::StreamExt;
+                    let mut stream = vector_into_stream(db, inner);
+                    let mut acc = Value::Numeric(Quantity::from_scalar(1.0));
+                    futures::executor::block_on(async {
+                        while let Some(item) = stream.next().await {
+                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            if let Some(v) = opt {
+                                acc = mul_values(&acc, &v, registry, None, expr.span(db))
+                                    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            }
+                        }
+                        Ok::<(), RunError>(())
+                    })?;
+                    Ok(acc)
                 }
                 "variance" => {
                     if !args.is_empty() {
@@ -1764,9 +1867,51 @@ fn value_inner<'db>(
                             "variance takes no arguments".to_string(),
                         )));
                     }
-                    let collected = collect_vector_stream(db, inner);
-                    compute_variance_value(&collected, registry)
-                        .map_err(|e| with_span_if_missing(e, expr.span(db)))
+                    use futures::stream::StreamExt;
+                    let mut stream = vector_into_stream(db, inner);
+                    let mut n = 0usize;
+                    let mut mean: Option<Value> = None;
+                    let mut m2 = Value::Numeric(Quantity::from_scalar(0.0));
+                    futures::executor::block_on(async {
+                        while let Some(item) = stream.next().await {
+                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            let Some(x) = opt else { continue };
+                            n += 1;
+                            if n == 1 {
+                                mean = Some(x);
+                                continue;
+                            }
+                            let n_val = Value::Numeric(Quantity::from_exact_scalar(n as f64));
+                            let mean_val = mean
+                                .clone()
+                                .ok_or_else(|| run_err_with_span(db, expr, RunErrorKind::UndefinedResult))?;
+                            let delta = sub_values(&x, &mean_val, registry, None, expr.span(db))
+                                .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            let delta_over_n =
+                                div_values(&delta, &n_val, registry, None, expr.span(db))
+                                    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            let next_mean =
+                                add_values(&mean_val, &delta_over_n, registry, None, expr.span(db))
+                                    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            let delta2 = sub_values(&x, &next_mean, registry, None, expr.span(db))
+                                .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            let prod = mul_values(&delta, &delta2, registry, None, expr.span(db))
+                                .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            m2 = add_values(&m2, &prod, registry, None, expr.span(db))
+                                .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            mean = Some(next_mean);
+                        }
+                        Ok::<(), RunError>(())
+                    })?;
+                    if n == 0 {
+                        return Err(run_err_with_span(
+                            db,
+                            expr,
+                            RunErrorKind::EmptyVectorReduction("variance".to_string()),
+                        ));
+                    }
+                    let n_val = Value::Numeric(Quantity::from_exact_scalar(n as f64));
+                    div_values(&m2, &n_val, registry, None, expr.span(db))
                 }
                 "stddev" => {
                     if !args.is_empty() {
@@ -1774,9 +1919,11 @@ fn value_inner<'db>(
                             "stddev takes no arguments".to_string(),
                         )));
                     }
-                    let collected = collect_vector_stream(db, inner);
-                    let variance_val = compute_variance_value(&collected, registry)
-                        .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                    let variance_val = {
+                        let variance_expr = ExprData::MethodCall(*base, "variance".to_string(), vec![]);
+                        let variance_node = Expression::new(db, variance_expr, expr.span(db));
+                        value_inner(db, scope, variance_node, registry)?
+                    };
                     let sym_reg =
                         crate::symbol_registry::SymbolRegistry::default_registry();
                     let variance_q = variance_val.to_quantity(&sym_reg).map_err(|_| {
@@ -1793,26 +1940,33 @@ fn value_inner<'db>(
                             "all takes no arguments".to_string(),
                         )));
                     }
-                    let collected = collect_vector_stream(db, inner);
                     let mut acc = crate::fuzzy::FuzzyBool::True;
-                    for v in collected
-                        .iter()
-                        .filter_map(|r| r.as_ref().ok().and_then(|o| o.clone()))
-                    {
-                        let f = match v {
-                            Value::FuzzyBool(f) => f.clone(),
-                            _ => {
-                                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                                    "all: elements must be boolean (e.g. from comparison)"
-                                        .to_string(),
-                                )))
+                    use futures::stream::StreamExt;
+                    let mut stream = vector_into_stream(db, inner);
+                    futures::executor::block_on(async {
+                        while let Some(item) = stream.next().await {
+                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            let Some(v) = opt else { continue };
+                            let f = match v {
+                                Value::FuzzyBool(f) => f,
+                                _ => {
+                                    return Err(run_err_with_span(
+                                        db,
+                                        expr,
+                                        RunErrorKind::UnknownMethod(
+                                            "all: elements must be boolean (e.g. from comparison)"
+                                                .to_string(),
+                                        ),
+                                    ))
+                                }
+                            };
+                            acc = acc.clone().and_(&f);
+                            if matches!(acc, crate::fuzzy::FuzzyBool::False) {
+                                break;
                             }
-                        };
-                        acc = acc.and_(&f);
-                        if matches!(acc, crate::fuzzy::FuzzyBool::False) {
-                            break;
                         }
-                    }
+                        Ok::<(), RunError>(())
+                    })?;
                     Ok(Value::FuzzyBool(acc))
                 }
                 "any" => {
@@ -1821,26 +1975,33 @@ fn value_inner<'db>(
                             "any takes no arguments".to_string(),
                         )));
                     }
-                    let collected = collect_vector_stream(db, inner);
                     let mut acc = crate::fuzzy::FuzzyBool::False;
-                    for v in collected
-                        .iter()
-                        .filter_map(|r| r.as_ref().ok().and_then(|o| o.clone()))
-                    {
-                        let f = match v {
-                            Value::FuzzyBool(f) => f.clone(),
-                            _ => {
-                                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                                    "any: elements must be boolean (e.g. from comparison)"
-                                        .to_string(),
-                                )))
+                    use futures::stream::StreamExt;
+                    let mut stream = vector_into_stream(db, inner);
+                    futures::executor::block_on(async {
+                        while let Some(item) = stream.next().await {
+                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            let Some(v) = opt else { continue };
+                            let f = match v {
+                                Value::FuzzyBool(f) => f,
+                                _ => {
+                                    return Err(run_err_with_span(
+                                        db,
+                                        expr,
+                                        RunErrorKind::UnknownMethod(
+                                            "any: elements must be boolean (e.g. from comparison)"
+                                                .to_string(),
+                                        ),
+                                    ))
+                                }
+                            };
+                            acc = acc.clone().or_(&f);
+                            if matches!(acc, crate::fuzzy::FuzzyBool::True) {
+                                break;
                             }
-                        };
-                        acc = acc.or_(&f);
-                        if matches!(acc, crate::fuzzy::FuzzyBool::True) {
-                            break;
                         }
-                    }
+                        Ok::<(), RunError>(())
+                    })?;
                     Ok(Value::FuzzyBool(acc))
                 }
                 _ => Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(name.clone()))),
@@ -2654,6 +2815,7 @@ fn value_to_symbolic_expr(v: &Value) -> Result<SymbolicExpr, RunError> {
 }
 
 /// Sum all elements of a collected vector (for row×column add/sub). Skips None (sparse); empty → 0.
+#[allow(dead_code)]
 fn sum_vector_elements(
     elems: &[Result<Option<Value>, RunError>],
     registry: &UnitRegistry,
@@ -2691,6 +2853,7 @@ fn sum_and_count_vector_stream(
 }
 
 /// Product of all elements of a collected vector. Skips None (sparse); empty → 1.
+#[allow(dead_code)]
 fn product_vector_elements(
     elems: &[Result<Option<Value>, RunError>],
     registry: &UnitRegistry,
@@ -2707,6 +2870,7 @@ fn product_vector_elements(
 
 /// Population variance (mean of squares minus square of mean) over collected vector elements.
 /// Empty or all-sparse → EmptyVectorReduction("variance").
+#[allow(dead_code)]
 fn compute_variance_value(
     collected: &[Result<Option<Value>, RunError>],
     registry: &UnitRegistry,
@@ -2879,6 +3043,7 @@ fn quantile_from_collected(
 }
 
 /// Min or max over collected vector elements (numeric only). Empty → EmptyVectorReduction.
+#[allow(dead_code)]
 fn reduce_min_max(
     elems: &[Result<Option<Value>, RunError>],
     registry: &UnitRegistry,

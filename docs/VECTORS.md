@@ -1,6 +1,6 @@
 # Vectors
 
-This document describes vector literals, transpose, orientation, and how vectors interact with scalars and other vectors. It does not describe internal streaming or lazy representation.
+This document describes vector literals, transpose, orientation, and how vectors interact with scalars and other vectors, including runtime lazy/streaming semantics relevant to users.
 
 ## Vector literal
 
@@ -78,7 +78,7 @@ Vectors support **properties** (no arguments) and **methods** (with arguments) u
   - **`V.length`** — number of elements (0-based count). Example: `[1, 2, 3].length` → `3`; `[].length` → `0`.
 
 - **Methods**
-  - **`V.map(fn (x) => body)`** or **`V.map(fn x => (body))`** — returns a vector where each element is the result of applying the function to the corresponding element. The argument can be a **user function** (one parameter) or a **single-argument built-in** (e.g. `sqrt`, `sin`, `cos`, `tan`). Example: `[1, 2, 3].map(fn (x) => (x+1))` → `[2, 3, 4]`; `[1, 2, 3].map(sqrt)` → `[1, 1.414..., 1.732...]`. You can pass a variable that holds a built-in: `f = sqrt; [1, 4, 9].map(f)` → `[1, 2, 3]`. Built-in mapping is lazy (streamed per element as consumed). User-function mapping remains eager for now because function bodies are evaluated in query context; closures still work.
+  - **`V.map(fn (x) => body)`** or **`V.map(fn x => (body))`** — returns a vector where each element is the result of applying the function to the corresponding element. The argument can be a **user function** (one parameter) or a **single-argument built-in** (e.g. `sqrt`, `sin`, `cos`, `tan`). Example: `[1, 2, 3].map(fn (x) => (x+1))` → `[2, 3, 4]`; `[1, 2, 3].map(sqrt)` → `[1, 1.414..., 1.732...]`. You can pass a variable that holds a built-in: `f = sqrt; [1, 4, 9].map(f)` → `[1, 2, 3]`. Mapping is lazy: element computation happens as the result is consumed.
   - **`V.take(start, length)`** — same as the built-in `take(V, start, length)`: returns a streaming slice from index `start` (0-based) with up to `length` elements. Example: `[1, 2, 3, 4].take(1, 2)` → `[2, 3]`.
   - **`V.sum()`** — sum of all elements (scalar). Empty vector → `0`. Same dimension required.
   - **`V.mean()`** — arithmetic mean (sum / length). Empty vector → error.
@@ -94,6 +94,8 @@ Vectors support **properties** (no arguments) and **methods** (with arguments) u
 
 Numeric index access (e.g. `V.0`, `V.1`) is unchanged: use a **number** after the dot for single-element access; use an **identifier** (e.g. `length`, `map`) for property or method access. Unknown property or method names return **unknown property** or **unknown method**.
 
+Reduction methods are evaluated by consuming vector streams; they do not require vectors to be pre-materialized in memory before computation starts.
+
 ### Math and statistics (for students)
 
 The methods **sum**, **mean**, **min**, **max**, **dot**, **norm**, **product**, **variance**, **stddev**, **median**, and **quantile** support typical science and math workflows: net force (sum of force vectors), average value (mean), bounds (min/max), dot product and vector length (norm), compound growth (product), and spread (variance, stddev). All reduction methods require elements to have the same dimension (or be boolean for **all**/**any**). Empty-vector behaviour: **sum** → 0, **product** → 1, **norm** → 0; **mean**, **min**, **max**, **variance**, **stddev** return an error.
@@ -106,6 +108,7 @@ Vectors are displayed in a list-like form, e.g. `[1, 2, 3]` or `[1 m, 2 m]`. Nes
 
 - **Converting a vector to a single quantity:** Not supported. If the result of an expression is a vector and you request a numeric quantity (e.g. `run_numeric`), the runtime returns an error: **operation not supported for vector**.
 - **Binding a vector to a variable:** Supported. You can bind a vector to a name and use it in later expressions (see [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md)).
+- **Transpose and outer product memory:** Transpose and column×row outer product are lazy at the API level, but mathematically require buffering parts of the input while producing output columns.
 
 ## See also
 

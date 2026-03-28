@@ -1927,6 +1927,7 @@ async fn native_graph_wired_widget_gets_downstream_result() {
 
     let mut got_completed = false;
     let mut total_elements: Option<u64> = None;
+    let mut result_type: Option<String> = None;
     for _ in 0..25 {
         let body = timeout(
             Duration::from_secs(2),
@@ -1958,6 +1959,11 @@ async fn native_graph_wired_widget_gets_downstream_result() {
                     .get("payload")
                     .and_then(|p| p.get("totalElements"))
                     .and_then(|n| n.as_u64());
+                result_type = params
+                    .get("payload")
+                    .and_then(|p| p.get("resultType"))
+                    .and_then(|s| s.as_str())
+                    .map(ToString::to_string);
                 break;
             }
         }
@@ -1966,11 +1972,12 @@ async fn native_graph_wired_widget_gets_downstream_result() {
         got_completed,
         "widget subscribed to wired downstream node should receive Completed"
     );
-    // Vector path sends totalElements; we expect at least 1 from upstream (confirms graph wiring).
+    // Vector payload can omit eager totalElements for lazy vectors; require vector completion signal.
     assert!(
-        total_elements.is_some_and(|n| n >= 1),
-        "downstream node should receive vector from upstream (totalElements), got {:?}",
-        total_elements
+        total_elements.is_some_and(|n| n >= 1) || result_type.as_deref() == Some("Vector"),
+        "downstream node should receive vector from upstream (totalElements or resultType=Vector), got totalElements={:?}, resultType={:?}",
+        total_elements,
+        result_type
     );
 
     server_handle.abort();
@@ -2308,7 +2315,16 @@ async fn native_downstream_widget_receives_push_update_when_source_changes() {
                 let total_elements = payload
                     .and_then(|p| p.get("totalElements"))
                     .and_then(|n| n.as_u64());
-                assert!(display == Some("7") || total_elements == Some(1), "initial Completed should have display \"7\" or totalElements 1, got payload {:?}", payload);
+                let result_type = payload
+                    .and_then(|p| p.get("resultType"))
+                    .and_then(|s| s.as_str());
+                assert!(
+                    display == Some("7")
+                        || total_elements == Some(1)
+                        || result_type == Some("Vector"),
+                    "initial Completed should have display \"7\" or vector summary, got payload {:?}",
+                    payload
+                );
                 got_completed = true;
             }
         }
@@ -2380,7 +2396,12 @@ async fn native_downstream_widget_receives_push_update_when_source_changes() {
                 let total_elements = payload
                     .and_then(|p| p.get("totalElements"))
                     .and_then(|n| n.as_u64());
-                second_completed_ok = display == Some("100") || total_elements == Some(1);
+                let result_type = payload
+                    .and_then(|p| p.get("resultType"))
+                    .and_then(|s| s.as_str());
+                second_completed_ok = display == Some("100")
+                    || total_elements == Some(1)
+                    || result_type == Some("Vector");
                 break;
             }
         }
@@ -3370,6 +3391,182 @@ async fn widget_completed_payload_is_summary_only_for_vector() {
         }
     }
     assert!(ok, "expected completed summary payload");
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn widget_completed_payload_for_lazy_vector_omits_eager_length_fields() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+
+    // sqrt([..]) currently yields a lazy mapped vector.
+    open_document_uri(&mut client_w, "snaq://graph/lazy-sum.sl", "sqrt([1,4,9])", 1).await;
+
+    let req = serde_json::json!({
+        "jsonrpc":"2.0",
+        "id": 165,
+        "method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-lazy-summary","sourceUri":"snaq://graph/lazy-sum.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut seen = false;
+    for _ in 0..40 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["status"].as_str() == Some("Completed")
+        {
+            let payload = v["params"]["payload"].as_object().cloned().unwrap_or_default();
+            // For lazy vectors, we should not force eager total-count/length computation.
+            assert!(payload.get("totalElements").is_none(), "payload: {:?}", payload);
+            let length = payload
+                .get("resultSummary")
+                .and_then(|s| s.get("length"))
+                .and_then(|n| n.as_u64());
+            assert!(length.is_none(), "payload: {:?}", payload);
+            seen = true;
+            break;
+        }
+    }
+    assert!(seen, "expected Completed widget payload");
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn did_change_source_does_not_push_completed_for_unrelated_sibling_target() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+
+    open_document_uri(&mut client_w, "snaq://graph/src-a.sl", "1", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/tgt-a.sl",
+        "input x: Numeric\nx * 2",
+        1,
+    )
+    .await;
+    open_document_uri(&mut client_w, "snaq://graph/src-b.sl", "10", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/tgt-b.sl",
+        "input y: Numeric\ny * 3",
+        1,
+    )
+    .await;
+
+    let connect_a = serde_json::json!({
+        "jsonrpc":"2.0","id":170,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/src-a.sl","targetUri":"snaq://graph/tgt-a.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_a.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 170).await;
+
+    let connect_b = serde_json::json!({
+        "jsonrpc":"2.0","id":171,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/src-b.sl","targetUri":"snaq://graph/tgt-b.sl","targetInputName":"y"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_b.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 171).await;
+
+    let sub_a = serde_json::json!({
+        "jsonrpc":"2.0","id":172,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-a","sourceUri":"snaq://graph/tgt-a.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&sub_a.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 172).await;
+
+    let sub_b = serde_json::json!({
+        "jsonrpc":"2.0","id":173,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-b","sourceUri":"snaq://graph/tgt-b.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&sub_b.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 173).await;
+
+    // Best-effort drain to clear any initial widget updates before mutating source A.
+    for _ in 0..20 {
+        let body = timeout(Duration::from_millis(200), read_one_lsp_message_async(&mut client_r))
+            .await;
+        if body.is_err() {
+            break;
+        }
+    }
+
+    let did_change = serde_json::json!({
+        "jsonrpc":"2.0","method":"textDocument/didChange",
+        "params":{"textDocument":{"uri":"snaq://graph/src-a.sl","version":2},"contentChanges":[{"text":"2"}]}
+    });
+    client_w
+        .write_all(&lsp_message(&did_change.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut saw_a_after_change = false;
+    let mut saw_b_after_change = false;
+    for _ in 0..30 {
+        let body = timeout(Duration::from_millis(300), read_one_lsp_message_async(&mut client_r))
+            .await;
+        let Ok(Ok(body)) = body else { continue };
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) != Some("snaqlite/graph/widgetDataUpdate") {
+            continue;
+        }
+        if v["params"]["status"].as_str() != Some("Completed") {
+            continue;
+        }
+        let uri = v["params"]["uri"].as_str().unwrap_or_default();
+        if uri == "snaq://graph/tgt-a.sl" {
+            saw_a_after_change = true;
+        } else if uri == "snaq://graph/tgt-b.sl" {
+            saw_b_after_change = true;
+        }
+    }
+
+    assert!(
+        saw_a_after_change,
+        "expected downstream completion for changed branch target"
+    );
+    assert!(
+        !saw_b_after_change,
+        "unrelated sibling target should not receive completed update"
+    );
+
     server_handle.abort();
     let _ = server_handle.await;
 }

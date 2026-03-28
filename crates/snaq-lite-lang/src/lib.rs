@@ -2803,6 +2803,21 @@ mod tests {
     }
 
     #[test]
+    fn run_vector_map_user_function_keeps_lazy_map_node() {
+        let v = run("[1, 2, 3].map(fn (x) => (x + 10))").unwrap();
+        let Value::Vector(vec_val) = v else {
+            panic!("expected vector");
+        };
+        match vec_val.inner {
+            LazyVector::Map { op, .. } => match op {
+                crate::vector::VectorMapOp::UserMap(_) => {}
+                other => panic!("expected UserMap op, got {:?}", other),
+            },
+            other => panic!("expected lazy map node, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn run_vector_map_builtin_variable() {
         assert_eq!(
             run_format("f = sqrt; [1, 4, 9].map(f)").unwrap(),

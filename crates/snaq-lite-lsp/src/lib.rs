@@ -58,6 +58,8 @@ pub type SharedGraphState = Arc<Mutex<graph::GraphState>>;
 /// Shared widget registry (subscribeWidget / unsubscribeWidget).
 pub type SharedWidgetRegistry = Arc<Mutex<WidgetRegistry>>;
 pub type SharedNodeResults = Arc<Mutex<NodeResultRegistry>>;
+type RunCache = std::collections::HashMap<Url, (snaq_lite_lang::Value, salsa::DatabaseImpl)>;
+type SharedRunCache = Arc<Mutex<RunCache>>;
 
 /// Channel to send publish notifications from background consumer to the backend.
 pub type NotificationSender =
@@ -83,6 +85,7 @@ pub struct SnaqLiteBackend {
     pub notification_rx: Arc<Mutex<NotificationReceiver>>,
     pub widget_notification_tx: WidgetNotificationSender,
     pub widget_notification_rx: Arc<Mutex<WidgetNotificationReceiver>>,
+    pub run_cache: SharedRunCache,
 }
 
 #[tower_lsp::async_trait]
@@ -905,10 +908,14 @@ impl SnaqLiteBackend {
             let graph = self.graph_state.lock().await;
             graph.impacted_from_changed_nodes(changed, &docs)
         };
-        let mut shared_cache: std::collections::HashMap<
-            Url,
-            (snaq_lite_lang::Value, salsa::DatabaseImpl),
-        > = std::collections::HashMap::new();
+        let impacted_set: std::collections::HashSet<Url> = impacted.iter().cloned().collect();
+        let mut shared_cache = {
+            let mut cache = self.run_cache.lock().await;
+            for uri in &impacted_set {
+                cache.remove(uri);
+            }
+            cache.clone()
+        };
         for uri in impacted {
             let result = self
                 .run_node_with_graph_inputs_cached(&uri, None, &mut shared_cache)
@@ -929,6 +936,8 @@ impl SnaqLiteBackend {
             self.update_document_subscribers_for_uri(&uri, result, revision)
                 .await;
         }
+        let mut cache = self.run_cache.lock().await;
+        *cache = shared_cache;
     }
 
     /// Send snaqlite/graph/nodeSignatureUpdated for the given URI so the frontend can render ports.
@@ -1522,19 +1531,15 @@ impl SnaqLiteBackend {
         use snaq_lite_lang::map_registry;
         let (result_type, result_summary, display, total_elements) = match value {
             snaq_lite_lang::Value::Vector(v) => {
-                // Keep payload generation non-blocking on WASM for non-materialized vectors.
-                // For those vectors, UI can fetch paged data via fetchResultSlice.
-                #[cfg(target_arch = "wasm32")]
+                // Never force eager draining for summary payloads.
+                // Length is only included when already known without consumption.
                 let length = match &v.inner {
-                    snaq_lite_lang::LazyVector::FromInput(_) => Some(0u64),
                     snaq_lite_lang::LazyVector::FromEvaluated(collected) => {
                         Some(collected.len() as u64)
                     }
                     snaq_lite_lang::LazyVector::FromExprs(defs) => Some(defs.len() as u64),
                     _ => None,
                 };
-                #[cfg(not(target_arch = "wasm32"))]
-                let length = Some(snaq_lite_lang::collect_vector_stream(db, v.inner.clone()).len() as u64);
                 (
                     ResultType::Vector,
                     Some(ResultSummary {
@@ -1764,25 +1769,15 @@ impl SnaqLiteBackend {
                     let (total_count, slice_vec, pending_update): FetchResultSlice =
                         match (&v.inner, path_segments.is_empty()) {
                         (snaq_lite_lang::LazyVector::FromInput(_), true) => {
-                            let collected =
-                                snaq_lite_lang::collect_vector_stream(&db, v.inner.clone());
-                            let len = collected.len() as u64;
-                            let materialized = snaq_lite_lang::Value::Vector(
-                                snaq_lite_lang::VectorValue {
-                                    inner: snaq_lite_lang::LazyVector::FromEvaluated(collected.clone()),
-                                    orientation: v.orientation,
-                                },
+                            // Stream-backed inputs should not be fully materialized on first fetch.
+                            // Compute page window + total count in one streaming pass.
+                            let (total_count, slice_vec) = collect_vector_slice_window(
+                                &db,
+                                v.inner.clone(),
+                                offset,
+                                limit,
                             );
-                            let payload = Self::build_completed_payload(&materialized, &db);
-                            let start = offset.min(collected.len());
-                            let end = (offset + limit).min(collected.len());
-                            let slice_vec: Vec<_> = collected[start..end].to_vec();
-                            let pending = PendingUpdate {
-                                widget_id: params.widget_id.clone(),
-                                materialized,
-                                payload,
-                            };
-                            (len, slice_vec, Some(pending))
+                            (total_count, slice_vec, None)
                         }
                         (snaq_lite_lang::LazyVector::FromEvaluated(collected), _) => {
                             let total_count = collected.len() as u64;
@@ -2170,12 +2165,29 @@ fn feed_value_to_senders(
             }
             #[cfg(target_arch = "wasm32")]
             {
-                // Keep wasm path compatible with existing async push behavior.
-                let collected = snaq_lite_lang::collect_vector_stream(db, v.inner.clone());
+                const FANOUT_CHUNK_SIZE: usize = 128;
                 for mut sender in senders {
-                    let chunk = collected.clone();
+                    let db_for_stream = db.clone();
+                    let inner = v.inner.clone();
                     wasm_bindgen_futures::spawn_local(async move {
-                        let _ = sender.send(chunk).await;
+                        use futures::sink::SinkExt;
+                        use futures::stream::StreamExt;
+
+                        let mut stream = snaq_lite_lang::vector_into_stream(&db_for_stream, inner);
+                        let mut batch: Vec<
+                            Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>,
+                        > = Vec::with_capacity(FANOUT_CHUNK_SIZE);
+                        while let Some(item) = stream.next().await {
+                            batch.push(item);
+                            if batch.len() >= FANOUT_CHUNK_SIZE {
+                                if sender.send(std::mem::take(&mut batch)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        if !batch.is_empty() {
+                            let _ = sender.send(batch).await;
+                        }
                     });
                 }
             }
@@ -2406,6 +2418,7 @@ pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSo
     let graph_state: SharedGraphState = Arc::new(Mutex::new(graph::GraphState::new()));
     let widgets: SharedWidgetRegistry = Arc::new(Mutex::new(WidgetRegistry::new()));
     let node_results: SharedNodeResults = Arc::new(Mutex::new(NodeResultRegistry::new()));
+    let run_cache: SharedRunCache = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let (notification_tx, notification_rx) = futures::channel::mpsc::unbounded();
     let (widget_notification_tx, widget_notification_rx) = futures::channel::mpsc::unbounded();
     let (service, socket) = LspService::build(move |client| SnaqLiteBackend {
@@ -2419,6 +2432,7 @@ pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSo
         notification_rx: Arc::new(Mutex::new(notification_rx)),
         widget_notification_tx,
         widget_notification_rx: Arc::new(Mutex::new(widget_notification_rx)),
+        run_cache: Arc::clone(&run_cache),
     })
     .custom_method("snaqlite/subscribe", SnaqLiteBackend::subscribe)
     .custom_method("snaqlite/subscribeNode", SnaqLiteBackend::subscribe_node)

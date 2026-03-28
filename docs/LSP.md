@@ -80,15 +80,15 @@ Running a node with graph inputs: when the server needs a node’s result (for `
 - **Request `snaqlite/graph/subscribeWidget`** — Params: `widgetId`, `sourceUri`. The server runs the source node with graph inputs (topological run of the subgraph, stream inputs from upstream node outputs). The result is **cached** per widget. The server sends a single **Completed** notification with a summary (no streaming of vector elements). The client can then request slices via `snaqlite/graph/fetchResultSlice` for virtualized list/table views.
 - **Notification `snaqlite/graph/widgetDataUpdate`** — Params: `widgetId`, `status` (`"Running"` | `"Completed"` | `"Cancelled"` | `"Error"`), optional `payload`. For **Completed**, the payload includes:
   - **`display`** (optional) — Formatted value for scalars or when a single value is shown.
-  - **`totalElements`** (optional) — Number of elements (vectors) or keys (maps).
+  - **`totalElements`** (optional) — Number of elements (vectors) or keys (maps) **only when known without draining lazy streams**.
   - **`resultType`** (optional) — `"Scalar"` | `"Vector"` | `"Map"` | `"Undefined"` so the client can show a type-aware summary and open a detail modal.
-  - **`resultSummary`** (optional) — For vectors: `{ length: number }`. For maps: `{ keys?: string[], keyCount?: number }` (keys only if small).
+  - **`resultSummary`** (optional) — For vectors: `{ length?: number }` (length may be omitted for lazy/non-materialized vectors). For maps: `{ keys?: string[], keyCount?: number }` (keys only if small).
 - **Request `snaqlite/graph/unsubscribeWidget`** — Params: `widgetId`. Removes the widget and clears its cached result; sends a final `widgetDataUpdate` with status `Cancelled`.
 - **Request `snaqlite/graph/fetchResultSlice`** — Fetches a paginated slice of the cached result at an optional **path** (for nested vectors/maps).  
   - **Params:** `widgetId` (string), `path` (array of path segments: **0-based** numbers for vector indices, strings for map keys; empty array = root), `offset` (number), `limit` (number).  
   - **Response:** `elements` (array of slice elements), `totalCount` (number), `hasMore` (boolean).  
   - **Slice elements:** Scalars are `{ display: string }`. Nested vectors are `{ type: "vector", path: PathSegment[] }` so the client can request that path with offset/limit. Nested maps are `{ type: "map", path: PathSegment[], keys?: string[], keyCount?: number }`. Map rows are `{ key: string, value: ResultSliceElement }`.  
-  - Path semantics: **0-based** indices for vectors (e.g. `[5]` = 6th element). Map entries are sliced in **registration order**. For replayable lazy vectors, slices are computed with a streaming window (count + window in one pass) instead of full vector materialization. If the widget is not found or the path is invalid, the server returns an error.
+  - Path semantics: **0-based** indices for vectors (e.g. `[5]` = 6th element). Map entries are sliced in **registration order**. For replayable lazy vectors, slices are computed with a streaming window (count + window in one pass) instead of full vector materialization. Stream-backed `FromInput` vectors are also served via streaming window extraction (no eager root materialization). If the widget is not found or the path is invalid, the server returns an error.
 
 Multiple widgets on the same node each get their own run and cached result.
 

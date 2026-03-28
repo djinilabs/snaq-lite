@@ -2,6 +2,14 @@
 
 ## Just completed
 
+- **Close laziness/streaming gaps (runtime + LSP pass):**
+  - `crates/snaq-lite-lang/src/queries.rs`: made `V.map(fn ...)` lazy (`LazyVector::Map` + `VectorMapOp::UserMap`), switched core vector reducers (`sum/mean/min/max/product/variance/stddev/all/any`) to stream-consume paths, and documented unavoidable transpose/outer buffering semantics.
+  - `crates/snaq-lite-lsp/src/lib.rs`: removed eager vector-length draining in `build_completed_payload` (length included only when already known) and moved root `FromInput` `fetchResultSlice` path to streaming window extraction instead of full vector materialization.
+  - Added cross-wave recompute cache reuse in `recompute_and_push` via backend `run_cache` seeding/invalidation for impacted URIs.
+  - Added/updated integration coverage in `crates/snaq-lite-lsp/tests/lsp_integration.rs` for lazy vector widget summary payloads and updated existing vector payload expectations to accept `resultType: "Vector"` when `totalElements` is omitted.
+  - Docs updated: `docs/LSP.md` (optional lazy vector lengths + streaming slice semantics) and `docs/VECTORS.md` (user-facing lazy map/reduction behavior + transpose/outer buffering limits).
+  - Verification green: `cargo test -p snaq-lite-lang --lib`, `cargo test -p snaq-lite-lsp --test lsp_integration`, `pnpm test`, `pnpm run lint`, `pnpm -C apps/frontend test`, `pnpm -C apps/frontend run lint`, `pnpm -C apps/frontend build`, `pnpm run check`.
+
 - **Coverage hardening pass for newly introduced runtime APIs/paths:**
   - Added integration test `subscribe_node_is_graph_aware_while_legacy_subscribe_is_not` to ensure canonical node subscription uses graph inputs while legacy `subscribe` remains root-only/empty-input.
   - Added integration test `export_canvas_document_uses_stable_target_param_id` to assert exported edge payload carries stable `targetParamId` (param-id keyed wiring).

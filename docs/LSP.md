@@ -23,7 +23,7 @@ The server supports subscribing to the **root result** of the current document. 
 | `snaqlite/subscribe` | Request | `{ textDocument: { uri }, range?: Range }` (range optional; root-only in Phase 1) | `{ subscriptionId: string }` or error |
 | `snaqlite/unsubscribe` | Request | `{ subscriptionId: string }` | `null` or error |
 | `snaqlite/publishResult` | Notification (server → client) | `{ subscriptionId, status, data? }` | — |
-| `snaqlite/subscribeNode` | Request | `{ sourceUri }` | `{ subscriptionId: string }` or error |
+| `snaqlite/subscribeNode` | Request | `{ sourceUri }` | `{ subscriptionId: string, resultHandle?: string }` or error |
 | `snaqlite/unsubscribeNode` | Request | `{ subscriptionId: string }` | `null` or error |
 | `snaqlite/publishNodeResult` | Notification (server → client) | Same payload as `snaqlite/publishResult` | — |
 
@@ -84,9 +84,9 @@ Running a node with graph inputs: when the server needs a node’s result (for `
   - **`resultType`** (optional) — `"Scalar"` | `"Vector"` | `"Map"` | `"Undefined"` so the client can show a type-aware summary and open a detail modal.
   - **`resultSummary`** (optional) — For vectors: `{ length?: number }` (length may be omitted for lazy/non-materialized vectors). For maps: `{ keys?: string[], keyCount?: number }` (keys only if small).
 - **Request `snaqlite/graph/unsubscribeWidget`** — Params: `widgetId`. Removes the widget and clears its cached result; sends a final `widgetDataUpdate` with status `Cancelled`.
-- **Request `snaqlite/graph/fetchResultSlice`** — Fetches a paginated slice of the cached result at an optional **path** (for nested vectors/maps).  
-  - **Params:** `widgetId` (string), `path` (array of path segments: **0-based** numbers for vector indices, strings for map keys; empty array = root), `offset` (number), `limit` (number).  
-  - **Response:** `elements` (array of slice elements), `totalCount` (number), `hasMore` (boolean).  
+- **Request `snaqlite/graph/fetchResultSlice`** — Fetches a paginated slice of a result at an optional **path** (for nested vectors/maps).  
+  - **Params:** either `widgetId` (compatibility flow) or `resultHandle` (canonical node flow), `path` (array of path segments: **0-based** numbers for vector indices, strings for map keys; empty array = root), `offset` (number), `limit` (number), optional `cursor` (string).  
+  - **Response:** `elements` (array of slice elements), `totalCount` (number), `hasMore` (boolean), optional `nextCursor` (string).  
   - **Slice elements:** Scalars are `{ display: string }`. Nested vectors are `{ type: "vector", path: PathSegment[] }` so the client can request that path with offset/limit. Nested maps are `{ type: "map", path: PathSegment[], keys?: string[], keyCount?: number }`. Map rows are `{ key: string, value: ResultSliceElement }`.  
   - Path semantics: **0-based** indices for vectors (e.g. `[5]` = 6th element). Map entries are sliced in **registration order**. For replayable lazy vectors, slices are computed with a streaming window (count + window in one pass) instead of full vector materialization. Stream-backed `FromInput` vectors are also served via streaming window extraction (no eager root materialization). If the widget is not found or the path is invalid, the server returns an error.
 
@@ -117,11 +117,20 @@ For URI-namespace based canvas isolation, the server exposes:
   - Recomputes remaining downstream nodes that depended on removed sources.
   - Response: `{ removedDocuments: number }`.
 
-### Canvas isolation (hard binding)
+### Canvas isolation (hard binding + rebind)
 
 - The first used URI binds the LSP instance to a single canvas identity.
 - Later graph/subscription/document operations with a different canvas identity are rejected.
+- Rebinding to a different canvas id is allowed only after full runtime drain (no open documents, active subscriptions/widgets, or active result handles/cursors).
 - For `snaq://` URIs, canvas identity is the URI host (example: `snaq://canvas-a/node_1.sl` -> `canvas-a`).
+
+### Param helper RPCs
+
+Optional helpers for UI ergonomics while keeping source text canonical:
+
+- `snaqlite/graph/renameParam` with `{ uri, paramId, newName }`
+- `snaqlite/graph/addParam` with `{ uri, paramId, name, typeName }`
+- `snaqlite/graph/removeParam` with `{ uri, paramId }`
 
 ### Canonical canvas snapshot
 

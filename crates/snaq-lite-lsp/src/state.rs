@@ -90,6 +90,14 @@ impl LspState {
         self.active_canvas_id.clone()
     }
 
+    pub fn has_documents(&self) -> bool {
+        !self.documents.is_empty()
+    }
+
+    pub fn force_rebind_canvas_uri(&mut self, uri: &Url) {
+        self.active_canvas_id = Some(Self::canvas_id_for_uri(uri));
+    }
+
     /// Update document content and re-parse/resolve/simplify; update diagnostics for this URI.
     pub fn update_document(&mut self, uri: Url, version: i32, text: &str) {
         let entry = self.parse_document(version, text);

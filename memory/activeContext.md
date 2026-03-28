@@ -2,6 +2,13 @@
 
 ## Just completed
 
+- **Node result handle + cursor pagination flow:** Added canonical handle-based transport in `snaq-lite-lsp` so node/widget completed payloads include `resultHandle`, and `snaqlite/graph/fetchResultSlice` accepts either `{ widgetId }` (compat) or `{ resultHandle, cursor }` (canonical) with `nextCursor` continuation.
+- **Result handle lifecycle registry:** Added `crates/snaq-lite-lsp/src/result_handle_registry.rs` to manage URI-scoped result handles and one-time cursor tokens with TTL/eviction, invalidated on recompute, close/reset/import/shutdown.
+- **Deferred connect validation behavior:** `graph/connect` now allows attach when source output type is temporarily unknown and preserves existing hard type mismatch rejection when source type is known incompatible.
+- **Canvas rebind after full drain:** Added rebind path so canvas identity can switch only when runtime state is fully drained (no docs/subscriptions/widgets/result handles).
+- **Param helper RPCs:** Added optional graph helper methods `snaqlite/graph/renameParam`, `addParam`, `removeParam` that mutate source text then run the same reconcile/revalidate/recompute pipeline.
+- **Coverage/docs expansion:** Added new LSP integration tests for handle/cursor flow, deferred connect, canvas rebind, and param helper RPCs; updated `docs/LSP.md` with canonical handle/cursor fetch flow and helper RPC docs.
+
 - **Close laziness/streaming gaps (runtime + LSP pass):**
   - `crates/snaq-lite-lang/src/queries.rs`: made `V.map(fn ...)` lazy (`LazyVector::Map` + `VectorMapOp::UserMap`), switched core vector reducers (`sum/mean/min/max/product/variance/stddev/all/any`) to stream-consume paths, and documented unavoidable transpose/outer buffering semantics.
   - `crates/snaq-lite-lsp/src/lib.rs`: removed eager vector-length draining in `build_completed_payload` (length included only when already known) and moved root `FromInput` `fetchResultSlice` path to streaming window extraction instead of full vector materialization.
@@ -325,3 +332,9 @@
 ## Next steps
 - Optional: add more unit modules (imperial: foot, pound; etc.) or .nbt loader for full Numbat module set.
 - Optional: variance in symbolic form; more built-in constants (φ, c). Variable binding to symbolic (vector binding is implemented).
+
+## Just completed
+- **LSP graph param rename canonicalization:** Verified and fixed a source-generation bug in `graph_rename_param` where `newName` was validated with `.trim()` but written untrimmed. Added integration test `graph_rename_param_trims_new_name_before_writing_source` to reproduce and prevent regression. Fix now writes `trimmed_new_name` in the generated `input <name>@<paramId>: <type>` line. Verification: targeted test passes, full `cargo test -p snaq-lite-lsp` passes, and repo `pnpm run check` passes.
+- **LSP graph add-param duplicate normalization:** During review, found and fixed a related bug in `graph_add_param`: duplicate checks used raw `name`/`paramId` while insertion used trimmed values, so whitespace-padded input could bypass duplicate detection. Added integration test `graph_add_param_rejects_duplicate_name_when_whitespace_padded` (red first, then green). Implementation now normalizes `name`, `paramId`, and `typeName` once and uses normalized values for validation, duplicate checks, and generated source text. Verification: new targeted test passes, existing rename trim test passes, full `cargo test -p snaq-lite-lsp` passes, and repo `pnpm run check` passes.
+- **Canvas rebind coverage + lifecycle fix:** Verified a gap where `canvas_rebind_is_allowed_after_full_drain` previously passed with a weak assertion (`hover` error-free but null result). Strengthened the test to require non-null hover on canvas-b after draining canvas-a, reproduced failure, then fixed `did_open` and `did_change` to call `ensure_canvas_uri_request` (rebind-aware) instead of direct `state.ensure_canvas_uri` checks. Verification: strengthened rebind test now passes; full `cargo test -p snaq-lite-lsp` passes; repo `pnpm run check` passes.
+- **Canvas rebind semantic assertion hardening:** Improved the rebind integration test to assert hover contents include the expected rebound document value (`5` for `2 + 3`), preventing future false positives where a non-null but incorrect hover payload could still pass. Verification: targeted test, full `cargo test -p snaq-lite-lsp`, and `pnpm run check` all pass.

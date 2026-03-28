@@ -54,6 +54,8 @@ pub struct SubscribeNodeParams {
 #[serde(rename_all = "camelCase")]
 pub struct SubscribeNodeResponse {
     pub subscription_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_handle: Option<String>,
 }
 
 /// Params for snaqlite/unsubscribe.
@@ -253,6 +255,30 @@ pub struct UnsubscribeWidgetParams {
     pub widget_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameParamParams {
+    pub uri: String,
+    pub param_id: String,
+    pub new_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddParamParams {
+    pub uri: String,
+    pub param_id: String,
+    pub name: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveParamParams {
+    pub uri: String,
+    pub param_id: String,
+}
+
 // ---- Result summary and fetchResultSlice ----
 
 /// Result type for Completed payload (resultType). Serialized as PascalCase to match frontend (Vector, Map, etc.).
@@ -281,14 +307,19 @@ pub struct ResultSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FetchResultSliceParams {
-    pub widget_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub widget_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_handle: Option<String>,
     /// 0-based path: empty = root; numbers = vector index; strings = map key.
     pub path: Vec<PathSegment>,
     pub offset: u64,
     pub limit: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PathSegment {
     Index(u64),
@@ -302,6 +333,8 @@ pub struct FetchResultSliceResponse {
     pub elements: Vec<serde_json::Value>,
     pub total_count: u64,
     pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// Serialize a single stream element (Result<Option<Value>, RunError>) to JSON for the protocol.

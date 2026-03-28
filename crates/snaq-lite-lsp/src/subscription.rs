@@ -163,6 +163,10 @@ impl SubscriptionRegistry {
             .map(|(id, mut entry)| (id, entry.cancel_tx.take()))
             .collect()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
 }
 
 impl Default for SubscriptionRegistry {

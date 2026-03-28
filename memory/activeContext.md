@@ -1,6 +1,11 @@
 # Active context
 
 ## Just completed
+- **`check` script:** Root `pnpm run check` = typecheck → lint → test → build (full repo). `apps/frontend` `pnpm run check` = same four for the frontend package only.
+- **Typecheck scripts:** `apps/frontend` — `pnpm run typecheck` (`tsc --noEmit`). Root — `pnpm run typecheck` / `typecheck:frontend` delegate to frontend.
+- **Frontend reset:** Removed prior `apps/frontend` app (canvas, LSP worker, Monaco, stores, old E2E). Stack is still Vite + TanStack Start SPA: `__root` + `/` only; blank `<main data-testid="home-page">` with `minHeight: 100vh`. Deps trimmed to react + TanStack router/start. New E2E `e2e/home.spec.ts`. Run `pnpm -C apps/frontend run build` before Playwright if HTML changed (preview serves `dist`). Full repo `pnpm test` / `pnpm run lint` need Rust toolchain in PATH.
+
+## Just completed (before reset)
 - **Unskip "file block wired to computation with Vector input shows stream result (blob cache, no fetch)" E2E test:** [computation-result.spec.ts] Unskipped the test; fixed by awaiting the async __E2E_GRAPH_ADD_EDGE__ inside page.evaluate (hook returns Promise<boolean>; previously the promise was not awaited so the edge could be created after the poll). Retry loop and connectOnClick fallback unchanged. Test passes; pnpm test, pnpm run lint pass.
 - **Unskip "vector result modal closes on overlay click" E2E test:** [computation-result.spec.ts] Unskipped the test; applied same modal-open resilience (retry "View details" click up to 3×, poll for result-detail-modal 10s per attempt); then click result-detail-overlay at (5,5) and assert modal not visible. Test passes; pnpm test, pnpm run lint pass.
 - **Review and improve (LSP init gate):** (1) **Error handling:** computation-box-editor didOpen/didChange chains now use `.catch((e) => console.error(...))` so rejections or throws (e.g. client cleared after init) do not become unhandled. (2) **fetch-result-slice timeout:** Added `LSP_FETCH_RESULT_SLICE_TIMEOUT_MS` (25_000) and `whenLspReadyWithTimeout()` so `fetchResultSlice` rejects with "LSP not ready within Nms" if init never completes instead of hanging. (3) **presentation-block-node:** `void sendDidOpenForPresentation(...).catch((e) => console.error(...))` in useEffect so failed didOpen is logged. pnpm test (414), pnpm run lint pass.

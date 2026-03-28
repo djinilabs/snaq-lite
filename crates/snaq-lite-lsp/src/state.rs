@@ -31,6 +31,7 @@ pub struct LspState {
     /// Map from document URI to parsed/resolved state and diagnostics.
     documents: HashMap<Url, DocumentEntry>,
     unit_registry: UnitRegistry,
+    active_canvas_id: Option<String>,
 }
 
 fn empty_block_def() -> ExprDef {
@@ -56,7 +57,37 @@ impl LspState {
             db: salsa::DatabaseImpl::new(),
             documents: HashMap::new(),
             unit_registry: default_si_registry(),
+            active_canvas_id: None,
         }
+    }
+
+    fn canvas_id_for_uri(uri: &Url) -> String {
+        if uri.scheme() == "snaq" {
+            if let Some(host) = uri.host_str() {
+                return host.to_string();
+            }
+        }
+        uri.scheme().to_string()
+    }
+
+    /// Bind the server to one canvas id on first use, reject mismatches afterwards.
+    pub fn ensure_canvas_uri(&mut self, uri: &Url) -> Result<(), String> {
+        let incoming = Self::canvas_id_for_uri(uri);
+        match &self.active_canvas_id {
+            None => {
+                self.active_canvas_id = Some(incoming);
+                Ok(())
+            }
+            Some(active) if active == &incoming => Ok(()),
+            Some(active) => Err(format!(
+                "canvas mismatch: active '{}' but got '{}'",
+                active, incoming
+            )),
+        }
+    }
+
+    pub fn active_canvas_id(&self) -> Option<String> {
+        self.active_canvas_id.clone()
     }
 
     /// Update document content and re-parse/resolve/simplify; update diagnostics for this URI.
@@ -595,4 +626,21 @@ fn starts_with_ident(s: &str, ident: &str) -> bool {
     }
     let next = s.as_bytes().get(ident.len()).copied();
     !next.is_some_and(is_ident_char)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LspState;
+    use tower_lsp::lsp_types::Url;
+
+    #[test]
+    fn ensure_canvas_uri_binds_first_and_rejects_mismatch() {
+        let mut state = LspState::new();
+        let a = Url::parse("snaq://canvas-a/n1.sl").unwrap();
+        let b = Url::parse("snaq://canvas-a/n2.sl").unwrap();
+        let c = Url::parse("snaq://canvas-b/n3.sl").unwrap();
+        assert!(state.ensure_canvas_uri(&a).is_ok());
+        assert!(state.ensure_canvas_uri(&b).is_ok());
+        assert!(state.ensure_canvas_uri(&c).is_err());
+    }
 }

@@ -115,6 +115,40 @@ impl GraphState {
         });
     }
 
+    /// True when adding `source -> target` would create a cycle in the current graph.
+    pub fn would_create_cycle(
+        &self,
+        source_uri: &Url,
+        target_uri: &Url,
+        documents: &HashSet<Url>,
+    ) -> bool {
+        if source_uri == target_uri {
+            return true;
+        }
+        // If target already reaches source, adding source->target closes the loop.
+        let mut visited: HashSet<Url> = HashSet::new();
+        let mut q: VecDeque<Url> = VecDeque::new();
+        q.push_back(target_uri.clone());
+        visited.insert(target_uri.clone());
+        while let Some(cur) = q.pop_front() {
+            if &cur == source_uri {
+                return true;
+            }
+            for next in self
+                .edges
+                .iter()
+                .filter(|e| e.source_uri == cur)
+                .map(|e| e.target_uri.clone())
+            {
+                if !documents.contains(&next) || !visited.insert(next.clone()) {
+                    continue;
+                }
+                q.push_back(next);
+            }
+        }
+        false
+    }
+
     /// Remove edge for this target and input name.
     pub fn disconnect(&mut self, target_uri: &Url, target_input_name: &str) {
         self.edges
@@ -223,5 +257,23 @@ impl GraphState {
 impl Default for GraphState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn would_create_cycle_rejects_back_edge() {
+        let mut graph = GraphState::new();
+        let a = Url::parse("snaq://canvas/a.sl").unwrap();
+        let b = Url::parse("snaq://canvas/b.sl").unwrap();
+        let c = Url::parse("snaq://canvas/c.sl").unwrap();
+        graph.connect(a.clone(), b.clone(), "p1".to_string());
+        graph.connect(b.clone(), c.clone(), "p2".to_string());
+        let docs: HashSet<_> = [a.clone(), b.clone(), c.clone()].into_iter().collect();
+        assert!(graph.would_create_cycle(&c, &a, &docs));
+        assert!(!graph.would_create_cycle(&a, &c, &docs));
     }
 }

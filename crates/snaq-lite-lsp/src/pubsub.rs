@@ -59,6 +59,12 @@ pub struct PublishResultParams {
     pub subscription_id: String,
     pub status: PublishStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canvas_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
 }
 
@@ -85,6 +91,7 @@ pub struct NodeSignatureUpdatedParams {
 #[serde(rename_all = "camelCase")]
 pub struct NodeInputPort {
     pub name: String,
+    pub param_id: String,
     pub r#type: String,
 }
 
@@ -132,6 +139,12 @@ impl tower_lsp::lsp_types::notification::Notification for WidgetDataUpdateNotifi
 pub struct WidgetDataUpdateParams {
     pub widget_id: String,
     pub status: WidgetDataStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canvas_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<serde_json::Value>,
 }

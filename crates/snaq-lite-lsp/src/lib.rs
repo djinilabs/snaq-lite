@@ -119,6 +119,7 @@ impl LanguageServer for SnaqLiteBackend {
     }
 
     async fn shutdown(&self) -> tower_lsp::jsonrpc::Result<()> {
+        let canvas_id = self.current_canvas_id().await;
         let to_cancel = {
             let mut subs = self.subscriptions.lock().await;
             subs.invalidate_all()
@@ -129,6 +130,9 @@ impl LanguageServer for SnaqLiteBackend {
                 .send_notification::<PublishResultNotification>(PublishResultParams {
                     subscription_id: id,
                     status: PublishStatus::Cancelled,
+                    revision: None,
+                    canvas_id: canvas_id.clone(),
+                    uri: None,
                     data: Some(serde_json::json!({ "reason": "Server shutdown" })),
                 })
                 .await;
@@ -143,6 +147,9 @@ impl LanguageServer for SnaqLiteBackend {
                 .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
                     widget_id,
                     status: WidgetDataStatus::Cancelled,
+                    revision: None,
+                    canvas_id: canvas_id.clone(),
+                    uri: None,
                     payload: Some(serde_json::json!({ "reason": "Server shutdown" })),
                 })
                 .await;
@@ -155,6 +162,16 @@ impl LanguageServer for SnaqLiteBackend {
         let text = params.text_document.text;
         let version = params.text_document.version;
         let mut state = self.state.lock().await;
+        if let Err(msg) = state.ensure_canvas_uri(&uri) {
+            drop(state);
+            self.client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("didOpen rejected due to canvas isolation: {msg}"),
+                )
+                .await;
+            return;
+        }
         state.update_document(uri.clone(), version, &text);
         drop(state);
         self.reconcile_graph_for_uri(&uri).await;
@@ -171,6 +188,16 @@ impl LanguageServer for SnaqLiteBackend {
         let uri = params.text_document.uri.clone();
         let version = params.text_document.version;
         let mut state = self.state.lock().await;
+        if let Err(msg) = state.ensure_canvas_uri(&uri) {
+            drop(state);
+            self.client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("didChange rejected due to canvas isolation: {msg}"),
+                )
+                .await;
+            return;
+        }
         if !params.content_changes.is_empty() {
             state.apply_document_changes(uri.clone(), version, &params.content_changes);
         }
@@ -187,6 +214,19 @@ impl LanguageServer for SnaqLiteBackend {
 
     async fn did_close(&self, params: tower_lsp::lsp_types::DidCloseTextDocumentParams) {
         let uri = params.text_document.uri.clone();
+        {
+            let mut state = self.state.lock().await;
+            if let Err(msg) = state.ensure_canvas_uri(&uri) {
+                drop(state);
+                self.client
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("didClose rejected due to canvas isolation: {msg}"),
+                    )
+                    .await;
+                return;
+            }
+        }
         let changed_roots = self.cleanup_for_closed_uri(&uri).await;
         self.client.publish_diagnostics(uri.clone(), Vec::new(), None).await;
         if !changed_roots.is_empty() {
@@ -375,11 +415,36 @@ impl SnaqLiteBackend {
         )
     }
 
+    fn resolve_target_input_param_id(
+        input_decls: &[snaq_lite_lang::GraphInputDecl],
+        target_input_name: &str,
+    ) -> Option<String> {
+        // Prefer stable id matches first, then fall back to display name.
+        // This avoids ambiguous cases where one input's name equals another input's param_id.
+        input_decls
+            .iter()
+            .find(|decl| decl.param_id == target_input_name)
+            .or_else(|| input_decls.iter().find(|decl| decl.name == target_input_name))
+            .map(|decl| decl.param_id.clone())
+    }
+
+    async fn ensure_canvas_uri_request(&self, uri: &Url) -> tower_lsp::jsonrpc::Result<()> {
+        let mut state = self.state.lock().await;
+        state
+            .ensure_canvas_uri(uri)
+            .map_err(tower_lsp::jsonrpc::Error::invalid_params)
+    }
+
+    async fn current_canvas_id(&self) -> Option<String> {
+        self.state.lock().await.active_canvas_id()
+    }
+
     async fn cancel_subscription_entries(
         &self,
         entries: Vec<(String, Option<futures::channel::oneshot::Sender<()>>)>,
         reason: &str,
     ) {
+        let canvas_id = self.current_canvas_id().await;
         for (subscription_id, maybe_tx) in entries {
             if let Some(tx) = maybe_tx {
                 let _ = tx.send(());
@@ -388,6 +453,9 @@ impl SnaqLiteBackend {
                 .send_notification::<PublishResultNotification>(PublishResultParams {
                     subscription_id,
                     status: PublishStatus::Cancelled,
+                    revision: None,
+                    canvas_id: canvas_id.clone(),
+                    uri: None,
                     data: Some(serde_json::json!({ "reason": reason })),
                 })
                 .await;
@@ -399,6 +467,7 @@ impl SnaqLiteBackend {
         entries: Vec<(String, Option<futures::channel::oneshot::Sender<()>>)>,
         reason: &str,
     ) {
+        let canvas_id = self.current_canvas_id().await;
         for (widget_id, maybe_tx) in entries {
             if let Some(tx) = maybe_tx {
                 let _ = tx.send(());
@@ -407,6 +476,9 @@ impl SnaqLiteBackend {
                 .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
                     widget_id,
                     status: WidgetDataStatus::Cancelled,
+                    revision: None,
+                    canvas_id: canvas_id.clone(),
+                    uri: None,
                     payload: Some(serde_json::json!({ "reason": reason })),
                 })
                 .await;
@@ -493,9 +565,9 @@ impl SnaqLiteBackend {
                         return None;
                     }
                     d.root_def.as_ref().map(|root| {
-                        snaq_lite_lang::extract_input_decls_from_block(root)
+                        snaq_lite_lang::extract_input_decls_from_block_with_ids(root)
                             .into_iter()
-                            .map(|(name, _)| name)
+                            .map(|decl| decl.param_id)
                             .collect()
                     })
                 })
@@ -545,9 +617,10 @@ impl SnaqLiteBackend {
             let target_inputs: std::collections::HashMap<String, String> = target_doc
                 .root_def
                 .as_ref()
-                .map(snaq_lite_lang::extract_input_decls_from_block)
+                .map(snaq_lite_lang::extract_input_decls_from_block_with_ids)
                 .unwrap_or_default()
                 .into_iter()
+                .map(|decl| (decl.param_id, decl.type_name))
                 .collect();
             let source_docs: std::collections::HashMap<Url, (String, bool)> = incoming
                 .iter()
@@ -609,11 +682,13 @@ impl SnaqLiteBackend {
         &self,
         uri: &Url,
         result: Result<(snaq_lite_lang::Value, salsa::DatabaseImpl), snaq_lite_lang::RunError>,
+        revision: Option<u64>,
     ) {
         let widget_ids = { self.widgets.lock().await.ids_for_uri(uri) };
         if widget_ids.is_empty() {
             return;
         }
+        let canvas_id = { self.state.lock().await.active_canvas_id() };
         match result {
             Ok((value, db)) => {
                 let payload = Self::build_completed_payload(&value, &db);
@@ -626,6 +701,9 @@ impl SnaqLiteBackend {
                         .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
                             widget_id,
                             status: WidgetDataStatus::Completed,
+                            revision,
+                            canvas_id: canvas_id.clone(),
+                            uri: Some(uri.to_string()),
                             payload: Some(payload.clone()),
                         })
                         .await;
@@ -638,6 +716,9 @@ impl SnaqLiteBackend {
                         .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
                             widget_id,
                             status: WidgetDataStatus::Error,
+                            revision,
+                            canvas_id: canvas_id.clone(),
+                            uri: Some(uri.to_string()),
                             payload: Some(serde_json::json!({ "message": e.to_string() })),
                         })
                         .await;
@@ -650,8 +731,10 @@ impl SnaqLiteBackend {
         &self,
         uri: &Url,
         result: Result<(snaq_lite_lang::Value, salsa::DatabaseImpl), snaq_lite_lang::RunError>,
+        revision: Option<u64>,
     ) {
         let ids = { self.subscriptions.lock().await.ids_for_uri(uri) };
+        let canvas_id = { self.state.lock().await.active_canvas_id() };
         for subscription_id in ids {
             // Stop previous stream consumer for this subscription before pushing fresh value.
             if let Some(tx) = self.subscriptions.lock().await.take_cancel_tx(&subscription_id) {
@@ -683,6 +766,9 @@ impl SnaqLiteBackend {
                                     PublishResultParams {
                                         subscription_id: subscription_id.clone(),
                                         status: PublishStatus::Completed,
+                                        revision,
+                                        canvas_id: canvas_id.clone(),
+                                        uri: Some(uri.to_string()),
                                         data: Some(serde_json::json!({ "display": display })),
                                     },
                                 )
@@ -700,6 +786,9 @@ impl SnaqLiteBackend {
                             .send_notification::<PublishResultNotification>(PublishResultParams {
                                 subscription_id: subscription_id.clone(),
                                 status: PublishStatus::Completed,
+                                revision,
+                                canvas_id: canvas_id.clone(),
+                                uri: Some(uri.to_string()),
                                 data: Some(serde_json::json!({ "display": display })),
                             })
                             .await;
@@ -714,6 +803,9 @@ impl SnaqLiteBackend {
                         .send_notification::<PublishResultNotification>(PublishResultParams {
                             subscription_id: subscription_id.clone(),
                             status: PublishStatus::Error,
+                            revision,
+                            canvas_id: canvas_id.clone(),
+                            uri: Some(uri.to_string()),
                             data: Some(serde_json::json!({ "message": e.to_string() })),
                         })
                         .await;
@@ -734,22 +826,28 @@ impl SnaqLiteBackend {
             let graph = self.graph_state.lock().await;
             graph.impacted_from_changed_nodes(changed, &docs)
         };
+        let mut shared_cache: std::collections::HashMap<
+            Url,
+            (snaq_lite_lang::Value, salsa::DatabaseImpl),
+        > = std::collections::HashMap::new();
         for uri in impacted {
-            let result = self.run_node_with_graph_inputs(&uri, None).await;
-            {
+            let result = self
+                .run_node_with_graph_inputs_cached(&uri, None, &mut shared_cache)
+                .await;
+            let revision = {
                 let mut store = self.node_results.lock().await;
                 match &result {
                     Ok((value, _)) => {
-                        store.upsert_value(uri.clone(), value.clone());
+                        Some(store.upsert_value(uri.clone(), value.clone()))
                     }
                     Err(e) => {
-                        store.upsert_error(uri.clone(), e.to_string());
+                        Some(store.upsert_error(uri.clone(), e.to_string()))
                     }
                 }
-            }
-            self.update_widget_subscribers_for_uri(&uri, result.clone())
+            };
+            self.update_widget_subscribers_for_uri(&uri, result.clone(), revision)
                 .await;
-            self.update_document_subscribers_for_uri(&uri, result)
+            self.update_document_subscribers_for_uri(&uri, result, revision)
                 .await;
         }
     }
@@ -771,11 +869,12 @@ impl SnaqLiteBackend {
         let inputs: Vec<NodeInputPort> = root_def
             .as_ref()
             .map(|root| {
-                snaq_lite_lang::extract_input_decls_from_block(root)
+                snaq_lite_lang::extract_input_decls_from_block_with_ids(root)
                     .into_iter()
-                    .map(|(name, type_name)| NodeInputPort {
-                        name,
-                        r#type: type_name,
+                    .map(|decl| NodeInputPort {
+                        name: decl.name,
+                        param_id: decl.param_id,
+                        r#type: decl.type_name,
                     })
                     .collect()
             })
@@ -802,6 +901,7 @@ impl SnaqLiteBackend {
     ) -> tower_lsp::jsonrpc::Result<SubscribeResponse> {
         self.drain_notifications().await;
         let uri = params.text_document.uri;
+        self.ensure_canvas_uri_request(&uri).await?;
         let state = self.state.lock().await;
         if !state.has_document(&uri) {
             drop(state);
@@ -812,6 +912,7 @@ impl SnaqLiteBackend {
         let source = state.source(&uri);
         let unit_registry = state.unit_registry().clone();
         let version = state.document_version(&uri);
+        let canvas_id = state.active_canvas_id();
         drop(state);
         let stream_inputs = std::collections::HashMap::new();
         let result = snaq_lite_lang::run_with_stream_inputs(&source, &unit_registry, stream_inputs);
@@ -853,6 +954,9 @@ impl SnaqLiteBackend {
                                     PublishResultParams {
                                         subscription_id: sid,
                                         status: PublishStatus::Completed,
+                                        revision: None,
+                                        canvas_id: canvas_id.clone(),
+                                        uri: Some(uri.to_string()),
                                         data: Some(serde_json::json!({ "display": display })),
                                     },
                                 )
@@ -866,6 +970,9 @@ impl SnaqLiteBackend {
                             .send_notification::<PublishResultNotification>(PublishResultParams {
                                 subscription_id: subscription_id.clone(),
                                 status: PublishStatus::Completed,
+                                revision: None,
+                                canvas_id: canvas_id.clone(),
+                                uri: Some(uri.to_string()),
                                 data: Some(serde_json::json!({ "display": display })),
                             })
                             .await;
@@ -892,41 +999,56 @@ impl SnaqLiteBackend {
             .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid sourceUri"))?;
         let target_uri = Url::parse(&params.target_uri)
             .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid targetUri"))?;
-        let (source_source, target_input_type, unit_registry) = {
+        self.ensure_canvas_uri_request(&source_uri).await?;
+        self.ensure_canvas_uri_request(&target_uri).await?;
+        {
             let state = self.state.lock().await;
-            let source_doc = state.get_document(&source_uri).ok_or_else(|| {
+            let docs = state.document_uris();
+            let graph = self.graph_state.lock().await;
+            if graph.would_create_cycle(&source_uri, &target_uri, &docs) {
+                return Err(tower_lsp::jsonrpc::Error {
+                    code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32002),
+                    message: "graph cycle detected".into(),
+                    data: None,
+                });
+            }
+        }
+        let (target_input_type, target_param_id) = {
+            let state = self.state.lock().await;
+            let _source_doc = state.get_document(&source_uri).ok_or_else(|| {
                 tower_lsp::jsonrpc::Error::invalid_params("source document not open")
             })?;
             let target_doc = state.get_document(&target_uri).ok_or_else(|| {
                 tower_lsp::jsonrpc::Error::invalid_params("target document not open")
             })?;
-            let target_input_type = target_doc
+            let target_inputs = target_doc
                 .root_def
                 .as_ref()
-                .map(snaq_lite_lang::extract_input_decls_from_block)
-                .unwrap_or_default()
-                .into_iter()
-                .find(|(name, _)| name == &params.target_input_name)
-                .map(|(_, t)| t);
-            let target_input_type = target_input_type.ok_or_else(|| {
+                .map(snaq_lite_lang::extract_input_decls_from_block_with_ids)
+                .unwrap_or_default();
+            let target_param_id =
+                Self::resolve_target_input_param_id(&target_inputs, &params.target_input_name);
+            let target_input_type = target_param_id.as_ref().and_then(|resolved_param_id| {
+                target_inputs
+                    .iter()
+                    .find(|decl| decl.param_id == *resolved_param_id)
+                    .map(|decl| decl.type_name.clone())
+            });
+            let (target_param_id, target_input_type) = target_param_id
+                .zip(target_input_type)
+                .ok_or_else(|| {
                 tower_lsp::jsonrpc::Error::invalid_params(format!(
-                    "target has no input named '{}'",
+                    "target has no input named or id '{}'",
                     params.target_input_name
                 ))
             })?;
-            (
-                source_doc.source.clone(),
-                target_input_type,
-                state.unit_registry().clone(),
-            )
+            (target_input_type, target_param_id)
         };
-        let source_output_type = snaq_lite_lang::run_with_stream_inputs(
-            &source_source,
-            &unit_registry,
-            std::collections::HashMap::new(),
-        )
+        let source_output_type = self
+            .run_node_with_graph_inputs(&source_uri, None)
+            .await
         .ok()
-        .and_then(|(value, _)| snaq_lite_lang::value_type_name(&value))
+            .and_then(|(value, _db)| snaq_lite_lang::value_type_name(&value))
         .unwrap_or_else(|| "Unknown".to_string());
         // Target input type "Undefined" means accept any (e.g. presentation boxes).
         if target_input_type != "Undefined" && source_output_type != target_input_type {
@@ -942,7 +1064,7 @@ impl SnaqLiteBackend {
         }
         {
             let mut graph = self.graph_state.lock().await;
-            graph.connect(source_uri, target_uri.clone(), params.target_input_name);
+            graph.connect(source_uri, target_uri.clone(), target_param_id);
         }
         self.recompute_and_push(std::slice::from_ref(&target_uri)).await;
         self.drain_widget_notifications().await;
@@ -957,9 +1079,23 @@ impl SnaqLiteBackend {
     ) -> tower_lsp::jsonrpc::Result<()> {
         let target_uri = Url::parse(&params.target_uri)
             .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid targetUri"))?;
+        self.ensure_canvas_uri_request(&target_uri).await?;
+        let target_param_id = {
+            let state = self.state.lock().await;
+            let target_doc = state.get_document(&target_uri).ok_or_else(|| {
+                tower_lsp::jsonrpc::Error::invalid_params("target document not open")
+            })?;
+            let target_inputs = target_doc
+                .root_def
+                .as_ref()
+                .map(snaq_lite_lang::extract_input_decls_from_block_with_ids)
+                .unwrap_or_default();
+            Self::resolve_target_input_param_id(&target_inputs, &params.target_input_name)
+                .unwrap_or_else(|| params.target_input_name.clone())
+        };
         {
             let mut graph = self.graph_state.lock().await;
-            graph.disconnect(&target_uri, &params.target_input_name);
+            graph.disconnect(&target_uri, &target_param_id);
         }
         self.recompute_and_push(std::slice::from_ref(&target_uri)).await;
         self.drain_widget_notifications().await;
@@ -1181,6 +1317,7 @@ impl SnaqLiteBackend {
         self.drain_widget_notifications().await;
         let source_uri = Url::parse(&params.source_uri)
             .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid sourceUri"))?;
+        self.ensure_canvas_uri_request(&source_uri).await?;
         {
             let state = self.state.lock().await;
             if !state.has_document(&source_uri) {
@@ -1190,6 +1327,7 @@ impl SnaqLiteBackend {
             }
         }
         let external_streams = resolve_external_streams(params.external_streams.as_ref());
+        let canvas_id = self.current_canvas_id().await;
         let result = self
             .run_node_with_graph_inputs(&source_uri, external_streams)
             .await;
@@ -1199,6 +1337,9 @@ impl SnaqLiteBackend {
                     .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
                         widget_id: params.widget_id.clone(),
                         status: WidgetDataStatus::Error,
+                        revision: None,
+                        canvas_id: canvas_id.clone(),
+                        uri: Some(source_uri.to_string()),
                         payload: Some(serde_json::json!({ "message": e.to_string() })),
                     })
                     .await;
@@ -1219,6 +1360,9 @@ impl SnaqLiteBackend {
                     .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
                         widget_id: params.widget_id,
                         status: WidgetDataStatus::Completed,
+                        revision: None,
+                        canvas_id: canvas_id.clone(),
+                        uri: Some(source_uri.to_string()),
                         payload: Some(payload),
                     })
                     .await;
@@ -1232,13 +1376,20 @@ impl SnaqLiteBackend {
         &self,
         params: FetchResultSliceParams,
     ) -> tower_lsp::jsonrpc::Result<FetchResultSliceResponse> {
-        let value = {
+        let (value, source_uri) = {
             let w = self.widgets.lock().await;
-            w.get_cached_value(&params.widget_id)
+            (
+                w.get_cached_value(&params.widget_id),
+                w.source_uri(&params.widget_id),
+            )
         };
         let value = value.ok_or_else(|| {
             tower_lsp::jsonrpc::Error::invalid_params("Widget not found or result not available")
         })?;
+        let source_uri = source_uri.ok_or_else(|| {
+            tower_lsp::jsonrpc::Error::invalid_params("Widget not found or result not available")
+        })?;
+        self.ensure_canvas_uri_request(&source_uri).await?;
         let path_segments: Vec<PathSegment> = params.path;
         let path_json: Vec<serde_json::Value> = path_segments
             .iter()
@@ -1308,30 +1459,15 @@ impl SnaqLiteBackend {
                             (total_count, slice_vec, None)
                         }
                         (_, _) => {
-                            // Single-pass materialization avoids an extra blocking pass just to count.
-                            let collected =
-                                snaq_lite_lang::collect_vector_stream(&db, v.inner.clone());
-                            let total_count = collected.len() as u64;
-                            let start = offset.min(collected.len());
-                            let end = (offset + limit).min(collected.len());
-                            let slice_vec: Vec<_> = collected[start..end].to_vec();
-                            let pending_update = if path_segments.is_empty() {
-                                let materialized = snaq_lite_lang::Value::Vector(
-                                    snaq_lite_lang::VectorValue {
-                                        inner: snaq_lite_lang::LazyVector::FromEvaluated(collected),
-                                        orientation: v.orientation,
-                                    },
-                                );
-                                let payload = Self::build_completed_payload(&materialized, &db);
-                                Some(PendingUpdate {
-                                    widget_id: params.widget_id.clone(),
-                                    materialized,
-                                    payload,
-                                })
-                            } else {
-                                None
-                            };
-                            (total_count, slice_vec, pending_update)
+                            // Stream once to compute both total count and requested window without
+                            // full materialization for replayable lazy vectors.
+                            let (total_count, slice_vec) = collect_vector_slice_window(
+                                &db,
+                                v.inner.clone(),
+                                offset,
+                                limit,
+                            );
+                            (total_count, slice_vec, None)
                         }
                     };
 
@@ -1386,11 +1522,15 @@ impl SnaqLiteBackend {
             let mut w = self.widgets.lock().await;
             w.update_cached_value(&pending.widget_id, pending.materialized);
             drop(w);
+            let canvas_id = self.current_canvas_id().await;
             let _ = self
                 .client
                 .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
                     widget_id: pending.widget_id,
                     status: WidgetDataStatus::Completed,
+                    revision: None,
+                    canvas_id,
+                    uri: Some(source_uri.to_string()),
                     payload: Some(pending.payload),
                 })
                 .await;
@@ -1416,10 +1556,14 @@ impl SnaqLiteBackend {
                 let _ = cancel_tx.send(());
             }
             drop(w);
+            let canvas_id = self.current_canvas_id().await;
             self.client
                 .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
                     widget_id: params.widget_id,
                     status: WidgetDataStatus::Cancelled,
+                    revision: None,
+                    canvas_id,
+                    uri: None,
                     payload: Some(serde_json::json!({ "reason": "Unsubscribed" })),
                 })
                 .await;
@@ -1435,7 +1579,21 @@ impl SnaqLiteBackend {
         sink_uri: &Url,
         external_streams: Option<std::collections::HashMap<String, snaq_lite_lang::StreamHandleId>>,
     ) -> Result<(snaq_lite_lang::Value, salsa::DatabaseImpl), snaq_lite_lang::RunError> {
-        let (order, sources, unit_registry, incoming_map) = {
+        self.run_node_with_graph_inputs_cached(
+            sink_uri,
+            external_streams,
+            &mut std::collections::HashMap::new(),
+        )
+        .await
+    }
+
+    async fn run_node_with_graph_inputs_cached(
+        &self,
+        sink_uri: &Url,
+        external_streams: Option<std::collections::HashMap<String, snaq_lite_lang::StreamHandleId>>,
+        shared_cache: &mut std::collections::HashMap<Url, (snaq_lite_lang::Value, salsa::DatabaseImpl)>,
+    ) -> Result<(snaq_lite_lang::Value, salsa::DatabaseImpl), snaq_lite_lang::RunError> {
+        let (order, sources, unit_registry, incoming_map, input_name_by_param_id) = {
             let state = self.state.lock().await;
             let graph = self.graph_state.lock().await;
             let docs = state.document_uris();
@@ -1455,15 +1613,40 @@ impl SnaqLiteBackend {
                 .iter()
                 .map(|u| (u.clone(), graph.incoming(u)))
                 .collect();
-            (order, sources, state.unit_registry().clone(), incoming_map)
+            let input_name_by_param_id: std::collections::HashMap<
+                Url,
+                std::collections::HashMap<String, String>,
+            > = order
+                .iter()
+                .map(|u| {
+                    let map = state
+                        .get_document(u)
+                        .and_then(|d| d.root_def.as_ref())
+                        .map(snaq_lite_lang::extract_input_decls_from_block_with_ids)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|decl| (decl.param_id, decl.name))
+                        .collect();
+                    (u.clone(), map)
+                })
+                .collect();
+            (
+                order,
+                sources,
+                state.unit_registry().clone(),
+                incoming_map,
+                input_name_by_param_id,
+            )
         };
         run_node_with_graph_inputs_impl(
             &order,
             &sources,
             &unit_registry,
             &incoming_map,
+            &input_name_by_param_id,
             sink_uri,
             external_streams.as_ref(),
+            Some(shared_cache),
         )
     }
 }
@@ -1491,13 +1674,16 @@ fn resolve_external_streams(
 /// Shared implementation of graph run: one handle per edge, feed upstream value to each.
 /// When `external_streams` is `Some`, it is used only for the sink node to prefill stream_inputs
 /// (e.g. file-block–fed inputs); graph edges then fill any remaining inputs.
+#[allow(clippy::too_many_arguments)]
 fn run_node_with_graph_inputs_impl(
     order: &[Url],
     sources: &[(Url, String)],
     unit_registry: &snaq_lite_lang::UnitRegistry,
     incoming_map: &std::collections::HashMap<Url, Vec<(String, Url)>>,
+    input_name_by_param_id: &std::collections::HashMap<Url, std::collections::HashMap<String, String>>,
     sink_uri: &Url,
     external_streams: Option<&std::collections::HashMap<String, snaq_lite_lang::StreamHandleId>>,
+    mut shared_cache: Option<&mut std::collections::HashMap<Url, (snaq_lite_lang::Value, salsa::DatabaseImpl)>>,
 ) -> Result<(snaq_lite_lang::Value, salsa::DatabaseImpl), snaq_lite_lang::RunError> {
     let mut output_values: std::collections::HashMap<
         Url,
@@ -1506,8 +1692,21 @@ fn run_node_with_graph_inputs_impl(
     let mut last_value = None;
     let mut last_db = None;
     for (uri, source_entry) in order.iter().zip(sources.iter()) {
+        if let Some(cache) = shared_cache.as_deref_mut() {
+            if let Some((value, db)) = cache.get(uri).cloned() {
+                if uri == sink_uri {
+                    last_value = Some(value.clone());
+                    last_db = Some(db.clone());
+                }
+                if uri != sink_uri {
+                    output_values.insert(uri.clone(), (value, db));
+                }
+                continue;
+            }
+        }
         let source = &source_entry.1;
         let incoming = incoming_map.get(uri).map(|i| i.as_slice()).unwrap_or(&[]);
+        let param_name_lookup = input_name_by_param_id.get(uri);
         let is_sink = uri == sink_uri;
         let mut stream_inputs: std::collections::HashMap<String, snaq_lite_lang::StreamHandleId> =
             if is_sink {
@@ -1519,8 +1718,12 @@ fn run_node_with_graph_inputs_impl(
             Url,
             Vec<snaq_lite_lang::StreamChunkSender>,
         > = std::collections::HashMap::new();
-        for (name, source_uri) in incoming {
-            if stream_inputs.contains_key(name) {
+        for (target_param_id, source_uri) in incoming {
+            let name = param_name_lookup
+                .and_then(|m| m.get(target_param_id))
+                .cloned()
+                .unwrap_or_else(|| target_param_id.clone());
+            if stream_inputs.contains_key(&name) {
                 continue;
             }
             if !output_values.contains_key(source_uri) {
@@ -1541,6 +1744,9 @@ fn run_node_with_graph_inputs_impl(
         }
         let (value, db) =
             snaq_lite_lang::run_with_stream_inputs(source, unit_registry, stream_inputs)?;
+        if let Some(cache) = shared_cache.as_deref_mut() {
+            cache.insert(uri.clone(), (value.clone(), db.clone()));
+        }
         if uri == sink_uri {
             last_value = Some(value.clone());
             last_db = Some(db.clone());
@@ -1562,6 +1768,33 @@ fn run_node_with_graph_inputs_impl(
     Ok((value, db))
 }
 
+fn collect_vector_slice_window(
+    db: &salsa::DatabaseImpl,
+    inner: snaq_lite_lang::LazyVector,
+    offset: usize,
+    limit: usize,
+) -> (
+    u64,
+    Vec<Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>>,
+) {
+    use futures::stream::StreamExt;
+    let mut stream = snaq_lite_lang::vector_into_stream(db, inner);
+    futures::executor::block_on(async move {
+        let mut total = 0u64;
+        let mut out: Vec<Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>> =
+            Vec::with_capacity(limit);
+        let end = offset.saturating_add(limit);
+        while let Some(item) = stream.next().await {
+            let idx = total as usize;
+            if idx >= offset && idx < end {
+                out.push(item);
+            }
+            total += 1;
+        }
+        (total, out)
+    })
+}
+
 /// Feed one upstream value to multiple Chunk senders (one handle per edge when one source feeds multiple inputs).
 /// Uses bounded send (block_on on native, spawn_local on WASM) for back-pressure.
 fn feed_value_to_senders(
@@ -1570,17 +1803,43 @@ fn feed_value_to_senders(
     senders: Vec<snaq_lite_lang::StreamChunkSender>,
 ) {
     use futures::sink::SinkExt;
+    use futures::stream::StreamExt;
 
     match value {
         snaq_lite_lang::Value::Vector(v) => {
-            let collected = snaq_lite_lang::collect_vector_stream(db, v.inner.clone());
-            for mut sender in senders {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let _ = futures::executor::block_on(sender.send(collected.clone()));
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                const FANOUT_CHUNK_SIZE: usize = 128;
+                let mut senders = senders;
+                let mut stream = snaq_lite_lang::vector_into_stream(db, v.inner.clone());
+                let mut batch: Vec<Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>> =
+                    Vec::with_capacity(FANOUT_CHUNK_SIZE);
+                loop {
+                    let next = futures::executor::block_on(stream.next());
+                    match next {
+                        Some(item) => {
+                            batch.push(item);
+                            if batch.len() >= FANOUT_CHUNK_SIZE {
+                                for sender in &mut senders {
+                                    let _ = futures::executor::block_on(sender.send(batch.clone()));
+                                }
+                                batch.clear();
+                            }
+                        }
+                        None => break,
+                    }
                 }
-                #[cfg(target_arch = "wasm32")]
-                {
+                if !batch.is_empty() {
+                    for sender in &mut senders {
+                        let _ = futures::executor::block_on(sender.send(batch.clone()));
+                    }
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                // Keep wasm path compatible with existing async push behavior.
+                let collected = snaq_lite_lang::collect_vector_stream(db, v.inner.clone());
+                for mut sender in senders {
                     let chunk = collected.clone();
                     wasm_bindgen_futures::spawn_local(async move {
                         let _ = sender.send(chunk).await;
@@ -1649,6 +1908,9 @@ fn run_stream_consumer(
                                     PublishResultParams {
                                         subscription_id: subscription_id.clone(),
                                         status: PublishStatus::Running,
+                                        revision: None,
+                                        canvas_id: None,
+                                        uri: None,
                                         data: Some(data),
                                     },
                                 ));
@@ -1672,6 +1934,9 @@ fn run_stream_consumer(
                 PublishResultParams {
                     subscription_id: subscription_id.clone(),
                     status: PublishStatus::Running,
+                    revision: None,
+                    canvas_id: None,
+                    uri: None,
                     data: Some(serde_json::json!({
                         "elements": batch,
                         "offset": offset,
@@ -1686,6 +1951,9 @@ fn run_stream_consumer(
             PublishResultParams {
                 subscription_id: sid,
                 status: PublishStatus::Completed,
+                revision: None,
+                canvas_id: None,
+                uri: None,
                 data: Some(serde_json::json!({ "totalElements": total })),
             },
         ));
@@ -1738,6 +2006,9 @@ fn run_stream_consumer_for_widget(
                                 let _ = widget_tx.unbounded_send(WidgetDataUpdateParams {
                                     widget_id: widget_id.clone(),
                                     status: WidgetDataStatus::Running,
+                                    revision: None,
+                                    canvas_id: None,
+                                    uri: None,
                                     payload: Some(serde_json::json!({
                                         "elements": batch.clone(),
                                         "offset": offset,
@@ -1759,6 +2030,9 @@ fn run_stream_consumer_for_widget(
             let _ = widget_tx.unbounded_send(WidgetDataUpdateParams {
                 widget_id: widget_id.clone(),
                 status: WidgetDataStatus::Running,
+                revision: None,
+                canvas_id: None,
+                uri: None,
                 payload: Some(serde_json::json!({
                     "elements": batch,
                     "offset": offset,
@@ -1776,6 +2050,9 @@ fn run_stream_consumer_for_widget(
         let _ = widget_tx.unbounded_send(WidgetDataUpdateParams {
             widget_id,
             status: WidgetDataStatus::Completed,
+            revision: None,
+            canvas_id: None,
+            uri: None,
             payload: Some(completed_payload),
         });
     };
@@ -1990,13 +2267,16 @@ mod tests {
         let sources: &[(Url, String)] = &[];
         let unit_registry = snaq_lite_lang::default_si_registry();
         let incoming_map = std::collections::HashMap::new();
+        let input_name_by_param_id = std::collections::HashMap::new();
         let sink_uri = Url::parse("snaq://graph/sink.sl").unwrap();
         let result = run_node_with_graph_inputs_impl(
             order,
             sources,
             &unit_registry,
             &incoming_map,
+            &input_name_by_param_id,
             &sink_uri,
+            None,
             None,
         );
         match result {
@@ -2235,6 +2515,47 @@ mod tests {
     }
 
     #[test]
+    fn resolve_target_input_param_id_matches_name_or_param_id() {
+        let decls = vec![snaq_lite_lang::GraphInputDecl {
+            name: "revenue".to_string(),
+            param_id: "p1".to_string(),
+            type_name: "Vector".to_string(),
+        }];
+        assert_eq!(
+            SnaqLiteBackend::resolve_target_input_param_id(&decls, "revenue"),
+            Some("p1".to_string())
+        );
+        assert_eq!(
+            SnaqLiteBackend::resolve_target_input_param_id(&decls, "p1"),
+            Some("p1".to_string())
+        );
+        assert_eq!(
+            SnaqLiteBackend::resolve_target_input_param_id(&decls, "missing"),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_target_input_param_id_prefers_param_id_on_collision() {
+        let decls = vec![
+            snaq_lite_lang::GraphInputDecl {
+                name: "a".to_string(),
+                param_id: "x".to_string(),
+                type_name: "Vector".to_string(),
+            },
+            snaq_lite_lang::GraphInputDecl {
+                name: "x".to_string(),
+                param_id: "y".to_string(),
+                type_name: "Vector".to_string(),
+            },
+        ];
+        assert_eq!(
+            SnaqLiteBackend::resolve_target_input_param_id(&decls, "x"),
+            Some("x".to_string())
+        );
+    }
+
+    #[test]
     fn graph_targets_from_source() {
         let mut graph = graph::GraphState::new();
         let a = Url::parse("snaq://graph/a.sl").unwrap();
@@ -2447,6 +2768,9 @@ mod tests {
         let params = WidgetDataUpdateParams {
             widget_id: "w1".to_string(),
             status: WidgetDataStatus::Cancelled,
+            revision: None,
+            canvas_id: None,
+            uri: None,
             payload: None,
         };
         let json = serde_json::to_string(&params).unwrap();
@@ -2463,6 +2787,9 @@ mod tests {
         let params = PublishResultParams {
             subscription_id: "sub-1".to_string(),
             status: PublishStatus::Completed,
+            revision: None,
+            canvas_id: None,
+            uri: None,
             data: Some(serde_json::json!({ "totalElements": 5 })),
         };
         let json = serde_json::to_string(&params).unwrap();

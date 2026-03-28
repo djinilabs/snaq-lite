@@ -87,6 +87,11 @@ impl WidgetRegistry {
         self.by_id.get(widget_id).and_then(|e| e.cached_value.clone())
     }
 
+    /// Source URI for this widget, if registered.
+    pub fn source_uri(&self, widget_id: &str) -> Option<Url> {
+        self.by_id.get(widget_id).map(|e| e.source_uri.clone())
+    }
+
     /// Replace the cached value for an existing widget (e.g. after materializing a stream). No-op if widget not found.
     pub fn update_cached_value(&mut self, widget_id: &str, value: snaq_lite_lang::Value) {
         if let Some(entry) = self.by_id.get_mut(widget_id) {

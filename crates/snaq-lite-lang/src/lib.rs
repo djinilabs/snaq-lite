@@ -52,7 +52,10 @@ pub use map_registry::{
 };
 pub use stream_variance::{decimal_string_to_quantity, StreamVarianceMode};
 pub use csv_stream_parse::{csv_delimiter_from_line, parse_csv_line_to_record, strip_bom};
-pub use graph::{extract_input_decls_from_block, value_type_name};
+pub use graph::{
+    extract_input_decls_from_block, extract_input_decls_from_block_with_ids, value_type_name,
+    GraphInputDecl,
+};
 
 /// Parse and evaluate the expression, returning a Value (symbolic by default, e.g. "6 + π").
 ///
@@ -975,6 +978,30 @@ mod tests {
         // [1.0, 2.0]' < [0.0, 4.0] => 3 < 4 => true (crisp: decimal literals => low variance)
         let v = run_with_registry("[1.0, 2.0]' < [0.0, 4.0]", &default_si_registry()).unwrap();
         assert!(matches!(v, Value::FuzzyBool(FuzzyBool::True)), "3 < 4 => true");
+    }
+
+    #[test]
+    fn run_row_column_sub_length_mismatch_errors() {
+        let e = run("[1, 2, 3]' - [1, 2]").unwrap_err();
+        assert!(matches!(
+            e.kind,
+            RunErrorKind::VectorLengthMismatch {
+                left_len: 3,
+                right_len: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn run_row_column_cmp_length_mismatch_errors() {
+        let e = run("[1, 2, 3]' > [1, 2]").unwrap_err();
+        assert!(matches!(
+            e.kind,
+            RunErrorKind::VectorLengthMismatch {
+                left_len: 3,
+                right_len: 2
+            }
+        ));
     }
 
     #[test]
@@ -2765,6 +2792,16 @@ mod tests {
     }
 
     #[test]
+    fn run_vector_map_builtin_keeps_lazy_map_node() {
+        let v = run("[1, 4, 9].map(sqrt)").unwrap();
+        let Value::Vector(vec_val) = v else { panic!("expected vector") };
+        match vec_val.inner {
+            LazyVector::Map { .. } => {}
+            other => panic!("expected lazy map node, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn run_vector_map_builtin_variable() {
         assert_eq!(
             run_format("f = sqrt; [1, 4, 9].map(f)").unwrap(),
@@ -3309,11 +3346,31 @@ mod tests {
         };
         assert_eq!(block.len(), 1);
         match &block[0].value {
-            SpannedExprDefKind::InputDecl(name, type_name) => {
+            SpannedExprDefKind::InputDecl(name, param_id, type_name) => {
                 assert_eq!(name, "revenue");
+                assert_eq!(param_id, "revenue");
                 assert_eq!(type_name, "ProbabilisticTensor");
             }
             _ => panic!("expected InputDecl, got {:?}", block[0].value),
+        }
+    }
+
+    #[test]
+    fn parse_input_decl_with_param_id() {
+        use crate::ir::SpannedExprDefKind;
+
+        let root = parse("input revenue@p1: ProbabilisticTensor").unwrap();
+        let block = match &root.value {
+            SpannedExprDefKind::Block(ref items) => items,
+            _ => panic!("expected Block"),
+        };
+        match &block[0].value {
+            SpannedExprDefKind::InputDecl(name, param_id, type_name) => {
+                assert_eq!(name, "revenue");
+                assert_eq!(param_id, "p1");
+                assert_eq!(type_name, "ProbabilisticTensor");
+            }
+            _ => panic!("expected InputDecl with param id"),
         }
     }
 
@@ -3329,6 +3386,20 @@ mod tests {
         assert_eq!(inputs[0], ("a".to_string(), "Vector".to_string()));
         assert_eq!(inputs[1], ("b".to_string(), "Numeric".to_string()));
         assert_eq!(run_with_registry("input a: Vector\n1 + 2", &default_si_registry()).unwrap(), run("1 + 2").unwrap());
+    }
+
+    #[test]
+    fn extract_input_decls_with_ids_preserves_param_id() {
+        use crate::graph::extract_input_decls_from_block_with_ids;
+
+        let root = parse("input x@p1: Vector\nx").unwrap();
+        let resolved = resolve::resolve(root, &default_si_registry()).unwrap();
+        let def = resolved.to_expr_def();
+        let inputs = extract_input_decls_from_block_with_ids(&def);
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].name, "x");
+        assert_eq!(inputs[0].param_id, "p1");
+        assert_eq!(inputs[0].type_name, "Vector");
     }
 
     #[test]

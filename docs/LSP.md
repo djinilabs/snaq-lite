@@ -55,14 +55,14 @@ The server supports a **visual computation graph** (DAG): each **Computation Box
 - **Input declarations** — At the start of a block, nodes can declare typed inputs, e.g. `input revenue: ProbabilisticTensor` and `input count: Vector`. These are syntactic only (no runtime type checking in the language); the same names are used as `$name` for stream inputs.
 - **Notification `snaqlite/graph/nodeSignatureUpdated`** — After each `didOpen` / `didChange` for a URI, the server sends this notification with:
   - `uri` (string)
-  - `inputs`: array of `{ name, type }` (declared input ports)
+  - `inputs`: array of `{ name, paramId, type }` (declared input ports; `paramId` is stable across rename)
   - `outputType`: optional string (e.g. `"Vector"`, `"Numeric"`) inferred from a run with empty stream inputs, or `null` if not available.
 
 The frontend can use this to draw input/output anchors on the canvas.
 
 ### Graph wiring and type safety
 
-- **Request `snaqlite/graph/connect`** — Params: `sourceUri`, `targetUri`, `targetInputName`. The server resolves both URIs to open documents, checks that the target declares an input with that name, infers the source’s output type (from a run with empty inputs), and verifies type compatibility (exact type name match). On success it adds or replaces the edge (at most one source per target input). On type mismatch it returns a JSON-RPC error (code `-32001`, message `"Type mismatch"`).
+- **Request `snaqlite/graph/connect`** — Params: `sourceUri`, `targetUri`, `targetInputName`. `targetInputName` can be either display name or stable `paramId`. The server resolves both URIs to open documents, rejects cycle-creating connects, infers source output with graph-aware execution, and verifies type compatibility (exact type name match; target `Undefined` accepts any). On success it adds or replaces the edge (at most one source per target input/paramId). On type mismatch it returns JSON-RPC error `-32001` (`"Type mismatch"`). On cycle it returns server error `-32002`.
 - **Request `snaqlite/graph/disconnect`** — Params: `targetUri`, `targetInputName`. Removes the edge for that target and input. Widgets subscribed to the target node are invalidated (see reactive invalidation).
 
 Running a node with graph inputs: when the server needs a node’s result (for `nodeSignatureUpdated` output type or for `subscribeWidget`), it topologically sorts the subgraph that includes that node, runs each ancestor node in order, creates stream handles for vector outputs so downstream nodes can read them, then runs the target node with `stream_inputs` built from the graph edges. On WASM only single-node runs with empty inputs are used.
@@ -80,9 +80,14 @@ Running a node with graph inputs: when the server needs a node’s result (for `
   - **Params:** `widgetId` (string), `path` (array of path segments: **0-based** numbers for vector indices, strings for map keys; empty array = root), `offset` (number), `limit` (number).  
   - **Response:** `elements` (array of slice elements), `totalCount` (number), `hasMore` (boolean).  
   - **Slice elements:** Scalars are `{ display: string }`. Nested vectors are `{ type: "vector", path: PathSegment[] }` so the client can request that path with offset/limit. Nested maps are `{ type: "map", path: PathSegment[], keys?: string[], keyCount?: number }`. Map rows are `{ key: string, value: ResultSliceElement }`.  
-  - Path semantics: **0-based** indices for vectors (e.g. `[5]` = 6th element). Map entries are sliced in **registration order**. If the widget is not found or the path is invalid, the server returns an error.
+  - Path semantics: **0-based** indices for vectors (e.g. `[5]` = 6th element). Map entries are sliced in **registration order**. For replayable lazy vectors, slices are computed with a streaming window (count + window in one pass) instead of full vector materialization. If the widget is not found or the path is invalid, the server returns an error.
 
 Multiple widgets on the same node each get their own run and cached result.
+
+Notifications can include metadata fields:
+- `revision` (monotonic per-node recompute revision),
+- `canvasId` (active canvas identity),
+- `uri` (document/node URI the update belongs to).
 
 ### Reactive updates and lifecycle
 
@@ -102,6 +107,12 @@ For URI-namespace based canvas isolation, the server exposes:
   - Cancels matching subscriptions/widgets (`Cancelled`, reason `"Namespace reset"`).
   - Recomputes remaining downstream nodes that depended on removed sources.
   - Response: `{ removedDocuments: number }`.
+
+### Canvas isolation (hard binding)
+
+- The first used URI binds the LSP instance to a single canvas identity.
+- Later graph/subscription/document operations with a different canvas identity are rejected.
+- For `snaq://` URIs, canvas identity is the URI host (example: `snaq://canvas-a/node_1.sl` -> `canvas-a`).
 
 ## Native (stdio)
 

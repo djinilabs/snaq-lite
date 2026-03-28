@@ -694,9 +694,9 @@ pub fn vector_into_stream<'db>(
                 db: Some(db),
             })
         }
-        LazyVector::FromExprs(_) | LazyVector::Transform { .. } => {
-            VectorStream::Empty(EmptyVectorStream)
-        }
+        LazyVector::FromExprs(_) => VectorStream::OneError(OneErrorStream {
+            error: Some(RunError::new(RunErrorKind::UnsupportedVectorOperation)),
+        }),
         LazyVector::Transpose { source } => {
             let inner = vector_into_stream(db, *source);
             VectorStream::Transposed(TransposedVectorStream::new(db, inner))
@@ -747,6 +747,43 @@ pub fn collect_vector_stream(
     use futures::stream::StreamExt;
     let stream = vector_into_stream(db, v);
     futures::executor::block_on(async move { stream.collect().await })
+}
+
+fn count_vector_stream(db: &dyn salsa::Database, v: LazyVector) -> usize {
+    use futures::stream::StreamExt;
+    let mut stream = vector_into_stream(db, v);
+    futures::executor::block_on(async move {
+        let mut count = 0usize;
+        while stream.next().await.is_some() {
+            count += 1;
+        }
+        count
+    })
+}
+
+fn vector_index_stream(
+    db: &dyn salsa::Database,
+    v: LazyVector,
+    index: usize,
+) -> Result<Option<Value>, RunErrorKind> {
+    use futures::stream::StreamExt;
+    let mut stream = vector_into_stream(db, v);
+    let mut seen = 0usize;
+    futures::executor::block_on(async move {
+        while let Some(item) = stream.next().await {
+            if seen == index {
+                return match item {
+                    Ok(opt) => Ok(opt),
+                    Err(e) => Err(e.kind),
+                };
+            }
+            seen += 1;
+        }
+        Err(RunErrorKind::IndexOutOfBounds {
+            index,
+            length: seen,
+        })
+    })
 }
 
 /// Consume a stream input handle once and return its value (single element → that value; multiple → Vector).
@@ -826,7 +863,9 @@ fn build_expression(db: &dyn salsa::Database, def: ExprDef, spanned: Option<Span
         ExprDef::LitSymbol(name) => return Expression::new(db, ExprData::LitSymbol(name), span),
         ExprDef::LitDate(gd) => return Expression::new(db, ExprData::LitDate(gd.clone()), span),
         ExprDef::ExternalStream(name) => return Expression::new(db, ExprData::ExternalStream(name), span),
-        ExprDef::InputDecl(name, type_name) => return Expression::new(db, ExprData::InputDecl(name, type_name), span),
+        ExprDef::InputDecl(name, param_id, type_name) => {
+            return Expression::new(db, ExprData::InputDecl(name, param_id, type_name), span)
+        }
         ExprDef::LitTemporal(_) => {
             panic!("unresolved LitTemporal: resolve() must convert to LitDate before building the graph")
         }
@@ -1265,6 +1304,7 @@ pub fn value<'db>(
 
 /// Inner evaluator: same logic as value() but takes registry and recurses without with_registry,
 /// so stack depth is one frame per expression level instead of two (value + with_registry).
+#[allow(clippy::cognitive_complexity)]
 fn value_inner<'db>(
     db: &'db dyn salsa::Database,
     scope: Scope<'db>,
@@ -1300,7 +1340,7 @@ fn value_inner<'db>(
                 .ok_or_else(|| run_err_with_span(db, expr, RunErrorKind::UnboundStreamInput(name.clone())))?;
             Ok(Value::Vector(VectorValue::column(LazyVector::FromInput(handle))))
         }
-        ExprData::InputDecl(_, _) => {
+        ExprData::InputDecl(_, _, _) => {
             // Metadata only; not evaluated standalone. Block iteration skips these.
             Ok(Value::Undefined)
         }
@@ -1455,8 +1495,7 @@ fn value_inner<'db>(
                     let VectorValue { inner, .. } = v.clone();
                     match name.as_str() {
                         "length" => {
-                            let collected = collect_vector_stream(db, inner);
-                            let len = collected.len();
+                            let len = count_vector_stream(db, inner);
                             Ok(Value::Numeric(Quantity::from_exact_scalar(len as f64)))
                         }
                         _ => Err(run_err_with_span(db, expr, RunErrorKind::UnknownProperty(name.clone()))),
@@ -1522,22 +1561,41 @@ fn value_inner<'db>(
                     }
                     let (_, fn_expr) = &args[0];
                     let fn_val = value_inner(db, scope, *fn_expr, registry)?;
-                    let collected = collect_vector_stream(db, inner);
-                    let results: Vec<Result<Option<Value>, RunError>> = match &fn_val {
+                    match &fn_val {
                         Value::Function(uf) => {
-                            // Eager evaluation: we're inside a Salsa query, so we can call value() for each element.
-                            collected
+                            if uf.params.len() != 1 {
+                                return Err(run_err_with_span(
+                                    db,
+                                    expr,
+                                    RunErrorKind::UnknownFunction(format!(
+                                        "map requires a function of one parameter (got {} parameters)",
+                                        uf.params.len()
+                                    )),
+                                ));
+                            }
+                            // Keep user-function mapping eager because user-call evaluation requires
+                            // tracked expression creation within a query context.
+                            let collected = collect_vector_stream(db, inner);
+                            let results: Vec<Result<Option<Value>, RunError>> = collected
                                 .into_iter()
                                 .map(|r| {
                                     r.and_then(|opt| {
                                         opt.map(|elem| {
-                                            apply_user_map_element(db, uf, elem, registry)
-                                                .map(Some)
+                                            apply_user_map_element(db, uf, elem, registry).map(Some)
                                         })
                                         .unwrap_or(Ok(None))
                                     })
                                 })
-                                .collect()
+                                .collect();
+                            let ok_results: Vec<Option<Value>> = results
+                                .into_iter()
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                            let results = ok_results.into_iter().map(Ok).collect();
+                            Ok(Value::Vector(VectorValue {
+                                inner: LazyVector::FromEvaluated(results),
+                                orientation,
+                            }))
                         }
                         Value::BuiltinFunction(name) => {
                             let params = functions::param_names(name).ok_or_else(|| {
@@ -1553,33 +1611,20 @@ fn value_inner<'db>(
                                     params.len()
                                 ))));
                             }
-                            collected
-                                .into_iter()
-                                .map(|r| {
-                                    r.and_then(|opt| {
-                                        opt.map(|elem| {
-                                            apply_unary_builtin(name, &elem, registry).map(Some)
-                                        })
-                                        .unwrap_or(Ok(None))
-                                    })
-                                })
-                                .collect()
+                            Ok(Value::Vector(VectorValue {
+                                inner: LazyVector::Map {
+                                    source: Box::new(inner),
+                                    op: VectorMapOp::UnaryFunc(name.clone()),
+                                },
+                                orientation,
+                            }))
                         }
                         _ => {
-                            return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
+                            Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
                                 "map requires a function (e.g. fn (x) => (x+1) or sqrt)".to_string(),
                             )))
                         }
-                    };
-                    let ok_results: Vec<Option<Value>> = results
-                        .into_iter()
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                    let results = ok_results.into_iter().map(Ok).collect();
-                    Ok(Value::Vector(VectorValue {
-                        inner: LazyVector::FromEvaluated(results),
-                        orientation,
-                    }))
+                    }
                 }
                 "sum" => {
                     if !args.is_empty() {
@@ -1678,9 +1723,7 @@ fn value_inner<'db>(
                             )))
                         }
                     };
-                    let left_elems = collect_vector_stream(db, inner);
-                    let right_elems = collect_vector_stream(db, other_inner);
-                    dot_product(&left_elems, &right_elems, registry, expr.span(db))
+                    dot_product_stream(db, inner, other_inner, registry, expr.span(db))
                 }
                 "norm" => {
                     if !args.is_empty() {
@@ -1751,12 +1794,11 @@ fn value_inner<'db>(
                         )));
                     }
                     let collected = collect_vector_stream(db, inner);
-                    let defined: Vec<Value> = collected
+                    let mut acc = crate::fuzzy::FuzzyBool::True;
+                    for v in collected
                         .iter()
                         .filter_map(|r| r.as_ref().ok().and_then(|o| o.clone()))
-                        .collect();
-                    let mut acc = crate::fuzzy::FuzzyBool::True;
-                    for v in &defined {
+                    {
                         let f = match v {
                             Value::FuzzyBool(f) => f.clone(),
                             _ => {
@@ -1767,6 +1809,9 @@ fn value_inner<'db>(
                             }
                         };
                         acc = acc.and_(&f);
+                        if matches!(acc, crate::fuzzy::FuzzyBool::False) {
+                            break;
+                        }
                     }
                     Ok(Value::FuzzyBool(acc))
                 }
@@ -1777,12 +1822,11 @@ fn value_inner<'db>(
                         )));
                     }
                     let collected = collect_vector_stream(db, inner);
-                    let defined: Vec<Value> = collected
+                    let mut acc = crate::fuzzy::FuzzyBool::False;
+                    for v in collected
                         .iter()
                         .filter_map(|r| r.as_ref().ok().and_then(|o| o.clone()))
-                        .collect();
-                    let mut acc = crate::fuzzy::FuzzyBool::False;
-                    for v in &defined {
+                    {
                         let f = match v {
                             Value::FuzzyBool(f) => f.clone(),
                             _ => {
@@ -1793,6 +1837,9 @@ fn value_inner<'db>(
                             }
                         };
                         acc = acc.or_(&f);
+                        if matches!(acc, crate::fuzzy::FuzzyBool::True) {
+                            break;
+                        }
                     }
                     Ok(Value::FuzzyBool(acc))
                 }
@@ -1811,22 +1858,10 @@ fn value_inner<'db>(
                     let VectorValue { inner, .. } = v.clone();
                     let index_u = parse_index_key(env, key_string)
                         .map_err(|k| run_err_with_span(db, expr, k))?;
-                    let slice = LazyVector::Take {
-                        source: Box::new(inner),
-                        start: index_u,
-                        length: 1,
-                    };
-                    let collected = collect_vector_stream(db, slice);
-                    if collected.is_empty() {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::IndexOutOfBounds {
-                            index: index_u,
-                            length: index_u,
-                        }));
-                    }
-                    match &collected[0] {
-                        Ok(Some(elem)) => Ok(elem.clone()),
+                    match vector_index_stream(db, inner, index_u) {
+                        Ok(Some(elem)) => Ok(elem),
                         Ok(None) => Ok(Value::Undefined),
-                        Err(e) => Err(e.clone()),
+                        Err(kind) => Err(run_err_with_span(db, expr, kind)),
                     }
                 }
                 _ => Err(run_err_with_span(db, expr, RunErrorKind::ExpectedVector)),
@@ -1867,7 +1902,7 @@ fn value_inner<'db>(
                 let n = exprs.len();
                 for (i, e) in exprs.iter().enumerate() {
                     match e.data(db) {
-                        ExprData::InputDecl(name, _type_name) => {
+                        ExprData::InputDecl(name, _param_id, _type_name) => {
                             if !seen_input_names.insert(name.clone()) {
                                 return Err(with_span_if_missing(
                                     RunError::new(RunErrorKind::InvalidArgument(format!(
@@ -1982,7 +2017,9 @@ fn expression_to_def(db: &dyn salsa::Database, expr: Expression<'_>) -> ExprDef 
         ExprData::LitSymbol(name) => ExprDef::LitSymbol(name.clone()),
         ExprData::LitDate(gd) => ExprDef::LitDate(gd.clone()),
         ExprData::ExternalStream(name) => ExprDef::ExternalStream(name.clone()),
-        ExprData::InputDecl(name, type_name) => ExprDef::InputDecl(name.clone(), type_name.clone()),
+        ExprData::InputDecl(name, param_id, type_name) => {
+            ExprDef::InputDecl(name.clone(), param_id.clone(), type_name.clone())
+        }
         ExprData::Add(l, r) => ExprDef::Add(
             Box::new(expression_to_def(db, *l)),
             Box::new(expression_to_def(db, *r)),
@@ -2631,6 +2668,28 @@ fn sum_vector_elements(
     Ok(acc)
 }
 
+fn sum_and_count_vector_stream(
+    db: &dyn salsa::Database,
+    v: LazyVector,
+    registry: &UnitRegistry,
+    span: Option<Span>,
+) -> Result<(Value, usize), RunError> {
+    use futures::stream::StreamExt;
+    let mut stream = vector_into_stream(db, v);
+    let mut acc = Value::Numeric(Quantity::from_scalar(0.0));
+    let mut count = 0usize;
+    futures::executor::block_on(async move {
+        while let Some(item) = stream.next().await {
+            count += 1;
+            let opt = item?;
+            if let Some(v) = opt {
+                acc = add_values(&acc, &v, registry, None, span)?;
+            }
+        }
+        Ok((acc, count))
+    })
+}
+
 /// Product of all elements of a collected vector. Skips None (sparse); empty → 1.
 fn product_vector_elements(
     elems: &[Result<Option<Value>, RunError>],
@@ -2951,16 +3010,16 @@ fn cmp_values(
                     },
                 )),
                 (VectorOrientation::Row, VectorOrientation::Column) => {
-                    let left_elems = collect_vector_stream(db, left.inner.clone());
-                    let right_elems = collect_vector_stream(db, right.inner.clone());
-                    if left_elems.len() != right_elems.len() {
+                    let (sum_left, left_len) =
+                        sum_and_count_vector_stream(db, left.inner.clone(), registry, span)?;
+                    let (sum_right, right_len) =
+                        sum_and_count_vector_stream(db, right.inner.clone(), registry, span)?;
+                    if left_len != right_len {
                         return Err(err(RunErrorKind::VectorLengthMismatch {
-                            left_len: left_elems.len(),
-                            right_len: right_elems.len(),
+                            left_len,
+                            right_len,
                         }));
                     }
-                    let sum_left = sum_vector_elements(&left_elems, registry)?;
-                    let sum_right = sum_vector_elements(&right_elems, registry)?;
                     cmp_values(op, &sum_left, &sum_right, registry, None, span)
                 }
             }
@@ -3067,33 +3126,53 @@ fn cmp_values(
     }
 }
 
-/// Dot product of two collected vectors (row×column mul). Returns scalar.
-fn dot_product(
-    left_elems: &[Result<Option<Value>, RunError>],
-    right_elems: &[Result<Option<Value>, RunError>],
+fn dot_product_stream(
+    db: &dyn salsa::Database,
+    left: LazyVector,
+    right: LazyVector,
     registry: &UnitRegistry,
     span: Option<Span>,
 ) -> Result<Value, RunError> {
+    use futures::stream::StreamExt;
     let err = |kind: RunErrorKind| match span {
         Some(s) => RunError::at(s, kind),
         None => RunError::new(kind),
     };
-    if left_elems.len() != right_elems.len() {
-        return Err(err(RunErrorKind::VectorLengthMismatch {
-            left_len: left_elems.len(),
-            right_len: right_elems.len(),
-        }));
-    }
+    let mut left_stream = vector_into_stream(db, left);
+    let mut right_stream = vector_into_stream(db, right);
+    let mut left_len = 0usize;
+    let mut right_len = 0usize;
     let mut acc = Value::Numeric(Quantity::from_scalar(0.0));
-    for (l, r) in left_elems.iter().zip(right_elems.iter()) {
-        let l_opt = l.as_ref().map_err(|e| e.clone())?;
-        let r_opt = r.as_ref().map_err(|e| e.clone())?;
-        if let (Some(a), Some(b)) = (l_opt, r_opt) {
-            let product = mul_values(a, b, registry, None, span)?;
-            acc = add_values(&acc, &product, registry, None, span)?;
+    futures::executor::block_on(async move {
+        loop {
+            let l = left_stream.next().await;
+            let r = right_stream.next().await;
+            match (l, r) {
+                (Some(Ok(la)), Some(Ok(rb))) => {
+                    left_len += 1;
+                    right_len += 1;
+                    if let (Some(a), Some(b)) = (la, rb) {
+                        let product = mul_values(&a, &b, registry, None, span)?;
+                        acc = add_values(&acc, &product, registry, None, span)?;
+                    }
+                }
+                (Some(Err(e)), _) | (_, Some(Err(e))) => return Err(e),
+                (None, None) => return Ok(acc),
+                (None, Some(_)) => {
+                    return Err(err(RunErrorKind::VectorLengthMismatch {
+                        left_len,
+                        right_len: right_len + 1,
+                    }))
+                }
+                (Some(_), None) => {
+                    return Err(err(RunErrorKind::VectorLengthMismatch {
+                        left_len: left_len + 1,
+                        right_len,
+                    }))
+                }
+            }
         }
-    }
-    Ok(acc)
+    })
 }
 
 fn add_values(
@@ -3153,16 +3232,16 @@ fn add_values(
                     },
                 )),
                 (VectorOrientation::Row, VectorOrientation::Column) => {
-                    let left_elems = collect_vector_stream(db, left.inner.clone());
-                    let right_elems = collect_vector_stream(db, right.inner.clone());
-                    if left_elems.len() != right_elems.len() {
+                    let (sum_left, left_len) =
+                        sum_and_count_vector_stream(db, left.inner.clone(), registry, span)?;
+                    let (sum_right, right_len) =
+                        sum_and_count_vector_stream(db, right.inner.clone(), registry, span)?;
+                    if left_len != right_len {
                         return Err(err(RunErrorKind::VectorLengthMismatch {
-                            left_len: left_elems.len(),
-                            right_len: right_elems.len(),
+                            left_len,
+                            right_len,
                         }));
                     }
-                    let sum_left = sum_vector_elements(&left_elems, registry)?;
-                    let sum_right = sum_vector_elements(&right_elems, registry)?;
                     add_values(&sum_left, &sum_right, registry, None, span)
                 }
             }
@@ -3307,16 +3386,16 @@ fn sub_values(
                     },
                 )),
                 (VectorOrientation::Row, VectorOrientation::Column) => {
-                    let left_elems = collect_vector_stream(db, left.inner.clone());
-                    let right_elems = collect_vector_stream(db, right.inner.clone());
-                    if left_elems.len() != right_elems.len() {
+                    let (sum_left, left_len) =
+                        sum_and_count_vector_stream(db, left.inner.clone(), registry, span)?;
+                    let (sum_right, right_len) =
+                        sum_and_count_vector_stream(db, right.inner.clone(), registry, span)?;
+                    if left_len != right_len {
                         return Err(err(RunErrorKind::VectorLengthMismatch {
-                            left_len: left_elems.len(),
-                            right_len: right_elems.len(),
+                            left_len,
+                            right_len,
                         }));
                     }
-                    let sum_left = sum_vector_elements(&left_elems, registry)?;
-                    let sum_right = sum_vector_elements(&right_elems, registry)?;
                     sub_values(&sum_left, &sum_right, registry, None, span)
                 }
             }
@@ -3431,9 +3510,7 @@ fn mul_values(
                     },
                 )),
                 (VectorOrientation::Row, VectorOrientation::Column) => {
-                    let left_elems = collect_vector_stream(db, left.inner.clone());
-                    let right_elems = collect_vector_stream(db, right.inner.clone());
-                    dot_product(&left_elems, &right_elems, registry, span)
+                    dot_product_stream(db, left.inner.clone(), right.inner.clone(), registry, span)
                 }
             }
         }

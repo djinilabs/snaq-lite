@@ -34,7 +34,7 @@ pub enum Rank {
     Lambda(Vec<(String, Option<Rank>)>, Box<Rank>),
     CallExpr(Box<Rank>, Vec<Rank>),
     ExternalStream(String),
-    InputDecl(String, String),
+    InputDecl(String, String, String),
 }
 
 fn tag_order(r: &Rank) -> u8 {
@@ -67,7 +67,7 @@ fn tag_order(r: &Rank) -> u8 {
         Rank::Lambda(..) => 25,
         Rank::CallExpr(..) => 26,
         Rank::ExternalStream(_) => 27,
-        Rank::InputDecl(_, _) => 28,
+        Rank::InputDecl(_, _, _) => 28,
     }
 }
 
@@ -123,7 +123,10 @@ impl Ord for Rank {
                 })
                 .unwrap_or_else(|| a.len().cmp(&b.len())),
             (Rank::ExternalStream(a), Rank::ExternalStream(b)) => a.cmp(b),
-            (Rank::InputDecl(a1, a2), Rank::InputDecl(b1, b2)) => a1.cmp(b1).then_with(|| a2.cmp(b2)),
+            (Rank::InputDecl(a1, a2, a3), Rank::InputDecl(b1, b2, b3)) => a1
+                .cmp(b1)
+                .then_with(|| a2.cmp(b2))
+                .then_with(|| a3.cmp(b3)),
             (Rank::Lambda(ap, ab), Rank::Lambda(bp, bb)) => {
                 ap.len().cmp(&bp.len())
                     .then_with(|| {
@@ -230,7 +233,9 @@ pub fn rank(pool: &ExprInterner, id: ExprId) -> Rank {
             args.iter().map(|(_, id)| rank(pool, *id)).collect(),
         ),
         ExprNode::ExternalStream(name) => Rank::ExternalStream(name.clone()),
-        ExprNode::InputDecl(name, type_name) => Rank::InputDecl(name.clone(), type_name.clone()),
+        ExprNode::InputDecl(name, param_id, type_name) => {
+            Rank::InputDecl(name.clone(), param_id.clone(), type_name.clone())
+        }
     }
 }
 
@@ -424,7 +429,10 @@ fn canonicalize_rec(
             out.intern(ExprNode::Binding(name.clone(), new_rhs), span)
         }
         ExprNode::ExternalStream(name) => out.intern(ExprNode::ExternalStream(name.clone()), span),
-        ExprNode::InputDecl(name, type_name) => out.intern(ExprNode::InputDecl(name.clone(), type_name.clone()), span),
+        ExprNode::InputDecl(name, param_id, type_name) => out.intern(
+            ExprNode::InputDecl(name.clone(), param_id.clone(), type_name.clone()),
+            span,
+        ),
         ExprNode::Lambda(params, body_id) => {
             let new_params: Vec<(String, Option<ExprId>)> = params
                 .iter()

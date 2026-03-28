@@ -30,6 +30,8 @@ pub enum Tok {
     Else,
     /// "input" for declarative graph node input (e.g. input revenue: ProbabilisticTensor).
     Input,
+    /// `@` separator for input param id (e.g. input revenue@p1: Vector).
+    At,
     Pi,
     Comma,
     Colon,
@@ -423,16 +425,27 @@ impl<'input> Iterator for Lexer<'input> {
         }
         // Temporal literal: @YYYY, @YYYY-MM, @YYYY-MM-DD, @YYYY-MM-DDTHH, @YYYY-MM-DDTHH:MM, @YYYY-MM-DDTHH:MM:SS
         if rest.starts_with('@') {
-            match self.take_temporal_literal(start) {
-                Ok(raw) => {
-                    self.last_was_number = false;
-                    self.any_token_emitted = true;
-                    self.after_postfix_factor = true;
-                    let end = self.pos;
-                    return Some(Ok((start, Tok::TemporalLiteral(raw), end)));
+            let is_temporal = rest
+                .chars()
+                .nth(1)
+                .is_some_and(|c| c.is_ascii_digit());
+            if is_temporal {
+                match self.take_temporal_literal(start) {
+                    Ok(raw) => {
+                        self.last_was_number = false;
+                        self.any_token_emitted = true;
+                        self.after_postfix_factor = true;
+                        let end = self.pos;
+                        return Some(Ok((start, Tok::TemporalLiteral(raw), end)));
+                    }
+                    Err(e) => return Some(Err(e)),
                 }
-                Err(e) => return Some(Err(e)),
             }
+            self.last_was_number = false;
+            self.any_token_emitted = true;
+            self.after_postfix_factor = false;
+            self.pos += 1;
+            return Some(Ok((start, Tok::At, self.pos)));
         }
 
         if rest.starts_with('$') {

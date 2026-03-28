@@ -1,6 +1,9 @@
 # Active context
 
 ## Just completed
+- **LSP limits bridge (phase implementation complete):** `crates/snaq-lite-lsp` now uses UTF-16-safe position mapping via new `src/position.rs` (used by diagnostics, hover, inlay), `didChange` applies incremental `contentChanges` (range + full replacement fallback), and the server advertises/handles standard LSP endpoints for completion, definition, references, document symbols, and rename.
+- **LSP tests expanded:** Added unit tests for UTF-16/byte conversion and identifier boundaries; integration tests for incremental didChange behavior, Unicode `π` hover/diagnostics, capability sync kind assertion (incremental), and standard LSP feature flows (completion/definition/references/documentSymbol/rename).
+- **Verification:** `cargo test -p snaq-lite-lsp` and `cargo clippy -p snaq-lite-lsp --all-targets -- -D warnings` pass.
 - **`check` script:** Root `pnpm run check` = typecheck → lint → test → build (full repo). `apps/frontend` `pnpm run check` = same four for the frontend package only.
 - **Typecheck scripts:** `apps/frontend` — `pnpm run typecheck` (`tsc --noEmit`). Root — `pnpm run typecheck` / `typecheck:frontend` delegate to frontend.
 - **Frontend reset:** Removed prior `apps/frontend` app (canvas, LSP worker, Monaco, stores, old E2E). Stack is still Vite + TanStack Start SPA: `__root` + `/` only; blank `<main data-testid="home-page">` with `minHeight: 100vh`. Deps trimmed to react + TanStack router/start. New E2E `e2e/home.spec.ts`. Run `pnpm -C apps/frontend run build` before Playwright if HTML changed (preview serves `dist`). Full repo `pnpm test` / `pnpm run lint` need Rust toolchain in PATH.

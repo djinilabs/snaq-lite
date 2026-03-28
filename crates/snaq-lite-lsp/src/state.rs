@@ -1,11 +1,15 @@
 //! Shared LSP state: multi-document map, Salsa DB, and diagnostics.
 
 use crate::mapping::{run_error_to_diagnostic, span_to_range};
-use std::collections::{HashMap, HashSet};
-use tower_lsp::lsp_types::{Diagnostic, InlayHint, Position, Range, Url};
+use crate::position;
 use snaq_lite_lang::{
     cas, default_si_registry, empty_scope, format_value_for_display, parse, program,
     set_eval_registry, set_stream_input_registry, ExprDef, Expression, ProgramDef, UnitRegistry,
+};
+use std::collections::{HashMap, HashSet};
+use tower_lsp::lsp_types::{
+    Diagnostic, DocumentSymbol, InlayHint, Location, Position, Range, SymbolKind,
+    TextDocumentContentChangeEvent, Url,
 };
 
 /// Per-document state (one entry per open virtual or physical URI).
@@ -45,6 +49,37 @@ impl LspState {
         self.documents.insert(uri, entry);
     }
 
+    /// Apply incremental or full-content changes to an open document, then re-parse.
+    pub fn apply_document_changes(
+        &mut self,
+        uri: Url,
+        version: i32,
+        changes: &[TextDocumentContentChangeEvent],
+    ) {
+        let Some(existing) = self.documents.get(&uri) else {
+            return;
+        };
+        let mut text = existing.source.clone();
+        for change in changes {
+            if let Some(range) = change.range {
+                let Some(span) = position::range_to_span(&text, &range) else {
+                    continue;
+                };
+                if span.start <= span.end
+                    && span.end <= text.len()
+                    && text.is_char_boundary(span.start)
+                    && text.is_char_boundary(span.end)
+                {
+                    text.replace_range(span.start..span.end, &change.text);
+                }
+            } else {
+                text = change.text.clone();
+            }
+        }
+        let entry = self.parse_document(version, &text);
+        self.documents.insert(uri, entry);
+    }
+
     fn parse_document(&self, version: i32, text: &str) -> DocumentEntry {
         if text.trim().is_empty() {
             return DocumentEntry {
@@ -74,19 +109,24 @@ impl LspState {
                         diags.push(run_error_to_diagnostic(&e, text));
                         (spanned.to_expr_def(), Some(spanned))
                     }
-                    Ok(resolved) => match cas::simplify_symbolic(resolved.clone(), &self.unit_registry) {
-                        Err(e) => {
-                            diags.push(run_error_to_diagnostic(&e, text));
-                            (resolved.to_expr_def(), Some(resolved))
+                    Ok(resolved) => {
+                        match cas::simplify_symbolic(resolved.clone(), &self.unit_registry) {
+                            Err(e) => {
+                                diags.push(run_error_to_diagnostic(&e, text));
+                                (resolved.to_expr_def(), Some(resolved))
+                            }
+                            Ok(simplified) => {
+                                let root_def = simplified.to_expr_def();
+                                let program_def = ProgramDef::new(
+                                    &self.db,
+                                    root_def.clone(),
+                                    Some(simplified.clone()),
+                                );
+                                let _root_expr = program(&self.db, program_def);
+                                (root_def, Some(simplified))
+                            }
                         }
-                        Ok(simplified) => {
-                            let root_def = simplified.to_expr_def();
-                            let program_def =
-                                ProgramDef::new(&self.db, root_def.clone(), Some(simplified.clone()));
-                            let _root_expr = program(&self.db, program_def);
-                            (root_def, Some(simplified))
-                        }
-                    },
+                    }
                 }
             }
         };
@@ -147,7 +187,12 @@ impl LspState {
     }
 
     /// Hover at (line, character) - 0-based. Returns (formatted value, optional range for highlighting) or None.
-    pub fn hover_at(&self, uri: &Url, line: u32, character: u32) -> Option<(String, Option<Range>)> {
+    pub fn hover_at(
+        &self,
+        uri: &Url,
+        line: u32,
+        character: u32,
+    ) -> Option<(String, Option<Range>)> {
         let doc = self.documents.get(uri)?;
         let source = &doc.source;
         if source.is_empty() {
@@ -162,11 +207,9 @@ impl LspState {
         ));
         let program_def = ProgramDef::new(&self.db, root_def.clone(), root_spanned);
         let root = program(&self.db, program_def);
-        let offset = position_to_byte_offset(source, line, character)?;
+        let offset = position::position_to_byte_offset(source, Position { line, character })?;
         let expr = expression_at_offset(&self.db, root, offset)?;
-        let range = expr
-            .span(&self.db)
-            .map(|s| span_to_range(&s, source));
+        let range = expr.span(&self.db).map(|s| span_to_range(&s, source));
         let scope = empty_scope(&self.db);
         let value = snaq_lite_lang::value(&self.db, scope, expr).ok()?;
         let content = format_value_for_display(&self.db, &value).ok()?;
@@ -190,13 +233,167 @@ impl LspState {
             &self.db,
             std::collections::HashMap::new(),
         ));
-        let program_def = ProgramDef::new(
-            &self.db,
-            root_def.clone(),
-            doc.root_spanned.clone(),
-        );
+        let program_def = ProgramDef::new(&self.db, root_def.clone(), doc.root_spanned.clone());
         let root = program(&self.db, program_def);
         collect_inlay_hints(&self.db, &doc.source, root)
+    }
+
+    /// Identifier at a given document position.
+    pub fn identifier_at(&self, uri: &Url, line: u32, character: u32) -> Option<String> {
+        let doc = self.documents.get(uri)?;
+        let offset = position::position_to_byte_offset(&doc.source, Position { line, character })?;
+        let (start, end) = position::find_identifier_at_offset(&doc.source, offset)?;
+        Some(doc.source[start..end].to_string())
+    }
+
+    /// Definition locations for an identifier in a URI (best-effort declaration matching).
+    pub fn definition_locations(&self, uri: &Url, ident: &str) -> Vec<Location> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let mut locations = Vec::new();
+        for (line_idx, line) in doc.source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let lead = line.len().saturating_sub(trimmed.len());
+            let decl_offset = if let Some(rest) = trimmed.strip_prefix("input ") {
+                if starts_with_ident(rest, ident) {
+                    Some(lead + "input ".len())
+                } else {
+                    None
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("fn ") {
+                if starts_with_ident(rest, ident) {
+                    Some(lead + "fn ".len())
+                } else {
+                    None
+                }
+            } else if starts_with_ident(trimmed, ident) {
+                let after = trimmed.get(ident.len()..).unwrap_or("");
+                if after.trim_start().starts_with('=') {
+                    Some(lead)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(col) = decl_offset {
+                let start = Position {
+                    line: line_idx as u32,
+                    character: position::byte_offset_to_position(line, col).character,
+                };
+                let end = Position {
+                    line: line_idx as u32,
+                    character: position::byte_offset_to_position(line, col + ident.len()).character,
+                };
+                locations.push(Location {
+                    uri: uri.clone(),
+                    range: Range { start, end },
+                });
+            }
+        }
+        locations
+    }
+
+    /// All reference ranges of identifier in one document.
+    pub fn reference_ranges(&self, uri: &Url, ident: &str) -> Vec<Range> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        if ident.is_empty() {
+            return Vec::new();
+        }
+        let src = doc.source.as_bytes();
+        let needle = ident.as_bytes();
+        let mut ranges = Vec::new();
+        let mut i = 0usize;
+        while i + needle.len() <= src.len() {
+            if &src[i..i + needle.len()] == needle {
+                let left_ok = i == 0 || !is_ident_char(src[i - 1]);
+                let right_ok =
+                    i + needle.len() == src.len() || !is_ident_char(src[i + needle.len()]);
+                if left_ok && right_ok {
+                    let start = position::byte_offset_to_position(&doc.source, i);
+                    let end = position::byte_offset_to_position(&doc.source, i + needle.len());
+                    ranges.push(Range { start, end });
+                }
+                i += needle.len();
+            } else {
+                i += 1;
+            }
+        }
+        ranges
+    }
+
+    /// Best-effort document symbols (input declarations, bindings, named functions).
+    pub fn document_symbols(&self, uri: &Url) -> Vec<DocumentSymbol> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (line_idx, line) in doc.source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let lead = line.len().saturating_sub(trimmed.len());
+
+            let push_symbol = |out: &mut Vec<DocumentSymbol>,
+                               name: String,
+                               kind: SymbolKind,
+                               start_col: usize| {
+                let start = Position {
+                    line: line_idx as u32,
+                    character: position::byte_offset_to_position(line, start_col).character,
+                };
+                let end = Position {
+                    line: line_idx as u32,
+                    character: position::byte_offset_to_position(line, start_col + name.len())
+                        .character,
+                };
+                let range = Range { start, end };
+                #[allow(deprecated)]
+                out.push(DocumentSymbol {
+                    name,
+                    detail: None,
+                    kind,
+                    tags: None,
+                    deprecated: None,
+                    range,
+                    selection_range: range,
+                    children: None,
+                });
+            };
+
+            if let Some(rest) = trimmed.strip_prefix("input ") {
+                let name = rest
+                    .split(':')
+                    .next()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                if !name.is_empty() {
+                    push_symbol(&mut out, name, SymbolKind::VARIABLE, lead + "input ".len());
+                }
+                continue;
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("fn ") {
+                let name = rest.split(['(', ' ']).next().unwrap_or("").to_string();
+                if !name.is_empty() {
+                    push_symbol(&mut out, name, SymbolKind::FUNCTION, lead + "fn ".len());
+                }
+                continue;
+            }
+
+            if let Some(eq_pos) = trimmed.find('=') {
+                let lhs = trimmed[..eq_pos].trim();
+                if !lhs.is_empty() && lhs.bytes().all(is_ident_char) {
+                    let start_col = lead + trimmed.find(lhs).unwrap_or(0);
+                    push_symbol(&mut out, lhs.to_string(), SymbolKind::VARIABLE, start_col);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -204,19 +401,6 @@ impl Default for LspState {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Convert 0-based line and character (byte) to byte offset.
-fn position_to_byte_offset(source: &str, line: u32, character: u32) -> Option<usize> {
-    let mut offset = 0;
-    for (i, chunk) in source.lines().enumerate() {
-        if i == line as usize {
-            let char_off = character as usize;
-            return Some(offset + char_off.min(chunk.len()));
-        }
-        offset += chunk.len() + 1;
-    }
-    Some(offset)
 }
 
 /// Find smallest expression that contains the given byte offset.
@@ -250,13 +434,12 @@ fn expression_at_offset<'db>(
         | ExprData::Gt(a, b)
         | ExprData::Ge(a, b)
         | ExprData::And(a, b)
-        | ExprData::As(a, b) => {
-            expression_at_offset(db, *a, offset)
-                .or_else(|| expression_at_offset(db, *b, offset))
-                .or(Some(expr))
+        | ExprData::As(a, b) => expression_at_offset(db, *a, offset)
+            .or_else(|| expression_at_offset(db, *b, offset))
+            .or(Some(expr)),
+        ExprData::Neg(e) | ExprData::Transpose(e) => {
+            expression_at_offset(db, *e, offset).or(Some(expr))
         }
-        ExprData::Neg(e)
-        | ExprData::Transpose(e) => expression_at_offset(db, *e, offset).or(Some(expr)),
         ExprData::Call(_, args) | ExprData::CallExpr(_, args) => {
             for (_, arg) in args {
                 if let Some(found) = expression_at_offset(db, *arg, offset) {
@@ -297,17 +480,13 @@ fn expression_at_offset<'db>(
             }
             Some(expr)
         }
-        ExprData::If(cond, then_e, else_e) => {
-            expression_at_offset(db, *cond, offset)
-                .or_else(|| expression_at_offset(db, *then_e, offset))
-                .or_else(|| expression_at_offset(db, *else_e, offset))
-                .or(Some(expr))
-        }
-        ExprData::WithPrecision(l, r) => {
-            expression_at_offset(db, *l, offset)
-                .or_else(|| expression_at_offset(db, *r, offset))
-                .or(Some(expr))
-        }
+        ExprData::If(cond, then_e, else_e) => expression_at_offset(db, *cond, offset)
+            .or_else(|| expression_at_offset(db, *then_e, offset))
+            .or_else(|| expression_at_offset(db, *else_e, offset))
+            .or(Some(expr)),
+        ExprData::WithPrecision(l, r) => expression_at_offset(db, *l, offset)
+            .or_else(|| expression_at_offset(db, *r, offset))
+            .or(Some(expr)),
         ExprData::Binding(_, e) => expression_at_offset(db, *e, offset).or(Some(expr)),
         ExprData::MapLiteral(entries) => {
             for (_, e) in entries {
@@ -338,22 +517,17 @@ fn collect_inlay_hints_rec<'db>(
     expr: Expression<'db>,
     out: &mut Vec<InlayHint>,
 ) {
-    use tower_lsp::lsp_types::InlayHintKind;
     use snaq_lite_lang::ir::ExprData;
+    use tower_lsp::lsp_types::InlayHintKind;
 
     if let Some(span) = expr.span(db) {
-        let (line_1, col_1) = span.line_col(source);
-        let line_0 = line_1.saturating_sub(1);
-        let col_0 = col_1;
+        let end_pos = position::byte_offset_to_position(source, span.end);
         let scope = empty_scope(db);
         if let Ok(val) = snaq_lite_lang::value(db, scope, expr) {
             if let Ok(s) = format_value_for_display(db, &val) {
                 if !s.is_empty() && s != "<vector>" && s != "<function>" && s != "<map>" {
                     out.push(InlayHint {
-                        position: Position {
-                            line: line_0,
-                            character: col_0 + (span.end.saturating_sub(span.start)) as u32,
-                        },
+                        position: end_pos,
                         label: tower_lsp::lsp_types::InlayHintLabel::String(format!(" → {s}")),
                         kind: Some(InlayHintKind::TYPE),
                         text_edits: None,
@@ -371,4 +545,16 @@ fn collect_inlay_hints_rec<'db>(
             collect_inlay_hints_rec(db, source, *c, out);
         }
     }
+}
+
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn starts_with_ident(s: &str, ident: &str) -> bool {
+    if !s.starts_with(ident) {
+        return false;
+    }
+    let next = s.as_bytes().get(ident.len()).copied();
+    !next.is_some_and(is_ident_char)
 }

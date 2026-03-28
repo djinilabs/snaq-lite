@@ -35,7 +35,12 @@ fn read_lsp_response(mut r: impl Read) -> std::io::Result<String> {
     let len = header
         .lines()
         .find(|l| l.starts_with("Content-Length:"))
-        .and_then(|l| l.trim_start_matches("Content-Length:").trim().parse::<usize>().ok())
+        .and_then(|l| {
+            l.trim_start_matches("Content-Length:")
+                .trim()
+                .parse::<usize>()
+                .ok()
+        })
         .unwrap_or(0);
     let mut body = vec![0u8; len];
     r.read_exact(&mut body)?;
@@ -60,7 +65,12 @@ async fn read_one_lsp_message_async(
     let len = header
         .lines()
         .find(|l| l.starts_with("Content-Length:"))
-        .and_then(|l| l.trim_start_matches("Content-Length:").trim().parse::<usize>().ok())
+        .and_then(|l| {
+            l.trim_start_matches("Content-Length:")
+                .trim()
+                .parse::<usize>()
+                .ok()
+        })
         .unwrap_or(0);
     let mut body = vec![0u8; len];
     r.read_exact(&mut body).await?;
@@ -72,9 +82,8 @@ async fn native_initialize_returns_capabilities() {
     let (client_w, server_r) = duplex(4096);
     let (server_w, client_r) = duplex(4096);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let init_request = serde_json::json!({
         "jsonrpc": "2.0",
@@ -109,6 +118,13 @@ async fn native_initialize_returns_capabilities() {
     let capabilities = result.get("capabilities").expect("result has capabilities");
     assert!(capabilities.get("hoverProvider").is_some());
     assert!(capabilities.get("textDocumentSync").is_some());
+    assert_eq!(
+        capabilities
+            .get("textDocumentSync")
+            .and_then(|v| v.as_u64()),
+        Some(2),
+        "server should advertise incremental sync"
+    );
 
     server_handle.abort();
     let _ = server_handle.await;
@@ -119,9 +135,8 @@ async fn native_did_open_and_hover_returns_value() {
     let (client_w, server_r) = duplex(8192);
     let (server_w, client_r) = duplex(8192);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -138,7 +153,10 @@ async fn native_did_open_and_hover_returns_value() {
             "clientInfo": { "name": "test", "version": "0.1.0" }
         }
     });
-    client_w.write_all(&lsp_message(&init_request.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&init_request.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let init_body = timeout(
@@ -156,7 +174,10 @@ async fn native_did_open_and_hover_returns_value() {
         "method": "initialized",
         "params": {}
     });
-    client_w.write_all(&lsp_message(&initialized.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&initialized.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     // didOpen with "1 + 2"
@@ -172,7 +193,10 @@ async fn native_did_open_and_hover_returns_value() {
             }
         }
     });
-    client_w.write_all(&lsp_message(&did_open.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&did_open.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     // Hover at (0, 2) - around the "+"
@@ -185,22 +209,22 @@ async fn native_did_open_and_hover_returns_value() {
             "position": { "line": 0, "character": 2 }
         }
     });
-    client_w.write_all(&lsp_message(&hover_request.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&hover_request.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     // Server may send logMessage etc.; read until we get the hover response (id: 2)
-    let hover_body = timeout(
-        Duration::from_secs(5),
-        async {
-            loop {
-                let body = read_one_lsp_message_async(&mut client_r).await.unwrap();
-                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-                if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
-                    return body;
-                }
+    let hover_body = timeout(Duration::from_secs(5), async {
+        loop {
+            let body = read_one_lsp_message_async(&mut client_r).await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
+                return body;
             }
-        },
-    )
+        }
+    })
     .await
     .expect("timeout on hover");
     let hover_response: serde_json::Value = serde_json::from_str(&hover_body).unwrap();
@@ -209,10 +233,22 @@ async fn native_did_open_and_hover_returns_value() {
     let contents_val = result.and_then(|r| r.get("contents"));
     let content = contents_val
         .and_then(|c| c.as_str())
-        .or_else(|| contents_val.and_then(|c| c.get("value")).and_then(|v| v.as_str()))
+        .or_else(|| {
+            contents_val
+                .and_then(|c| c.get("value"))
+                .and_then(|v| v.as_str())
+        })
         .unwrap_or_default();
-    assert!(!content.is_empty(), "hover result has contents: {}", hover_body);
-    assert!(content.contains("3") || content.contains("1") || content.contains("2"), "hover content: {}", content);
+    assert!(
+        !content.is_empty(),
+        "hover result has contents: {}",
+        hover_body
+    );
+    assert!(
+        content.contains("3") || content.contains("1") || content.contains("2"),
+        "hover content: {}",
+        content
+    );
 
     server_handle.abort();
     let _ = server_handle.await;
@@ -225,9 +261,8 @@ async fn native_subscribe_then_did_change_receives_cancelled() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -241,29 +276,32 @@ async fn native_subscribe_then_did_change_receives_cancelled() {
         "method": "snaqlite/subscribe",
         "params": { "textDocument": { "uri": TEST_DOC_URI } }
     });
-    client_w.write_all(&lsp_message(&subscribe_request.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&subscribe_request.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     // Read until we get the subscribe response (id: 2); may receive publishResult Completed first
-    let subscription_id = timeout(
-        Duration::from_secs(5),
-        async {
-            loop {
-                let body = read_one_lsp_message_async(&mut client_r).await.unwrap();
-                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-                if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
-                    if let Some(err) = v.get("error") {
-                        panic!("subscribe failed: {}", err);
-                    }
-                    let result = v.get("result").and_then(|r| r.get("subscriptionId"));
-                    return result.and_then(|s| s.as_str()).unwrap_or("").to_string();
+    let subscription_id = timeout(Duration::from_secs(5), async {
+        loop {
+            let body = read_one_lsp_message_async(&mut client_r).await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
+                if let Some(err) = v.get("error") {
+                    panic!("subscribe failed: {}", err);
                 }
+                let result = v.get("result").and_then(|r| r.get("subscriptionId"));
+                return result.and_then(|s| s.as_str()).unwrap_or("").to_string();
             }
-        },
-    )
+        }
+    })
     .await
     .expect("timeout on subscribe response");
-    assert!(!subscription_id.is_empty(), "subscribe should return subscriptionId");
+    assert!(
+        !subscription_id.is_empty(),
+        "subscribe should return subscriptionId"
+    );
 
     let did_change = serde_json::json!({
         "jsonrpc": "2.0",
@@ -273,32 +311,36 @@ async fn native_subscribe_then_did_change_receives_cancelled() {
             "contentChanges": [{ "text": "2 + 3" }]
         }
     });
-    client_w.write_all(&lsp_message(&did_change.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&did_change.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     // Read until we get snaqlite/publishResult with status Cancelled
-    let cancelled = timeout(
-        Duration::from_secs(5),
-        async {
-            loop {
-                let body = read_one_lsp_message_async(&mut client_r).await.unwrap();
-                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-                if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/publishResult") {
-                    let params = v.get("params").and_then(|p| p.as_object());
-                    if let Some(p) = params {
-                        if p.get("status").and_then(|s| s.as_str()) == Some("Cancelled") {
-                            if p.get("subscriptionId").and_then(|s| s.as_str()) == Some(subscription_id.as_str()) {
-                                return true;
-                            }
-                        }
+    let cancelled = timeout(Duration::from_secs(5), async {
+        loop {
+            let body = read_one_lsp_message_async(&mut client_r).await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/publishResult") {
+                let params = v.get("params").and_then(|p| p.as_object());
+                if let Some(p) = params {
+                    if p.get("status").and_then(|s| s.as_str()) == Some("Cancelled")
+                        && p.get("subscriptionId").and_then(|s| s.as_str())
+                            == Some(subscription_id.as_str())
+                    {
+                        return true;
                     }
                 }
             }
-        },
-    )
+        }
+    })
     .await
     .expect("timeout waiting for Cancelled notification");
-    assert!(cancelled, "client should receive publishResult Cancelled for the subscription");
+    assert!(
+        cancelled,
+        "client should receive publishResult Cancelled for the subscription"
+    );
 
     server_handle.abort();
     let _ = server_handle.await;
@@ -310,9 +352,8 @@ async fn native_subscribe_scalar_returns_id_and_completed() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -326,17 +367,23 @@ async fn native_subscribe_scalar_returns_id_and_completed() {
         "method": "snaqlite/subscribe",
         "params": { "textDocument": { "uri": TEST_DOC_URI } }
     });
-    client_w.write_all(&lsp_message(&subscribe_request.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&subscribe_request.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut subscription_id = String::new();
     let mut got_completed = false;
     let mut completed_display: Option<String> = None;
     for _ in 0..15 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
             if v.get("error").is_some() {
@@ -362,10 +409,19 @@ async fn native_subscribe_scalar_returns_id_and_completed() {
             break;
         }
     }
-    assert!(!subscription_id.is_empty(), "subscribe should return subscriptionId");
-    assert!(got_completed, "client should receive one publishResult Completed for scalar");
     assert!(
-        completed_display.as_ref().map(|s| s.contains("3")).unwrap_or(false),
+        !subscription_id.is_empty(),
+        "subscribe should return subscriptionId"
+    );
+    assert!(
+        got_completed,
+        "client should receive one publishResult Completed for scalar"
+    );
+    assert!(
+        completed_display
+            .as_ref()
+            .map(|s| s.contains("3"))
+            .unwrap_or(false),
         "Completed data.display should show result: {:?}",
         completed_display
     );
@@ -383,9 +439,8 @@ async fn native_subscribe_vector_returns_id_and_stream_completes() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -399,7 +454,10 @@ async fn native_subscribe_vector_returns_id_and_stream_completes() {
         "method": "snaqlite/subscribe",
         "params": { "textDocument": { "uri": TEST_DOC_URI } }
     });
-    client_w.write_all(&lsp_message(&subscribe_request.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&subscribe_request.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut subscription_id = String::new();
@@ -407,10 +465,13 @@ async fn native_subscribe_vector_returns_id_and_stream_completes() {
     let mut got_completed = false;
     let mut total_elements: Option<u64> = None;
     for _ in 0..10 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout reading LSP message")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout reading LSP message")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).expect("valid JSON LSP message");
         if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
             if v.get("error").is_some() {
@@ -423,7 +484,10 @@ async fn native_subscribe_vector_returns_id_and_stream_completes() {
             break;
         }
     }
-    assert!(!subscription_id.is_empty(), "subscribe for vector should return subscriptionId");
+    assert!(
+        !subscription_id.is_empty(),
+        "subscribe for vector should return subscriptionId"
+    );
 
     // Pump: trigger server to drain and send any Running/Completed (notifications sent when handling next request).
     let hover_request = serde_json::json!({
@@ -432,22 +496,36 @@ async fn native_subscribe_vector_returns_id_and_stream_completes() {
         "method": "textDocument/hover",
         "params": { "textDocument": { "uri": TEST_DOC_URI }, "position": { "line": 0, "character": 0 } }
     });
-    client_w.write_all(&lsp_message(&hover_request.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&hover_request.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     for _ in 0..10 {
-        let body = match timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r)).await {
+        let body = match timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        {
             Ok(Ok(b)) => b,
             _ => break,
         };
         let v: serde_json::Value = serde_json::from_str(&body).expect("valid JSON LSP message");
         if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/publishResult") {
-            let params = v.get("params").and_then(|p| p.as_object()).expect("publishResult params");
+            let params = v
+                .get("params")
+                .and_then(|p| p.as_object())
+                .expect("publishResult params");
             let status = params.get("status").and_then(|s| s.as_str()).unwrap_or("");
             if status == "Running" {
                 _got_running = true;
                 if let Some(data) = params.get("data").and_then(|d| d.as_object()) {
-                    assert!(data.contains_key("elements"), "Running data should have elements");
+                    assert!(
+                        data.contains_key("elements"),
+                        "Running data should have elements"
+                    );
                 }
             } else if status == "Completed" {
                 got_completed = true;
@@ -472,9 +550,8 @@ async fn native_subscribe_then_unsubscribe_succeeds() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -488,18 +565,27 @@ async fn native_subscribe_then_unsubscribe_succeeds() {
         "method": "snaqlite/subscribe",
         "params": { "textDocument": { "uri": TEST_DOC_URI } }
     });
-    client_w.write_all(&lsp_message(&subscribe_request.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&subscribe_request.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut subscription_id = String::new();
     for _ in 0..10 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
-            subscription_id = v["result"]["subscriptionId"].as_str().unwrap_or("").to_string();
+            subscription_id = v["result"]["subscriptionId"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
             break;
         }
     }
@@ -511,27 +597,35 @@ async fn native_subscribe_then_unsubscribe_succeeds() {
         "method": "snaqlite/unsubscribe",
         "params": { "subscriptionId": subscription_id }
     });
-    client_w.write_all(&lsp_message(&unsub.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&unsub.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     // Read until we get the unsubscribe response (id: 3); may receive publishResult first
-    let body = timeout(
-        Duration::from_secs(5),
-        async {
-            loop {
-                let b = read_one_lsp_message_async(&mut client_r).await.unwrap();
-                let v: serde_json::Value = serde_json::from_str(&b).unwrap();
-                if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
-                    return b;
-                }
+    let body = timeout(Duration::from_secs(5), async {
+        loop {
+            let b = read_one_lsp_message_async(&mut client_r).await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
+                return b;
             }
-        },
-    )
+        }
+    })
     .await
     .expect("timeout on unsubscribe response");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert!(v.get("result").is_some(), "unsubscribe should return result (null): {}", body);
-    assert!(v.get("error").is_none(), "unsubscribe should not error: {}", body);
+    assert!(
+        v.get("result").is_some(),
+        "unsubscribe should return result (null): {}",
+        body
+    );
+    assert!(
+        v.get("error").is_none(),
+        "unsubscribe should not error: {}",
+        body
+    );
 
     server_handle.abort();
     let _ = server_handle.await;
@@ -543,9 +637,8 @@ async fn native_subscribe_wrong_uri_returns_error() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -559,25 +652,27 @@ async fn native_subscribe_wrong_uri_returns_error() {
         "method": "snaqlite/subscribe",
         "params": { "textDocument": { "uri": "file:///other.snaq" } }
     });
-    client_w.write_all(&lsp_message(&subscribe_request.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&subscribe_request.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
-    let body = timeout(
-        Duration::from_secs(5),
-        async {
-            loop {
-                let b = read_one_lsp_message_async(&mut client_r).await.unwrap();
-                let v: serde_json::Value = serde_json::from_str(&b).unwrap();
-                if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
-                    return b;
-                }
+    let body = timeout(Duration::from_secs(5), async {
+        loop {
+            let b = read_one_lsp_message_async(&mut client_r).await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
+                return b;
             }
-        },
-    )
+        }
+    })
     .await
     .expect("timeout on subscribe response");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let err = v.get("error").expect("subscribe with wrong URI should return error");
+    let err = v
+        .get("error")
+        .expect("subscribe with wrong URI should return error");
     let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
     assert_eq!(code, -32602, "invalid_params code"); // JSON-RPC invalid params
     let message = err.get("message").and_then(|m| m.as_str()).unwrap_or("");
@@ -606,7 +701,10 @@ async fn send_init_and_initialized(
             "clientInfo": { "name": "test", "version": "0.1.0" }
         }
     });
-    client_w.write_all(&lsp_message(&init_request.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&init_request.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
     let _ = timeout(Duration::from_secs(5), read_one_lsp_message_async(client_r))
         .await
@@ -617,16 +715,15 @@ async fn send_init_and_initialized(
         "method": "initialized",
         "params": {}
     });
-    client_w.write_all(&lsp_message(&initialized.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&initialized.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 }
 
 /// Send textDocument/didOpen for the test document with the given text.
-async fn open_document(
-    client_w: &mut tokio::io::DuplexStream,
-    text: &str,
-    version: i32,
-) {
+async fn open_document(client_w: &mut tokio::io::DuplexStream, text: &str, version: i32) {
     let did_open = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "textDocument/didOpen",
@@ -639,7 +736,10 @@ async fn open_document(
             }
         }
     });
-    client_w.write_all(&lsp_message(&did_open.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&did_open.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 }
 
@@ -662,7 +762,10 @@ async fn open_document_uri(
             }
         }
     });
-    client_w.write_all(&lsp_message(&did_open.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&did_open.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 }
 
@@ -672,9 +775,8 @@ async fn native_multi_document_hover_two_virtual_uris() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -692,21 +794,21 @@ async fn native_multi_document_hover_two_virtual_uris() {
             "position": { "line": 0, "character": 2 }
         }
     });
-    client_w.write_all(&lsp_message(&hover_a.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&hover_a.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
-    let body_a = timeout(
-        Duration::from_secs(5),
-        async {
-            loop {
-                let b = read_one_lsp_message_async(&mut client_r).await.unwrap();
-                let v: serde_json::Value = serde_json::from_str(&b).unwrap();
-                if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
-                    return b;
-                }
+    let body_a = timeout(Duration::from_secs(5), async {
+        loop {
+            let b = read_one_lsp_message_async(&mut client_r).await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
+                return b;
             }
-        },
-    )
+        }
+    })
     .await
     .expect("timeout on hover A");
     let res_a: serde_json::Value = serde_json::from_str(&body_a).unwrap();
@@ -714,7 +816,11 @@ async fn native_multi_document_hover_two_virtual_uris() {
         .as_str()
         .or_else(|| res_a["result"]["contents"]["value"].as_str())
         .unwrap_or_default();
-    assert!(content.contains("11"), "node_a hover should show 11: {}", content);
+    assert!(
+        content.contains("11"),
+        "node_a hover should show 11: {}",
+        content
+    );
 
     let hover_b = serde_json::json!({
         "jsonrpc": "2.0",
@@ -725,21 +831,21 @@ async fn native_multi_document_hover_two_virtual_uris() {
             "position": { "line": 0, "character": 2 }
         }
     });
-    client_w.write_all(&lsp_message(&hover_b.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&hover_b.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
-    let body_b = timeout(
-        Duration::from_secs(5),
-        async {
-            loop {
-                let b = read_one_lsp_message_async(&mut client_r).await.unwrap();
-                let v: serde_json::Value = serde_json::from_str(&b).unwrap();
-                if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
-                    return b;
-                }
+    let body_b = timeout(Duration::from_secs(5), async {
+        loop {
+            let b = read_one_lsp_message_async(&mut client_r).await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
+                return b;
             }
-        },
-    )
+        }
+    })
     .await
     .expect("timeout on hover B");
     let res_b: serde_json::Value = serde_json::from_str(&body_b).unwrap();
@@ -747,7 +853,11 @@ async fn native_multi_document_hover_two_virtual_uris() {
         .as_str()
         .or_else(|| res_b["result"]["contents"]["value"].as_str())
         .unwrap_or_default();
-    assert!(content_b.contains("22"), "node_b hover should show 22: {}", content_b);
+    assert!(
+        content_b.contains("22"),
+        "node_b hover should show 22: {}",
+        content_b
+    );
 
     server_handle.abort();
     let _ = server_handle.await;
@@ -759,9 +869,8 @@ async fn native_graph_connect_success() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -786,21 +895,21 @@ async fn native_graph_connect_success() {
             "targetInputName": "x"
         }
     });
-    client_w.write_all(&lsp_message(&connect_request.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&connect_request.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
-    let body = timeout(
-        Duration::from_secs(5),
-        async {
-            loop {
-                let b = read_one_lsp_message_async(&mut client_r).await.unwrap();
-                let v: serde_json::Value = serde_json::from_str(&b).unwrap();
-                if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
-                    return b;
-                }
+    let body = timeout(Duration::from_secs(5), async {
+        loop {
+            let b = read_one_lsp_message_async(&mut client_r).await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
+                return b;
             }
-        },
-    )
+        }
+    })
     .await
     .expect("timeout on connect response");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -817,9 +926,8 @@ async fn native_graph_connect_target_undefined_accepts_any() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -844,25 +952,29 @@ async fn native_graph_connect_target_undefined_accepts_any() {
             "targetInputName": "x"
         }
     });
-    client_w.write_all(&lsp_message(&connect_request.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&connect_request.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
-    let body = timeout(
-        Duration::from_secs(5),
-        async {
-            loop {
-                let b = read_one_lsp_message_async(&mut client_r).await.unwrap();
-                let v: serde_json::Value = serde_json::from_str(&b).unwrap();
-                if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
-                    return b;
-                }
+    let body = timeout(Duration::from_secs(5), async {
+        loop {
+            let b = read_one_lsp_message_async(&mut client_r).await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
+                return b;
             }
-        },
-    )
+        }
+    })
     .await
     .expect("timeout on connect response");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert!(v.get("error").is_none(), "connect Numeric→Undefined should succeed: {}", body);
+    assert!(
+        v.get("error").is_none(),
+        "connect Numeric→Undefined should succeed: {}",
+        body
+    );
     assert!(v.get("result").is_some());
 
     server_handle.abort();
@@ -875,9 +987,8 @@ async fn native_graph_connect_type_mismatch_returns_error() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -902,25 +1013,27 @@ async fn native_graph_connect_type_mismatch_returns_error() {
             "targetInputName": "x"
         }
     });
-    client_w.write_all(&lsp_message(&connect_request.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&connect_request.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
-    let body = timeout(
-        Duration::from_secs(5),
-        async {
-            loop {
-                let b = read_one_lsp_message_async(&mut client_r).await.unwrap();
-                let v: serde_json::Value = serde_json::from_str(&b).unwrap();
-                if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
-                    return b;
-                }
+    let body = timeout(Duration::from_secs(5), async {
+        loop {
+            let b = read_one_lsp_message_async(&mut client_r).await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
+                return b;
             }
-        },
-    )
+        }
+    })
     .await
     .expect("timeout on connect response");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let err = v.get("error").expect("connect with type mismatch should error");
+    let err = v
+        .get("error")
+        .expect("connect with type mismatch should error");
     let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
     assert_eq!(code, -32001, "ServerError(-32001) Type mismatch");
     let message = err.get("message").and_then(|m| m.as_str()).unwrap_or("");
@@ -940,9 +1053,8 @@ async fn native_subscribe_widget_scalar_returns_completed() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -956,18 +1068,28 @@ async fn native_subscribe_widget_scalar_returns_completed() {
         "method": "snaqlite/graph/subscribeWidget",
         "params": { "widgetId": "w1", "sourceUri": "snaq://graph/node.sl" }
     });
-    client_w.write_all(&lsp_message(&subscribe_widget.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&subscribe_widget.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut got_completed = false;
     for _ in 0..10 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
-            assert!(v.get("error").is_none(), "subscribeWidget should succeed: {}", v);
+            assert!(
+                v.get("error").is_none(),
+                "subscribeWidget should succeed: {}",
+                v
+            );
         }
         if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
             let params = v.get("params").and_then(|p| p.as_object()).unwrap();
@@ -978,7 +1100,10 @@ async fn native_subscribe_widget_scalar_returns_completed() {
             }
         }
     }
-    assert!(got_completed, "client should receive widgetDataUpdate Completed");
+    assert!(
+        got_completed,
+        "client should receive widgetDataUpdate Completed"
+    );
 
     server_handle.abort();
     let _ = server_handle.await;
@@ -990,9 +1115,8 @@ async fn native_subscribe_widget_then_unsubscribe_receives_cancelled() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -1006,15 +1130,21 @@ async fn native_subscribe_widget_then_unsubscribe_receives_cancelled() {
         "method": "snaqlite/graph/subscribeWidget",
         "params": { "widgetId": "w-unsub", "sourceUri": "snaq://graph/node.sl" }
     });
-    client_w.write_all(&lsp_message(&subscribe_widget.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&subscribe_widget.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     // Consume subscribe response (id 2); widget is registered for vector.
     loop {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
             break;
@@ -1027,15 +1157,21 @@ async fn native_subscribe_widget_then_unsubscribe_receives_cancelled() {
         "method": "snaqlite/graph/unsubscribeWidget",
         "params": { "widgetId": "w-unsub" }
     });
-    client_w.write_all(&lsp_message(&unsub.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&unsub.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut got_cancelled = false;
     for _ in 0..15 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
             let params = v.get("params").and_then(|p| p.as_object()).unwrap();
@@ -1045,7 +1181,10 @@ async fn native_subscribe_widget_then_unsubscribe_receives_cancelled() {
             }
         }
     }
-    assert!(got_cancelled, "client should receive widgetDataUpdate Cancelled after unsubscribe");
+    assert!(
+        got_cancelled,
+        "client should receive widgetDataUpdate Cancelled after unsubscribe"
+    );
 
     server_handle.abort();
     let _ = server_handle.await;
@@ -1057,9 +1196,8 @@ async fn native_subscribe_widget_vector_then_fetch_result_slice_returns_elements
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -1073,18 +1211,28 @@ async fn native_subscribe_widget_vector_then_fetch_result_slice_returns_elements
         "method": "snaqlite/graph/subscribeWidget",
         "params": { "widgetId": "w-slice", "sourceUri": "snaq://graph/node.sl" }
     });
-    client_w.write_all(&lsp_message(&subscribe_widget.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&subscribe_widget.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut got_completed = false;
     for _ in 0..15 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
-            assert!(v.get("error").is_none(), "subscribeWidget should succeed: {}", v);
+            assert!(
+                v.get("error").is_none(),
+                "subscribeWidget should succeed: {}",
+                v
+            );
         }
         if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
             let params = v.get("params").and_then(|p| p.as_object()).unwrap();
@@ -1094,7 +1242,10 @@ async fn native_subscribe_widget_vector_then_fetch_result_slice_returns_elements
             }
         }
     }
-    assert!(got_completed, "client should receive widgetDataUpdate Completed before fetchResultSlice");
+    assert!(
+        got_completed,
+        "client should receive widgetDataUpdate Completed before fetchResultSlice"
+    );
 
     let fetch_slice = serde_json::json!({
         "jsonrpc": "2.0",
@@ -1102,18 +1253,28 @@ async fn native_subscribe_widget_vector_then_fetch_result_slice_returns_elements
         "method": "snaqlite/graph/fetchResultSlice",
         "params": { "widgetId": "w-slice", "path": [], "offset": 0, "limit": 10 }
     });
-    client_w.write_all(&lsp_message(&fetch_slice.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&fetch_slice.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut slice_response: Option<serde_json::Value> = None;
     for _ in 0..10 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
-            assert!(v.get("error").is_none(), "fetchResultSlice should succeed: {}", v);
+            assert!(
+                v.get("error").is_none(),
+                "fetchResultSlice should succeed: {}",
+                v
+            );
             slice_response = v.get("result").cloned();
             break;
         }
@@ -1134,9 +1295,8 @@ async fn native_fetch_result_slice_offset_limit_returns_single_element() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -1150,18 +1310,28 @@ async fn native_fetch_result_slice_offset_limit_returns_single_element() {
         "method": "snaqlite/graph/subscribeWidget",
         "params": { "widgetId": "w-path", "sourceUri": "snaq://graph/node.sl" }
     });
-    client_w.write_all(&lsp_message(&subscribe_widget.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&subscribe_widget.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut got_completed = false;
     for _ in 0..15 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
-            assert!(v.get("error").is_none(), "subscribeWidget should succeed: {}", v);
+            assert!(
+                v.get("error").is_none(),
+                "subscribeWidget should succeed: {}",
+                v
+            );
         }
         if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
             let params = v.get("params").and_then(|p| p.as_object()).unwrap();
@@ -1171,7 +1341,10 @@ async fn native_fetch_result_slice_offset_limit_returns_single_element() {
             }
         }
     }
-    assert!(got_completed, "client should receive widgetDataUpdate Completed");
+    assert!(
+        got_completed,
+        "client should receive widgetDataUpdate Completed"
+    );
 
     let fetch_slice = serde_json::json!({
         "jsonrpc": "2.0",
@@ -1179,25 +1352,39 @@ async fn native_fetch_result_slice_offset_limit_returns_single_element() {
         "method": "snaqlite/graph/fetchResultSlice",
         "params": { "widgetId": "w-path", "path": [], "offset": 1, "limit": 1 }
     });
-    client_w.write_all(&lsp_message(&fetch_slice.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&fetch_slice.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut slice_response: Option<serde_json::Value> = None;
     for _ in 0..10 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
-            assert!(v.get("error").is_none(), "fetchResultSlice should succeed: {}", v);
+            assert!(
+                v.get("error").is_none(),
+                "fetchResultSlice should succeed: {}",
+                v
+            );
             slice_response = v.get("result").cloned();
             break;
         }
     }
     let res = slice_response.expect("client should receive fetchResultSlice response");
     let elements = res.get("elements").and_then(|e| e.as_array()).unwrap();
-    assert_eq!(elements.len(), 1, "offset 1 limit 1 should yield one element");
+    assert_eq!(
+        elements.len(),
+        1,
+        "offset 1 limit 1 should yield one element"
+    );
     let display = elements[0]
         .get("display")
         .and_then(|d| d.as_str())
@@ -1216,9 +1403,8 @@ async fn native_fetch_result_slice_unknown_widget_returns_error() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -1232,15 +1418,21 @@ async fn native_fetch_result_slice_unknown_widget_returns_error() {
         "method": "snaqlite/graph/fetchResultSlice",
         "params": { "widgetId": "never-subscribed", "path": [], "offset": 0, "limit": 10 }
     });
-    client_w.write_all(&lsp_message(&fetch_slice.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&fetch_slice.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut response: Option<serde_json::Value> = None;
     for _ in 0..5 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(1) {
             response = Some(v);
@@ -1248,7 +1440,10 @@ async fn native_fetch_result_slice_unknown_widget_returns_error() {
         }
     }
     let res = response.expect("client should receive response");
-    let err = res.get("error").and_then(|e| e.as_object()).expect("response should have error");
+    let err = res
+        .get("error")
+        .and_then(|e| e.as_object())
+        .expect("response should have error");
     assert_eq!(err.get("code").and_then(|c| c.as_i64()), Some(-32602));
     let message = err.get("message").and_then(|m| m.as_str()).unwrap_or("");
     assert!(
@@ -1267,9 +1462,8 @@ async fn native_subscribe_widget_then_did_change_receives_cancelled() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -1284,15 +1478,21 @@ async fn native_subscribe_widget_then_did_change_receives_cancelled() {
         "method": "snaqlite/graph/subscribeWidget",
         "params": { "widgetId": "w-doc-change", "sourceUri": uri }
     });
-    client_w.write_all(&lsp_message(&subscribe_widget.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&subscribe_widget.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     // Consume subscribe response (id 2) so widget is registered for vector.
     loop {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(2) {
             break;
@@ -1307,15 +1507,21 @@ async fn native_subscribe_widget_then_did_change_receives_cancelled() {
             "contentChanges": [{ "text": "[6, 11]" }]
         }
     });
-    client_w.write_all(&lsp_message(&did_change.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&did_change.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut got_cancelled = false;
     for _ in 0..15 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
             let params = v.get("params").and_then(|p| p.as_object()).unwrap();
@@ -1335,10 +1541,7 @@ async fn native_subscribe_widget_then_did_change_receives_cancelled() {
 }
 
 /// Read LSP messages until we get a response with the given id; return that message body.
-async fn read_until_response_id(
-    client_r: &mut tokio::io::DuplexStream,
-    id: u64,
-) -> String {
+async fn read_until_response_id(client_r: &mut tokio::io::DuplexStream, id: u64) -> String {
     loop {
         let body = timeout(Duration::from_secs(5), read_one_lsp_message_async(client_r))
             .await
@@ -1357,9 +1560,8 @@ async fn native_graph_disconnect_removes_edge() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -1384,7 +1586,10 @@ async fn native_graph_disconnect_removes_edge() {
             "targetInputName": "x"
         }
     });
-    client_w.write_all(&lsp_message(&connect_req.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
     let _ = read_until_response_id(&mut client_r, 2).await;
 
@@ -1394,11 +1599,18 @@ async fn native_graph_disconnect_removes_edge() {
         "method": "snaqlite/graph/disconnect",
         "params": { "targetUri": "snaq://graph/tgt.sl", "targetInputName": "x" }
     });
-    client_w.write_all(&lsp_message(&disconnect_req.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&disconnect_req.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
     let body = read_until_response_id(&mut client_r, 3).await;
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert!(v.get("error").is_none(), "disconnect should succeed: {}", body);
+    assert!(
+        v.get("error").is_none(),
+        "disconnect should succeed: {}",
+        body
+    );
 
     server_handle.abort();
     let _ = server_handle.await;
@@ -1410,9 +1622,8 @@ async fn native_node_signature_updated_after_did_open() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -1428,10 +1639,13 @@ async fn native_node_signature_updated_after_did_open() {
 
     let mut got_signature = false;
     for _ in 0..15 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/nodeSignatureUpdated") {
             let params = v.get("params").and_then(|p| p.as_object()).expect("params");
@@ -1439,13 +1653,20 @@ async fn native_node_signature_updated_after_did_open() {
                 params.get("uri").and_then(|u| u.as_str()),
                 Some("snaq://graph/node.sl")
             );
-            let inputs = params.get("inputs").and_then(|i| i.as_array()).expect("inputs array");
+            let inputs = params
+                .get("inputs")
+                .and_then(|i| i.as_array())
+                .expect("inputs array");
             assert_eq!(inputs.len(), 1);
             let port = inputs[0].as_object().expect("input port");
             assert_eq!(port.get("name").and_then(|n| n.as_str()), Some("x"));
             assert_eq!(port.get("type").and_then(|t| t.as_str()), Some("Vector"));
             let out = params.get("outputType").and_then(|o| o.as_str());
-            assert!(out == Some("Vector") || out == None, "outputType: {:?}", out);
+            assert!(
+                out == Some("Vector") || out.is_none(),
+                "outputType: {:?}",
+                out
+            );
             got_signature = true;
             break;
         }
@@ -1468,9 +1689,8 @@ async fn native_graph_wired_widget_gets_downstream_result() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -1495,7 +1715,10 @@ async fn native_graph_wired_widget_gets_downstream_result() {
             "targetInputName": "x"
         }
     });
-    client_w.write_all(&lsp_message(&connect_req.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
     let _ = read_until_response_id(&mut client_r, 2).await;
 
@@ -1505,7 +1728,10 @@ async fn native_graph_wired_widget_gets_downstream_result() {
         "method": "snaqlite/graph/subscribeWidget",
         "params": { "widgetId": "w-wired", "sourceUri": "snaq://graph/downstream.sl" }
     });
-    client_w.write_all(&lsp_message(&subscribe_widget.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&subscribe_widget.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     // Give the widget consumer thread time to send Running/Completed before we trigger drain.
@@ -1521,19 +1747,29 @@ async fn native_graph_wired_widget_gets_downstream_result() {
             "position": { "line": 0, "character": 0 }
         }
     });
-    client_w.write_all(&lsp_message(&hover_req.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&hover_req.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut got_completed = false;
     let mut total_elements: Option<u64> = None;
     for _ in 0..25 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
-            assert!(v.get("error").is_none(), "subscribeWidget should succeed: {}", v);
+            assert!(
+                v.get("error").is_none(),
+                "subscribeWidget should succeed: {}",
+                v
+            );
         }
         if v.get("id").and_then(|i| i.as_u64()) == Some(4) {
             // Hover response; continue to collect notifications
@@ -1560,7 +1796,7 @@ async fn native_graph_wired_widget_gets_downstream_result() {
     );
     // Vector path sends totalElements; we expect at least 1 from upstream (confirms graph wiring).
     assert!(
-        total_elements.map_or(false, |n| n >= 1),
+        total_elements.is_some_and(|n| n >= 1),
         "downstream node should receive vector from upstream (totalElements), got {:?}",
         total_elements
     );
@@ -1576,9 +1812,8 @@ async fn native_computation_to_computation_wired_input_binds_identifier() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -1603,7 +1838,10 @@ async fn native_computation_to_computation_wired_input_binds_identifier() {
             "targetInputName": "abc"
         }
     });
-    client_w.write_all(&lsp_message(&connect_req.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
     let _ = read_until_response_id(&mut client_r, 2).await;
 
@@ -1613,7 +1851,10 @@ async fn native_computation_to_computation_wired_input_binds_identifier() {
         "method": "snaqlite/graph/subscribeWidget",
         "params": { "widgetId": "w-cc", "sourceUri": "snaq://graph/downstream.sl" }
     });
-    client_w.write_all(&lsp_message(&subscribe_widget.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&subscribe_widget.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(WIDGET_DRAIN_DELAY_MS)).await;
@@ -1627,18 +1868,28 @@ async fn native_computation_to_computation_wired_input_binds_identifier() {
             "position": { "line": 0, "character": 0 }
         }
     });
-    client_w.write_all(&lsp_message(&hover_req.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&hover_req.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut got_completed_420 = false;
     for _ in 0..25 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
-            assert!(v.get("error").is_none(), "subscribeWidget should succeed: {}", v);
+            assert!(
+                v.get("error").is_none(),
+                "subscribeWidget should succeed: {}",
+                v
+            );
         }
         if v.get("id").and_then(|i| i.as_u64()) == Some(4) {
             continue;
@@ -1650,7 +1901,9 @@ async fn native_computation_to_computation_wired_input_binds_identifier() {
                 .expect("widgetDataUpdate should have params");
             if params.get("status").and_then(|s| s.as_str()) == Some("Completed") {
                 let payload = params.get("payload").and_then(|p| p.as_object());
-                let display = payload.and_then(|p| p.get("display")).and_then(|s| s.as_str());
+                let display = payload
+                    .and_then(|p| p.get("display"))
+                    .and_then(|s| s.as_str());
                 if display == Some("420") {
                     got_completed_420 = true;
                     break;
@@ -1674,9 +1927,8 @@ async fn native_one_output_to_two_inputs_same_box_yields_result() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -1701,7 +1953,10 @@ async fn native_one_output_to_two_inputs_same_box_yields_result() {
             "targetInputName": "abc"
         }
     });
-    client_w.write_all(&lsp_message(&connect_abc.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&connect_abc.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
     let _ = read_until_response_id(&mut client_r, 2).await;
 
@@ -1715,7 +1970,10 @@ async fn native_one_output_to_two_inputs_same_box_yields_result() {
             "targetInputName": "ggg"
         }
     });
-    client_w.write_all(&lsp_message(&connect_ggg.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&connect_ggg.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
     let _ = read_until_response_id(&mut client_r, 3).await;
 
@@ -1725,20 +1983,30 @@ async fn native_one_output_to_two_inputs_same_box_yields_result() {
         "method": "snaqlite/graph/subscribeWidget",
         "params": { "widgetId": "w-fanout", "sourceUri": "snaq://graph/downstream.sl" }
     });
-    client_w.write_all(&lsp_message(&subscribe_widget.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&subscribe_widget.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(WIDGET_DRAIN_DELAY_MS)).await;
 
     let mut got_completed_1764 = false;
     for _ in 0..25 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(4) {
-            assert!(v.get("error").is_none(), "subscribeWidget should succeed: {}", v);
+            assert!(
+                v.get("error").is_none(),
+                "subscribeWidget should succeed: {}",
+                v
+            );
         }
         if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
             let params = v
@@ -1747,7 +2015,9 @@ async fn native_one_output_to_two_inputs_same_box_yields_result() {
                 .expect("widgetDataUpdate should have params");
             if params.get("status").and_then(|s| s.as_str()) == Some("Completed") {
                 let payload = params.get("payload").and_then(|p| p.as_object());
-                let display = payload.and_then(|p| p.get("display")).and_then(|s| s.as_str());
+                let display = payload
+                    .and_then(|p| p.get("display"))
+                    .and_then(|s| s.as_str());
                 if display == Some("1764") {
                     got_completed_1764 = true;
                     break;
@@ -1772,9 +2042,8 @@ async fn native_downstream_widget_receives_push_update_when_source_changes() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -1799,7 +2068,10 @@ async fn native_downstream_widget_receives_push_update_when_source_changes() {
             "targetInputName": "x"
         }
     });
-    client_w.write_all(&lsp_message(&connect_req.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
     let _ = read_until_response_id(&mut client_r, 2).await;
 
@@ -1809,7 +2081,10 @@ async fn native_downstream_widget_receives_push_update_when_source_changes() {
         "method": "snaqlite/graph/subscribeWidget",
         "params": { "widgetId": "w-scalar", "sourceUri": "snaq://graph/target.sl" }
     });
-    client_w.write_all(&lsp_message(&subscribe_widget.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&subscribe_widget.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(WIDGET_DRAIN_DELAY_MS)).await;
@@ -1823,19 +2098,29 @@ async fn native_downstream_widget_receives_push_update_when_source_changes() {
             "position": { "line": 0, "character": 0 }
         }
     });
-    client_w.write_all(&lsp_message(&hover_req.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&hover_req.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut got_subscribe_ok = false;
     let mut got_completed = false;
     for _ in 0..25 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout reading subscribe response or first Completed")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout reading subscribe response or first Completed")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
-            assert!(v.get("error").is_none(), "subscribeWidget should succeed: {}", body);
+            assert!(
+                v.get("error").is_none(),
+                "subscribeWidget should succeed: {}",
+                body
+            );
             got_subscribe_ok = true;
         }
         if v.get("id").and_then(|i| i.as_u64()) == Some(4) {
@@ -1845,8 +2130,12 @@ async fn native_downstream_widget_receives_push_update_when_source_changes() {
             let params = v.get("params").and_then(|p| p.as_object()).unwrap();
             if params.get("status").and_then(|s| s.as_str()) == Some("Completed") {
                 let payload = params.get("payload").and_then(|p| p.as_object());
-                let display = payload.and_then(|p| p.get("display")).and_then(|s| s.as_str());
-                let total_elements = payload.and_then(|p| p.get("totalElements")).and_then(|n| n.as_u64());
+                let display = payload
+                    .and_then(|p| p.get("display"))
+                    .and_then(|s| s.as_str());
+                let total_elements = payload
+                    .and_then(|p| p.get("totalElements"))
+                    .and_then(|n| n.as_u64());
                 assert!(display == Some("7") || total_elements == Some(1), "initial Completed should have display \"7\" or totalElements 1, got payload {:?}", payload);
                 got_completed = true;
             }
@@ -1855,7 +2144,10 @@ async fn native_downstream_widget_receives_push_update_when_source_changes() {
             break;
         }
     }
-    assert!(got_subscribe_ok, "subscribeWidget should return success (id 3)");
+    assert!(
+        got_subscribe_ok,
+        "subscribeWidget should return success (id 3)"
+    );
 
     let did_change = serde_json::json!({
         "jsonrpc": "2.0",
@@ -1865,7 +2157,10 @@ async fn native_downstream_widget_receives_push_update_when_source_changes() {
             "contentChanges": [{ "text": "100" }]
         }
     });
-    client_w.write_all(&lsp_message(&did_change.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&did_change.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(WIDGET_DRAIN_DELAY_MS)).await;
@@ -1879,16 +2174,22 @@ async fn native_downstream_widget_receives_push_update_when_source_changes() {
             "position": { "line": 0, "character": 0 }
         }
     });
-    client_w.write_all(&lsp_message(&hover_after_change.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&hover_after_change.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut second_completed_ok = false;
     let mut got_cancelled = false;
     for _ in 0..25 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout waiting for second widgetDataUpdate")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout waiting for second widgetDataUpdate")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(5) {
             continue;
@@ -1901,8 +2202,12 @@ async fn native_downstream_widget_receives_push_update_when_source_changes() {
             }
             if status == Some("Completed") {
                 let payload = params.get("payload").and_then(|p| p.as_object());
-                let display = payload.and_then(|p| p.get("display")).and_then(|s| s.as_str());
-                let total_elements = payload.and_then(|p| p.get("totalElements")).and_then(|n| n.as_u64());
+                let display = payload
+                    .and_then(|p| p.get("display"))
+                    .and_then(|s| s.as_str());
+                let total_elements = payload
+                    .and_then(|p| p.get("totalElements"))
+                    .and_then(|n| n.as_u64());
                 second_completed_ok = display == Some("100") || total_elements == Some(1);
                 break;
             }
@@ -1929,9 +2234,8 @@ async fn native_subscribe_then_connect_refreshes_widget_with_result() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
 
-    let server_handle = tokio::spawn(async move {
-        snaq_lite_lsp::run_native(server_r, server_w).await
-    });
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
 
     let mut client_w = client_w;
     let mut client_r = client_r;
@@ -1953,30 +2257,51 @@ async fn native_subscribe_then_connect_refreshes_widget_with_result() {
         "method": "snaqlite/graph/subscribeWidget",
         "params": { "widgetId": "w-pres", "sourceUri": "snaq://graph/pres.sl" }
     });
-    client_w.write_all(&lsp_message(&subscribe_widget.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&subscribe_widget.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut got_error_notification = false;
     for _ in 0..15 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout reading subscribe response or Error notification")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout reading subscribe response or Error notification")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
-            assert!(v.get("error").is_none(), "subscribeWidget returns Ok(()) and sends Error via notification: {}", body);
+            assert!(
+                v.get("error").is_none(),
+                "subscribeWidget returns Ok(()) and sends Error via notification: {}",
+                body
+            );
         }
         if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
             let params = v.get("params").and_then(|p| p.as_object()).unwrap();
             if params.get("status").and_then(|s| s.as_str()) == Some("Error") {
-                let msg = params.get("payload").and_then(|p| p.get("message")).and_then(|s| s.as_str()).unwrap_or("");
-                assert!(msg.contains("unbound") || msg.contains("stream"), "Error payload should mention unbound stream: {}", msg);
+                let msg = params
+                    .get("payload")
+                    .and_then(|p| p.get("message"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
+                assert!(
+                    msg.contains("unbound") || msg.contains("stream"),
+                    "Error payload should mention unbound stream: {}",
+                    msg
+                );
                 got_error_notification = true;
                 break;
             }
         }
     }
-    assert!(got_error_notification, "client should receive widgetDataUpdate Error (unbound) before connect");
+    assert!(
+        got_error_notification,
+        "client should receive widgetDataUpdate Error (unbound) before connect"
+    );
 
     // Connect: LSP adds edge and calls refresh_widgets_for_uri(pres). Connect must succeed.
     let connect_req = serde_json::json!({
@@ -1989,12 +2314,19 @@ async fn native_subscribe_then_connect_refreshes_widget_with_result() {
             "targetInputName": "x"
         }
     });
-    client_w.write_all(&lsp_message(&connect_req.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let connect_body = read_until_response_id(&mut client_r, 4).await;
     let connect_v: serde_json::Value = serde_json::from_str(&connect_body).unwrap();
-    assert!(connect_v.get("error").is_none(), "graph/connect should succeed (refresh_widgets_for_uri runs after adding edge): {}", connect_body);
+    assert!(
+        connect_v.get("error").is_none(),
+        "graph/connect should succeed (refresh_widgets_for_uri runs after adding edge): {}",
+        connect_body
+    );
 
     // Trigger drain so we receive any widgetDataUpdate from refresh_widgets_for_uri.
     tokio::time::sleep(Duration::from_millis(WIDGET_DRAIN_DELAY_MS)).await;
@@ -2007,15 +2339,21 @@ async fn native_subscribe_then_connect_refreshes_widget_with_result() {
             "position": { "line": 0, "character": 0 }
         }
     });
-    client_w.write_all(&lsp_message(&hover_req.to_string())).await.unwrap();
+    client_w
+        .write_all(&lsp_message(&hover_req.to_string()))
+        .await
+        .unwrap();
     client_w.flush().await.unwrap();
 
     let mut got_widget_update_after_connect = false;
     for _ in 0..15 {
-        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
-            .await
-            .expect("timeout reading widgetDataUpdate or hover response after connect")
-            .unwrap();
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout reading widgetDataUpdate or hover response after connect")
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         if v.get("id").and_then(|i| i.as_u64()) == Some(5) {
             continue;
@@ -2032,6 +2370,499 @@ async fn native_subscribe_then_connect_refreshes_widget_with_result() {
     assert!(
         got_widget_update_after_connect,
         "after graph/connect, refresh_widgets_for_uri should push a widgetDataUpdate (Completed or Error); hover drains it"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn native_incremental_did_change_updates_hover_result() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document(&mut client_w, "1 + 2", 1).await;
+
+    let did_change = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": TEST_DOC_URI, "version": 2 },
+            "contentChanges": [{
+                "range": {
+                    "start": { "line": 0, "character": 4 },
+                    "end": { "line": 0, "character": 5 }
+                },
+                "text": "3"
+            }]
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&did_change.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let hover_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "textDocument/hover",
+        "params": { "textDocument": { "uri": TEST_DOC_URI }, "position": { "line": 0, "character": 2 } }
+    });
+    client_w
+        .write_all(&lsp_message(&hover_request.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let body = read_until_response_id(&mut client_r, 9).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let content = v["result"]["contents"]
+        .as_str()
+        .or_else(|| v["result"]["contents"]["value"].as_str())
+        .unwrap_or_default();
+    assert!(
+        content.contains("4"),
+        "hover should reflect incremental update to 1+3=4: {}",
+        content
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn native_unicode_pi_hover_and_diagnostics_work() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document(&mut client_w, "π + 1", 1).await;
+
+    let hover_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "textDocument/hover",
+        "params": { "textDocument": { "uri": TEST_DOC_URI }, "position": { "line": 0, "character": 0 } }
+    });
+    client_w
+        .write_all(&lsp_message(&hover_request.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let hover_body = read_until_response_id(&mut client_r, 10).await;
+    let hover_json: serde_json::Value = serde_json::from_str(&hover_body).unwrap();
+    let content = hover_json["result"]["contents"]
+        .as_str()
+        .or_else(|| hover_json["result"]["contents"]["value"].as_str())
+        .unwrap_or_default();
+    assert!(!content.is_empty(), "unicode hover should return content");
+
+    let did_change = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": TEST_DOC_URI, "version": 2 },
+            "contentChanges": [{ "text": "π + )" }]
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&did_change.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut got_diag = false;
+    for _ in 0..10 {
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout")
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("textDocument/publishDiagnostics") {
+            let params = v.get("params").and_then(|p| p.as_object()).unwrap();
+            let diags_len = params
+                .get("diagnostics")
+                .and_then(|d| d.as_array())
+                .map(|d| d.len())
+                .unwrap_or(0);
+            if diags_len > 0 {
+                got_diag = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        got_diag,
+        "expected diagnostics after invalid unicode-containing document"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn native_standard_lsp_features_completion_definition_references_symbols_rename() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document(&mut client_w, "x = 1\nx + 2", 1).await;
+
+    let completion = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "textDocument/completion",
+        "params": {
+            "textDocument": { "uri": TEST_DOC_URI },
+            "position": { "line": 1, "character": 0 }
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&completion.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let completion_body = read_until_response_id(&mut client_r, 11).await;
+    let completion_json: serde_json::Value = serde_json::from_str(&completion_body).unwrap();
+    let items = completion_json["result"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !items.is_empty(),
+        "completion should return at least one item"
+    );
+
+    let definition = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 12,
+        "method": "textDocument/definition",
+        "params": {
+            "textDocument": { "uri": TEST_DOC_URI },
+            "position": { "line": 1, "character": 0 }
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&definition.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let definition_body = read_until_response_id(&mut client_r, 12).await;
+    let definition_json: serde_json::Value = serde_json::from_str(&definition_body).unwrap();
+    let defs = definition_json["result"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !defs.is_empty(),
+        "definition should return declaration location"
+    );
+
+    let references = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 13,
+        "method": "textDocument/references",
+        "params": {
+            "textDocument": { "uri": TEST_DOC_URI },
+            "position": { "line": 1, "character": 0 },
+            "context": { "includeDeclaration": true }
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&references.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let references_body = read_until_response_id(&mut client_r, 13).await;
+    let references_json: serde_json::Value = serde_json::from_str(&references_body).unwrap();
+    let refs = references_json["result"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        refs.len() >= 2,
+        "references should include declaration and use"
+    );
+
+    let doc_symbols = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 14,
+        "method": "textDocument/documentSymbol",
+        "params": { "textDocument": { "uri": TEST_DOC_URI } }
+    });
+    client_w
+        .write_all(&lsp_message(&doc_symbols.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let symbols_body = read_until_response_id(&mut client_r, 14).await;
+    let symbols_json: serde_json::Value = serde_json::from_str(&symbols_body).unwrap();
+    let syms = symbols_json["result"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !syms.is_empty(),
+        "document symbols should return at least one symbol"
+    );
+
+    let rename = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 15,
+        "method": "textDocument/rename",
+        "params": {
+            "textDocument": { "uri": TEST_DOC_URI },
+            "position": { "line": 1, "character": 0 },
+            "newName": "total"
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&rename.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let rename_body = read_until_response_id(&mut client_r, 15).await;
+    let rename_json: serde_json::Value = serde_json::from_str(&rename_body).unwrap();
+    let edits = rename_json["result"]["changes"][TEST_DOC_URI]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        edits.len() >= 2,
+        "rename should produce edits for declaration and references"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn native_incremental_multi_change_and_unicode_edits_apply_correctly() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    // line 0 has a unicode symbol; line 1 is edited in same didChange batch
+    open_document(&mut client_w, "π + 1\nx = 1\nx + 1", 1).await;
+
+    let did_change = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": TEST_DOC_URI, "version": 2 },
+            "contentChanges": [
+                {
+                    // Replace the digit in unicode-containing expression.
+                    "range": {
+                        "start": { "line": 0, "character": 5 },
+                        "end": { "line": 0, "character": 6 }
+                    },
+                    "text": "2"
+                },
+                {
+                    // Replace declaration line x = 1 -> x = 3
+                    "range": {
+                        "start": { "line": 1, "character": 4 },
+                        "end": { "line": 1, "character": 5 }
+                    },
+                    "text": "3"
+                }
+            ]
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&did_change.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut saw_empty_diagnostics = false;
+    for _ in 0..10 {
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout waiting for diagnostics")
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("textDocument/publishDiagnostics") {
+            let params = v.get("params").and_then(|p| p.as_object()).unwrap();
+            if params.get("uri").and_then(|u| u.as_str()) == Some(TEST_DOC_URI) {
+                let count = params
+                    .get("diagnostics")
+                    .and_then(|d| d.as_array())
+                    .map(|d| d.len())
+                    .unwrap_or(0);
+                if count == 0 {
+                    saw_empty_diagnostics = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        saw_empty_diagnostics,
+        "multi-change incremental edit should keep document valid"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn native_rename_invalid_identifier_returns_invalid_params() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document(&mut client_w, "x = 1\nx + 2", 1).await;
+
+    let rename = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 17,
+        "method": "textDocument/rename",
+        "params": {
+            "textDocument": { "uri": TEST_DOC_URI },
+            "position": { "line": 1, "character": 0 },
+            "newName": "9bad"
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&rename.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 17).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let err = v.get("error").expect("invalid rename should error");
+    assert_eq!(err.get("code").and_then(|c| c.as_i64()), Some(-32602));
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn native_definition_and_references_work_for_virtual_uri() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/node_std.sl", "a = 10\na + 1", 1).await;
+
+    let definition = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 18,
+        "method": "textDocument/definition",
+        "params": {
+            "textDocument": { "uri": "snaq://graph/node_std.sl" },
+            "position": { "line": 1, "character": 0 }
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&definition.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let definition_body = read_until_response_id(&mut client_r, 18).await;
+    let definition_json: serde_json::Value = serde_json::from_str(&definition_body).unwrap();
+    let defs = definition_json["result"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(!defs.is_empty(), "definition should resolve for virtual URI");
+
+    let refs_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 19,
+        "method": "textDocument/references",
+        "params": {
+            "textDocument": { "uri": "snaq://graph/node_std.sl" },
+            "position": { "line": 1, "character": 0 },
+            "context": { "includeDeclaration": false }
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&refs_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let refs_body = read_until_response_id(&mut client_r, 19).await;
+    let refs_json: serde_json::Value = serde_json::from_str(&refs_body).unwrap();
+    let refs = refs_json["result"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        refs.len(),
+        1,
+        "includeDeclaration=false should exclude declaration reference"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn native_definition_does_not_match_identifier_prefixes() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document(&mut client_w, "a = 1\nabc = 2\nabc + 1", 1).await;
+
+    let definition = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 20,
+        "method": "textDocument/definition",
+        "params": {
+            "textDocument": { "uri": TEST_DOC_URI },
+            "position": { "line": 2, "character": 1 }
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&definition.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 20).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let defs = v["result"].as_array().cloned().unwrap_or_default();
+    assert!(!defs.is_empty(), "definition should resolve");
+    let line = defs[0]["range"]["start"]["line"].as_u64().unwrap_or(999);
+    assert_eq!(
+        line, 1,
+        "abc usage should resolve to abc declaration (line 1), not a (line 0)"
     );
 
     server_handle.abort();

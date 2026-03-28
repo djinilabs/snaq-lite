@@ -2,10 +2,11 @@
 
 pub mod graph;
 pub mod mapping;
-pub mod widget_registry;
+pub mod position;
 pub mod pubsub;
 pub mod state;
 pub mod subscription;
+pub mod widget_registry;
 
 #[cfg(target_arch = "wasm32")]
 pub mod stream_host;
@@ -16,24 +17,26 @@ use futures::lock::Mutex;
 use state::LspState;
 use std::sync::Arc;
 use tower_lsp::lsp_types::{
-    Hover, HoverContents, HoverProviderCapability, InlayHint, InitializeResult,
-    MarkedString, MessageType, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
-    Url,
+    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
+    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
+    Hover, HoverContents, HoverProviderCapability, InitializeResult, InlayHint, MarkedString,
+    MessageType, OneOf, ReferenceParams, RenameOptions, RenameParams, ServerCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkspaceEdit,
 };
 
 use crate::mapping::SERVER_NAME;
 use crate::pubsub::{
     ConnectParams, DisconnectParams, FetchResultSliceParams, FetchResultSliceResponse,
     NodeInputPort, NodeSignatureUpdatedNotification, NodeSignatureUpdatedParams, PathSegment,
-    PublishResultNotification, PublishResultParams, PublishStatus, ResultType,
-    SubscribeParams, SubscribeResponse, UnsubscribeParams, SubscribeWidgetParams,
-    UnsubscribeWidgetParams, WidgetDataStatus, WidgetDataUpdateNotification, WidgetDataUpdateParams,
+    PublishResultNotification, PublishResultParams, PublishStatus, ResultType, SubscribeParams,
+    SubscribeResponse, SubscribeWidgetParams, UnsubscribeParams, UnsubscribeWidgetParams,
+    WidgetDataStatus, WidgetDataUpdateNotification, WidgetDataUpdateParams,
 };
 use crate::subscription::SubscriptionRegistry;
 use crate::widget_registry::WidgetRegistry;
-use tower_lsp::{Client, LanguageServer, LspService};
 #[cfg(not(target_arch = "wasm32"))]
 use tower_lsp::Server;
+use tower_lsp::{Client, LanguageServer, LspService};
 
 pub use mapping::{run_error_to_diagnostic, span_to_range};
 
@@ -50,12 +53,15 @@ pub type SharedGraphState = Arc<Mutex<graph::GraphState>>;
 pub type SharedWidgetRegistry = Arc<Mutex<WidgetRegistry>>;
 
 /// Channel to send publish notifications from background consumer to the backend.
-pub type NotificationSender = futures::channel::mpsc::UnboundedSender<(String, PublishResultParams)>;
-pub type NotificationReceiver = futures::channel::mpsc::UnboundedReceiver<(String, PublishResultParams)>;
+pub type NotificationSender =
+    futures::channel::mpsc::UnboundedSender<(String, PublishResultParams)>;
+pub type NotificationReceiver =
+    futures::channel::mpsc::UnboundedReceiver<(String, PublishResultParams)>;
 
 /// Channel to send widget data updates from background consumer to the backend.
 pub type WidgetNotificationSender = futures::channel::mpsc::UnboundedSender<WidgetDataUpdateParams>;
-pub type WidgetNotificationReceiver = futures::channel::mpsc::UnboundedReceiver<WidgetDataUpdateParams>;
+pub type WidgetNotificationReceiver =
+    futures::channel::mpsc::UnboundedReceiver<WidgetDataUpdateParams>;
 
 /// Backend implementing the Language Server Protocol for snaq-lite.
 pub struct SnaqLiteBackend {
@@ -73,14 +79,25 @@ pub struct SnaqLiteBackend {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for SnaqLiteBackend {
-    async fn initialize(&self, _params: tower_lsp::lsp_types::InitializeParams) -> tower_lsp::jsonrpc::Result<InitializeResult> {
+    async fn initialize(
+        &self,
+        _params: tower_lsp::lsp_types::InitializeParams,
+    ) -> tower_lsp::jsonrpc::Result<InitializeResult> {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                    TextDocumentSyncKind::INCREMENTAL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 inlay_hint_provider: Some(tower_lsp::lsp_types::OneOf::Left(true)),
+                completion_provider: Some(CompletionOptions::default()),
+                definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(false),
+                    work_done_progress_options: Default::default(),
+                })),
                 ..Default::default()
             },
             server_info: Some(tower_lsp::lsp_types::ServerInfo {
@@ -148,10 +165,8 @@ impl LanguageServer for SnaqLiteBackend {
         let uri = params.text_document.uri.clone();
         let version = params.text_document.version;
         let mut state = self.state.lock().await;
-        // Full sync: we only use the first content change; empty list is a no-op.
-        if let Some(content_changes) = params.content_changes.first() {
-            let text = content_changes.text.clone();
-            state.update_document(uri.clone(), version, &text);
+        if !params.content_changes.is_empty() {
+            state.apply_document_changes(uri.clone(), version, &params.content_changes);
         }
         drop(state);
         self.invalidate_subscriptions_for_uri(&uri).await;
@@ -163,7 +178,10 @@ impl LanguageServer for SnaqLiteBackend {
         self.send_node_signature_updated(&uri).await;
     }
 
-    async fn hover(&self, params: tower_lsp::lsp_types::HoverParams) -> tower_lsp::jsonrpc::Result<Option<Hover>> {
+    async fn hover(
+        &self,
+        params: tower_lsp::lsp_types::HoverParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Hover>> {
         self.drain_widget_notifications().await;
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
@@ -189,6 +207,125 @@ impl LanguageServer for SnaqLiteBackend {
         let state = self.state.lock().await;
         let hints = state.inlay_hints(&uri);
         Ok(Some(hints))
+    }
+
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<CompletionResponse>> {
+        let uri = params.text_document_position.text_document.uri;
+        let state = self.state.lock().await;
+        let mut labels: std::collections::BTreeSet<String> =
+            ["if", "then", "else", "fn", "input", "as", "per"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+        for symbol in state.document_symbols(&uri) {
+            labels.insert(symbol.name);
+        }
+        let items: Vec<CompletionItem> = labels
+            .into_iter()
+            .map(|label| CompletionItem {
+                label,
+                kind: Some(CompletionItemKind::VARIABLE),
+                ..Default::default()
+            })
+            .collect();
+        Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let state = self.state.lock().await;
+        let Some(ident) = state.identifier_at(&uri, pos.line, pos.character) else {
+            return Ok(None);
+        };
+        let locations = state.definition_locations(&uri, &ident);
+        if locations.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(GotoDefinitionResponse::Array(locations)))
+    }
+
+    async fn references(
+        &self,
+        params: ReferenceParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<tower_lsp::lsp_types::Location>>> {
+        let uri = params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let state = self.state.lock().await;
+        let Some(ident) = state.identifier_at(&uri, pos.line, pos.character) else {
+            return Ok(Some(Vec::new()));
+        };
+        let mut refs: Vec<tower_lsp::lsp_types::Location> = state
+            .reference_ranges(&uri, &ident)
+            .into_iter()
+            .map(|range| tower_lsp::lsp_types::Location {
+                uri: uri.clone(),
+                range,
+            })
+            .collect();
+        if !params.context.include_declaration {
+            let defs = state.definition_locations(&uri, &ident);
+            refs.retain(|r| !defs.iter().any(|d| d.uri == r.uri && d.range == r.range));
+        }
+        Ok(Some(refs))
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri;
+        let state = self.state.lock().await;
+        let symbols = state.document_symbols(&uri);
+        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    }
+
+    async fn rename(
+        &self,
+        params: RenameParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<WorkspaceEdit>> {
+        let new_name = params.new_name;
+        let valid = !new_name.is_empty()
+            && new_name
+                .bytes()
+                .next()
+                .map(|b| b.is_ascii_alphabetic() || b == b'_')
+                .unwrap_or(false)
+            && new_name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        if !valid {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "newName must be a valid identifier",
+            ));
+        }
+        let uri = params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let state = self.state.lock().await;
+        let Some(ident) = state.identifier_at(&uri, pos.line, pos.character) else {
+            return Ok(None);
+        };
+        let ranges = state.reference_ranges(&uri, &ident);
+        let edits: Vec<tower_lsp::lsp_types::TextEdit> = ranges
+            .into_iter()
+            .map(|range| tower_lsp::lsp_types::TextEdit {
+                range,
+                new_text: new_name.clone(),
+            })
+            .collect();
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(uri, edits);
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        }))
     }
 }
 
@@ -279,10 +416,11 @@ impl SnaqLiteBackend {
                             payload: Some(payload),
                         })
                         .await;
-                    self.widgets
-                        .lock()
-                        .await
-                        .insert_with_cached_value(widget_id, uri.clone(), value);
+                    self.widgets.lock().await.insert_with_cached_value(
+                        widget_id,
+                        uri.clone(),
+                        value,
+                    );
                 }
             }
         }
@@ -369,7 +507,9 @@ impl SnaqLiteBackend {
         let state = self.state.lock().await;
         if !state.has_document(&uri) {
             drop(state);
-            return Err(tower_lsp::jsonrpc::Error::invalid_params("document not open or URI mismatch"));
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "document not open or URI mismatch",
+            ));
         }
         let source = state.source(&uri);
         let unit_registry = state.unit_registry().clone();
@@ -378,7 +518,9 @@ impl SnaqLiteBackend {
         let stream_inputs = std::collections::HashMap::new();
         let result = snaq_lite_lang::run_with_stream_inputs(&source, &unit_registry, stream_inputs);
         match result {
-            Err(e) => Err(tower_lsp::jsonrpc::Error::invalid_params(format!("run error: {e}"))),
+            Err(e) => Err(tower_lsp::jsonrpc::Error::invalid_params(format!(
+                "run error: {e}"
+            ))),
             Ok((value, db)) => {
                 let subscription_id = uuid::Uuid::new_v4().to_string();
                 match &value {
@@ -407,11 +549,13 @@ impl SnaqLiteBackend {
                             let _ = (inner, cancel_rx);
                             let sid = subscription_id.clone();
                             self.client
-                                .send_notification::<PublishResultNotification>(PublishResultParams {
-                                    subscription_id: sid,
-                                    status: PublishStatus::Completed,
-                                    data: Some(serde_json::json!({ "display": display })),
-                                })
+                                .send_notification::<PublishResultNotification>(
+                                    PublishResultParams {
+                                        subscription_id: sid,
+                                        status: PublishStatus::Completed,
+                                        data: Some(serde_json::json!({ "display": display })),
+                                    },
+                                )
                                 .await;
                         }
                     }
@@ -443,22 +587,19 @@ impl SnaqLiteBackend {
     }
 
     /// Handle snaqlite/graph/connect: type-check and add edge.
-    pub async fn graph_connect(
-        &self,
-        params: ConnectParams,
-    ) -> tower_lsp::jsonrpc::Result<()> {
+    pub async fn graph_connect(&self, params: ConnectParams) -> tower_lsp::jsonrpc::Result<()> {
         let source_uri = Url::parse(&params.source_uri)
             .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid sourceUri"))?;
         let target_uri = Url::parse(&params.target_uri)
             .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid targetUri"))?;
         let (source_source, target_input_type, unit_registry) = {
             let state = self.state.lock().await;
-            let source_doc = state
-                .get_document(&source_uri)
-                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("source document not open"))?;
-            let target_doc = state
-                .get_document(&target_uri)
-                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params("target document not open"))?;
+            let source_doc = state.get_document(&source_uri).ok_or_else(|| {
+                tower_lsp::jsonrpc::Error::invalid_params("source document not open")
+            })?;
+            let target_doc = state.get_document(&target_uri).ok_or_else(|| {
+                tower_lsp::jsonrpc::Error::invalid_params("target document not open")
+            })?;
             let target_input_type = target_doc
                 .root_def
                 .as_ref()
@@ -467,8 +608,12 @@ impl SnaqLiteBackend {
                 .into_iter()
                 .find(|(name, _)| name == &params.target_input_name)
                 .map(|(_, t)| t);
-            let target_input_type = target_input_type
-                .ok_or_else(|| tower_lsp::jsonrpc::Error::invalid_params(format!("target has no input named '{}'", params.target_input_name)))?;
+            let target_input_type = target_input_type.ok_or_else(|| {
+                tower_lsp::jsonrpc::Error::invalid_params(format!(
+                    "target has no input named '{}'",
+                    params.target_input_name
+                ))
+            })?;
             (
                 source_doc.source.clone(),
                 target_input_type,
@@ -536,7 +681,8 @@ impl SnaqLiteBackend {
                     _ => snaq_lite_lang::collect_vector_stream(db, v.inner.clone()).len() as u64,
                 };
                 #[cfg(not(target_arch = "wasm32"))]
-                let length = snaq_lite_lang::collect_vector_stream(db, v.inner.clone()).len() as u64;
+                let length =
+                    snaq_lite_lang::collect_vector_stream(db, v.inner.clone()).len() as u64;
                 (
                     ResultType::Vector,
                     Some(ResultSummary {
@@ -574,14 +720,9 @@ impl SnaqLiteBackend {
                 None,
             ),
             _ => {
-                let display =
-                    snaq_lite_lang::format_value_for_display(db, value).unwrap_or_else(|_| "<error>".to_string());
-                (
-                    ResultType::Scalar,
-                    None,
-                    Some(display),
-                    None,
-                )
+                let display = snaq_lite_lang::format_value_for_display(db, value)
+                    .unwrap_or_else(|_| "<error>".to_string());
+                (ResultType::Scalar, None, Some(display), None)
             }
         };
         // json!({ ... }) always produces an object, so as_object_mut() is safe.
@@ -628,12 +769,11 @@ impl SnaqLiteBackend {
         let next = match (value, head) {
             (snaq_lite_lang::Value::Vector(v), PathSegment::Index(i)) => {
                 let idx = *i as usize;
-                let slice =
-                    snaq_lite_lang::LazyVector::Take {
-                        source: Box::new(v.inner.clone()),
-                        start: idx,
-                        length: 1,
-                    };
+                let slice = snaq_lite_lang::LazyVector::Take {
+                    source: Box::new(v.inner.clone()),
+                    start: idx,
+                    length: 1,
+                };
                 let collected = snaq_lite_lang::collect_vector_stream(db, slice);
                 let item = collected.into_iter().next()?;
                 match item {
@@ -661,7 +801,9 @@ impl SnaqLiteBackend {
         {
             let state = self.state.lock().await;
             if !state.has_document(&source_uri) {
-                return Err(tower_lsp::jsonrpc::Error::invalid_params("source document not open"));
+                return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                    "source document not open",
+                ));
             }
         }
         let external_streams = resolve_external_streams(params.external_streams.as_ref());
@@ -685,10 +827,11 @@ impl SnaqLiteBackend {
             }
             Ok((value, db)) => {
                 let payload = Self::build_completed_payload(&value, &db);
-                self.widgets
-                    .lock()
-                    .await
-                    .insert_with_cached_value(params.widget_id.clone(), source_uri.clone(), value);
+                self.widgets.lock().await.insert_with_cached_value(
+                    params.widget_id.clone(),
+                    source_uri.clone(),
+                    value,
+                );
                 self.client
                     .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
                         widget_id: params.widget_id,
@@ -793,19 +936,17 @@ impl SnaqLiteBackend {
                     let elements: Vec<serde_json::Value> = slice_vec
                         .into_iter()
                         .enumerate()
-                        .map(|(i, item)| {
-                            match &item {
-                                Ok(Some(val)) => {
-                                    let mut elem_path = path_json.clone();
-                                    elem_path.push(serde_json::json!((offset + i) as u64));
-                                    crate::pubsub::value_to_slice_element(db, val, &elem_path)
-                                }
-                                Ok(None) => serde_json::Value::Null,
-                                Err(e) => serde_json::json!({
-                                    "kind": "error",
-                                    "message": e.to_string()
-                                }),
+                        .map(|(i, item)| match &item {
+                            Ok(Some(val)) => {
+                                let mut elem_path = path_json.clone();
+                                elem_path.push(serde_json::json!((offset + i) as u64));
+                                crate::pubsub::value_to_slice_element(db, val, &elem_path)
                             }
+                            Ok(None) => serde_json::Value::Null,
+                            Err(e) => serde_json::json!({
+                                "kind": "error",
+                                "message": e.to_string()
+                            }),
                         })
                         .collect();
                     (elements, total_count, pending_update)
@@ -891,10 +1032,7 @@ impl SnaqLiteBackend {
         &self,
         sink_uri: &Url,
         external_streams: Option<std::collections::HashMap<String, snaq_lite_lang::StreamHandleId>>,
-    ) -> Result<
-        (snaq_lite_lang::Value, salsa::DatabaseImpl),
-        snaq_lite_lang::RunError,
-    > {
+    ) -> Result<(snaq_lite_lang::Value, salsa::DatabaseImpl), snaq_lite_lang::RunError> {
         let (order, sources, unit_registry, incoming_map) = {
             let state = self.state.lock().await;
             let graph = self.graph_state.lock().await;
@@ -915,12 +1053,7 @@ impl SnaqLiteBackend {
                 .iter()
                 .map(|u| (u.clone(), graph.incoming(u)))
                 .collect();
-            (
-                order,
-                sources,
-                state.unit_registry().clone(),
-                incoming_map,
-            )
+            (order, sources, state.unit_registry().clone(), incoming_map)
         };
         run_node_with_graph_inputs_impl(
             &order,
@@ -963,10 +1096,7 @@ fn run_node_with_graph_inputs_impl(
     incoming_map: &std::collections::HashMap<Url, Vec<(String, Url)>>,
     sink_uri: &Url,
     external_streams: Option<&std::collections::HashMap<String, snaq_lite_lang::StreamHandleId>>,
-) -> Result<
-    (snaq_lite_lang::Value, salsa::DatabaseImpl),
-    snaq_lite_lang::RunError,
-> {
+) -> Result<(snaq_lite_lang::Value, salsa::DatabaseImpl), snaq_lite_lang::RunError> {
     let mut output_values: std::collections::HashMap<
         Url,
         (snaq_lite_lang::Value, salsa::DatabaseImpl),
@@ -1195,7 +1325,10 @@ fn run_stream_consumer_for_widget(
                         Some(item) => {
                             let json = crate::pubsub::stream_element_to_json(&db, &item);
                             if total == 0 {
-                                single_display = json.get("display").and_then(|v| v.as_str()).map(String::from);
+                                single_display = json
+                                    .get("display")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from);
                             }
                             batch.push(json);
                             total += 1;
@@ -1272,17 +1405,32 @@ pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSo
     .custom_method("snaqlite/subscribe", SnaqLiteBackend::subscribe)
     .custom_method("snaqlite/unsubscribe", SnaqLiteBackend::unsubscribe)
     .custom_method("snaqlite/graph/connect", SnaqLiteBackend::graph_connect)
-    .custom_method("snaqlite/graph/disconnect", SnaqLiteBackend::graph_disconnect)
-    .custom_method("snaqlite/graph/subscribeWidget", SnaqLiteBackend::subscribe_widget)
-    .custom_method("snaqlite/graph/unsubscribeWidget", SnaqLiteBackend::unsubscribe_widget)
-    .custom_method("snaqlite/graph/fetchResultSlice", SnaqLiteBackend::fetch_result_slice)
+    .custom_method(
+        "snaqlite/graph/disconnect",
+        SnaqLiteBackend::graph_disconnect,
+    )
+    .custom_method(
+        "snaqlite/graph/subscribeWidget",
+        SnaqLiteBackend::subscribe_widget,
+    )
+    .custom_method(
+        "snaqlite/graph/unsubscribeWidget",
+        SnaqLiteBackend::unsubscribe_widget,
+    )
+    .custom_method(
+        "snaqlite/graph/fetchResultSlice",
+        SnaqLiteBackend::fetch_result_slice,
+    )
     .finish();
     (service, socket)
 }
 
 /// Run the LSP server with the given stdin and stdout (native).
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn run_native<I, O>(stdin: I, stdout: O) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+pub async fn run_native<I, O>(
+    stdin: I,
+    stdout: O,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     I: tokio::io::AsyncRead + Unpin + Send + 'static,
     O: tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -1303,10 +1451,7 @@ mod tests {
     fn span_to_range_uses_zero_based_line_and_column() {
         // Single line: span 2..5 in "hello" is "llo"; lang line_col gives 1-based line, column as byte offset
         let source = "hello";
-        let range = span_to_range(
-            &snaq_lite_lang::Span { start: 2, end: 5 },
-            source,
-        );
+        let range = span_to_range(&snaq_lite_lang::Span { start: 2, end: 5 }, source);
         assert_eq!(range.start.line, 0);
         assert_eq!(range.start.character, 2);
         assert_eq!(range.end.line, 0);
@@ -1316,11 +1461,11 @@ mod tests {
     #[test]
     fn span_to_range_multiline_second_line() {
         let source = "a\nbc\nd";
-        // span 3..5: second line (0-based line 1); end can be 0 when span ends at newline
+        // span 3..5: starts on second line and ends at start of third line
         let range = span_to_range(&snaq_lite_lang::Span { start: 3, end: 5 }, source);
         assert_eq!(range.start.line, 1);
-        assert_eq!(range.end.line, 1);
-        assert!(range.start.character <= range.end.character || range.end.character == 0);
+        assert_eq!(range.end.line, 2);
+        assert_eq!(range.end.character, 0);
     }
 
     #[test]
@@ -1358,7 +1503,10 @@ mod tests {
         let d = run_error_to_diagnostic(&err, source);
         assert_eq!(d.message, "expected number");
         assert_eq!(d.range.start.line, 0);
-        assert_eq!(d.severity, Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR));
+        assert_eq!(
+            d.severity,
+            Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)
+        );
         assert_eq!(d.source.as_deref(), Some("snaq-lite"));
     }
 
@@ -1373,7 +1521,10 @@ mod tests {
         assert!(d.message.contains("division") || d.message.contains("Division"));
         assert_eq!(d.range.start.line, 0);
         assert_eq!(d.range.start.character, 2);
-        assert_eq!(d.severity, Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR));
+        assert_eq!(
+            d.severity,
+            Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)
+        );
     }
 
     #[test]
@@ -1468,7 +1619,10 @@ mod tests {
         state.update_document(uri.clone(), 1, "syntax error @@");
         let diags = state.diagnostics(&uri);
         assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].severity, Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR));
+        assert_eq!(
+            diags[0].severity,
+            Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)
+        );
         assert!(!diags[0].message.is_empty());
     }
 
@@ -1578,7 +1732,11 @@ mod tests {
         let json = pubsub::stream_element_to_json(&db, &item);
         let obj = json.as_object().expect("object");
         assert_eq!(obj.get("kind").and_then(|v| v.as_str()), Some("error"));
-        assert!(obj.get("message").and_then(|v| v.as_str()).unwrap_or("").contains("division"));
+        assert!(obj
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains("division"));
     }
 
     #[test]
@@ -1606,7 +1764,11 @@ mod tests {
         let json = pubsub::stream_element_to_json(&db, &item);
         let obj = json.as_object().expect("object");
         let display = obj.get("display").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(display.contains("3"), "display should show result: {}", display);
+        assert!(
+            display.contains("3"),
+            "display should show result: {}",
+            display
+        );
     }
 
     #[test]
@@ -1619,7 +1781,8 @@ mod tests {
         reg.insert("sub-2".to_string(), uri, Some(1), tx2);
         let cancelled = reg.invalidate_all();
         assert_eq!(cancelled.len(), 2);
-        let ids: std::collections::HashSet<_> = cancelled.iter().map(|(id, _)| id.as_str()).collect();
+        let ids: std::collections::HashSet<_> =
+            cancelled.iter().map(|(id, _)| id.as_str()).collect();
         assert!(ids.contains("sub-1"));
         assert!(ids.contains("sub-2"));
         assert!(reg.remove("sub-1").is_none());
@@ -1686,7 +1849,8 @@ mod tests {
         let c = Url::parse("snaq://graph/c.sl").unwrap();
         graph.connect(a.clone(), b.clone(), "x".to_string());
         graph.connect(b.clone(), c.clone(), "y".to_string());
-        let docs: std::collections::HashSet<_> = [a.clone(), b.clone(), c.clone()].into_iter().collect();
+        let docs: std::collections::HashSet<_> =
+            [a.clone(), b.clone(), c.clone()].into_iter().collect();
         let order = graph.topological_order(&c, &docs).expect("no cycle");
         assert_eq!(order.len(), 3);
         assert_eq!(order[0], a);
@@ -1758,7 +1922,8 @@ mod tests {
         reg.insert("w2".to_string(), u2, tx2);
         let cancelled = reg.invalidate_all();
         assert_eq!(cancelled.len(), 2);
-        let ids: std::collections::HashSet<_> = cancelled.iter().map(|(id, _)| id.as_str()).collect();
+        let ids: std::collections::HashSet<_> =
+            cancelled.iter().map(|(id, _)| id.as_str()).collect();
         assert!(ids.contains("w1"));
         assert!(ids.contains("w2"));
     }
@@ -1809,7 +1974,8 @@ mod tests {
 
     #[test]
     fn subscribe_widget_params_deserializes_with_optional_external_streams() {
-        let json = r#"{"widgetId":"w2","sourceUri":"file:///p.snaq","externalStreams":{"x":0,"y":1}}"#;
+        let json =
+            r#"{"widgetId":"w2","sourceUri":"file:///p.snaq","externalStreams":{"x":0,"y":1}}"#;
         let params: pubsub::SubscribeWidgetParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.widget_id, "w2");
         assert_eq!(params.source_uri, "file:///p.snaq");
@@ -1843,7 +2009,11 @@ mod tests {
             data: Some(serde_json::json!({ "totalElements": 5 })),
         };
         let json = serde_json::to_string(&params).unwrap();
-        assert!(json.contains("\"status\":\"Completed\""), "status should be PascalCase: {}", json);
+        assert!(
+            json.contains("\"status\":\"Completed\""),
+            "status should be PascalCase: {}",
+            json
+        );
         let back: PublishResultParams = serde_json::from_str(&json).unwrap();
         match back.status {
             PublishStatus::Completed => {}

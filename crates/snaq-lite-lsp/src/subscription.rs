@@ -152,6 +152,17 @@ impl SubscriptionRegistry {
         }
         out
     }
+
+    /// Drain all subscriptions, returning ids with optional cancel senders.
+    /// Useful when callers must emit a terminal notification for every removed id.
+    pub fn drain_all_entries(
+        &mut self,
+    ) -> Vec<(SubscriptionId, Option<futures::channel::oneshot::Sender<()>>)> {
+        self.by_id
+            .drain()
+            .map(|(id, mut entry)| (id, entry.cancel_tx.take()))
+            .collect()
+    }
 }
 
 impl Default for SubscriptionRegistry {

@@ -1,6 +1,33 @@
 # Active context
 
 ## Just completed
+
+- **Coverage hardening pass for newly introduced runtime APIs/paths:**
+  - Added integration test `subscribe_node_is_graph_aware_while_legacy_subscribe_is_not` to ensure canonical node subscription uses graph inputs while legacy `subscribe` remains root-only/empty-input.
+  - Added integration test `export_canvas_document_uses_stable_target_param_id` to assert exported edge payload carries stable `targetParamId` (param-id keyed wiring).
+  - Added integration test `native_subscribe_node_vector_returns_subscription_id` for vector node-subscription path.
+  - Added unit tests `subscription_registry_drain_all_entries_includes_scalar_and_streaming`, `widget_registry_drain_all_entries_includes_scalar_and_streaming`, and `run_stream_consumer_propagates_metadata_fields` to cover drain-all cancellation semantics and native stream metadata propagation.
+  - Re-ran `cargo test -p snaq-lite-lsp`, `pnpm test`, and `pnpm run lint` (all green).
+
+- **Review + improve pass (post-implementation hardening):**
+  - Fixed docs/runtime mismatches in `docs/LSP.md` for `subscribeNode` vs legacy `subscribe`, graph-aware `nodeSignatureUpdated` output inference, and didChange subscription lifecycle behavior.
+  - Hardened canvas import validation in `crates/snaq-lite-lsp/src/lib.rs` by rejecting duplicate node URIs in imported snapshots (`invalid_params`).
+  - Improved import/shutdown cancellation behavior: all subscriptions/widgets are now drained with optional cancel senders and receive terminal cancellation notifications, including scalar/no-consumer entries.
+  - Added native stream notification metadata propagation (`revision`, `canvasId`, `uri`) for vector subscription `Running`/`Completed` notifications.
+  - Added acceptance tests: `import_canvas_document_cancels_scalar_subscriptions_with_reason` and `import_canvas_document_rejects_duplicate_node_uris`.
+  - Verification passed: `cargo test -p snaq-lite-lsp && pnpm test && pnpm run lint`.
+
+- **Canonical canvas snapshot support:** Added language-level canvas model structs (`CanvasDocument`, `CanvasNodeDocument`, `CanvasEdge`) in `crates/snaq-lite-lang/src/graph.rs` and exported from `snaq-lite-lang`.
+- **LSP rehydration APIs:** Added `snaqlite/graph/exportCanvasDocument` and `snaqlite/graph/importCanvasDocument` in `crates/snaq-lite-lsp` with runtime state replacement flow (cancel subscriptions/widgets with `"Canvas import"`, clear node results/documents, import documents/edges, recompute, republish diagnostics/signatures).
+- **Node-centric subscriptions made graph-aware:** `snaqlite/subscribeNode` now evaluates via graph runtime (`run_node_with_graph_inputs`) instead of legacy empty-input document run, so downstream nodes subscribe correctly after rehydration.
+- **WASM status-sequence parity for vector subscriptions:** WASM now emits `Running` then `Completed` lifecycle statuses (without element chunk streaming), while still using summary + slice retrieval for detail.
+- **Acceptance coverage:** Added `graph_rehydrates_from_canvas_document_without_ui_replay` integration test and protocol roundtrip tests for canvas payload and node-subscribe payloads.
+- **Verification:** `cargo test -p snaq-lite-lsp`, `pnpm test`, and `pnpm run lint` pass.
+
+- **Node-centric subscription phase started:** Added canonical node-centric APIs in `snaq-lite-lsp` (`snaqlite/subscribeNode`, `snaqlite/unsubscribeNode`) with compatibility wrappers to existing subscription runtime.
+- **Dual publish notifications:** server now emits both `snaqlite/publishResult` and `snaqlite/publishNodeResult` with identical payloads so legacy and new clients receive the same revisioned updates.
+- **Protocol/docs/tests updated:** Added new pubsub protocol structs and roundtrip tests in `crates/snaq-lite-lsp/src/pubsub.rs`, integration coverage in `crates/snaq-lite-lsp/tests/lsp_integration.rs`, and updated `docs/LSP.md` to mark node-centric APIs as canonical.
+- **Verification:** `cargo test -p snaq-lite-lsp`, `pnpm test`, and `pnpm run lint` pass.
 - **Review + improve follow-up (connect/disconnect resolver hardening):** refined target input resolution to prefer exact `paramId` matches before display-name matches, preventing ambiguous collisions where one input name equals another input `paramId`. Also simplified `graph_connect` type lookup flow around resolver output and added collision-focused unit coverage in `crates/snaq-lite-lsp/src/lib.rs`.
 - **Graph disconnect name/paramId parity fix:** Verified `graph_connect` resolved display `name`/stable `paramId` while `graph_disconnect` only used raw `targetInputName`. Updated disconnect to resolve through declared inputs the same way connect does, so disconnect-by-name removes edges stored under `paramId`. Added unit coverage for resolver behavior in `crates/snaq-lite-lsp/src/lib.rs`.
 - **Bridge Lazy Streaming Gaps (execution pass):** runtime now avoids silent `FromExprs` stream fallbacks (explicit unsupported error), uses lazy built-in vector mapping (`V.map(sqrt|sin|...)` -> `LazyVector::Map`) while keeping user-function map eager for query-context safety, streams vector `length` counting and index access (early stop), and replaces row×column vector reductions with stream-based sum/dot paths (`sum_vector_stream`, `dot_product_stream`).  

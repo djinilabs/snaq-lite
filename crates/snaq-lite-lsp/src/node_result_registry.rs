@@ -82,6 +82,10 @@ impl NodeResultRegistry {
             .retain(|uri, _| !Self::uri_matches_prefix(uri.as_str(), uri_prefix));
         before.saturating_sub(self.by_uri.len())
     }
+
+    pub fn clear(&mut self) {
+        self.by_uri.clear();
+    }
 }
 
 impl Default for NodeResultRegistry {

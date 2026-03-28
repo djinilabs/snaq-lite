@@ -237,6 +237,19 @@ impl LspState {
         removed
     }
 
+    /// Remove all documents and return removed URIs.
+    pub fn clear_documents(&mut self) -> Vec<Url> {
+        self.documents.drain().map(|(uri, _)| uri).collect()
+    }
+
+    /// Snapshot all documents as (uri, source, version).
+    pub fn snapshot_documents(&self) -> Vec<(Url, String, Option<i32>)> {
+        self.documents
+            .iter()
+            .map(|(uri, entry)| (uri.clone(), entry.source.clone(), entry.version))
+            .collect()
+    }
+
     /// Unit registry (for run_with_stream_inputs in subscribe).
     pub fn unit_registry(&self) -> &UnitRegistry {
         &self.unit_registry

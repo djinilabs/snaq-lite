@@ -27,10 +27,13 @@ use tower_lsp::lsp_types::{
 
 use crate::mapping::SERVER_NAME;
 use crate::pubsub::{
-    ConnectParams, DisconnectParams, FetchResultSliceParams, FetchResultSliceResponse,
-    NodeInputPort, NodeSignatureUpdatedNotification, NodeSignatureUpdatedParams, PathSegment,
+    ConnectParams, DisconnectParams, ExportCanvasDocumentParams, ExportCanvasDocumentResponse,
+    FetchResultSliceParams, FetchResultSliceResponse, ImportCanvasDocumentParams,
+    ImportCanvasDocumentResponse, NodeInputPort, NodeSignatureUpdatedNotification,
+    NodeSignatureUpdatedParams, PathSegment, PublishNodeResultNotification,
     PublishResultNotification, PublishResultParams, PublishStatus, ResetNamespaceParams,
-    ResetNamespaceResponse, ResultType, SubscribeParams, SubscribeResponse, SubscribeWidgetParams,
+    ResetNamespaceResponse, ResultType, SubscribeNodeParams, SubscribeNodeResponse,
+    SubscribeParams, SubscribeResponse, SubscribeWidgetParams, UnsubscribeNodeParams,
     UnsubscribeParams, UnsubscribeWidgetParams, WidgetDataStatus, WidgetDataUpdateNotification,
     WidgetDataUpdateParams,
 };
@@ -122,27 +125,30 @@ impl LanguageServer for SnaqLiteBackend {
         let canvas_id = self.current_canvas_id().await;
         let to_cancel = {
             let mut subs = self.subscriptions.lock().await;
-            subs.invalidate_all()
+            subs.drain_all_entries()
         };
-        for (id, cancel_tx) in to_cancel {
-            let _ = cancel_tx.send(());
-            self.client
-                .send_notification::<PublishResultNotification>(PublishResultParams {
-                    subscription_id: id,
-                    status: PublishStatus::Cancelled,
-                    revision: None,
-                    canvas_id: canvas_id.clone(),
-                    uri: None,
-                    data: Some(serde_json::json!({ "reason": "Server shutdown" })),
-                })
-                .await;
+        for (id, maybe_cancel_tx) in to_cancel {
+            if let Some(cancel_tx) = maybe_cancel_tx {
+                let _ = cancel_tx.send(());
+            }
+            self.send_publish_result_notifications(PublishResultParams {
+                subscription_id: id,
+                status: PublishStatus::Cancelled,
+                revision: None,
+                canvas_id: canvas_id.clone(),
+                uri: None,
+                data: Some(serde_json::json!({ "reason": "Server shutdown" })),
+            })
+            .await;
         }
         let widget_cancel = {
             let mut w = self.widgets.lock().await;
-            w.invalidate_all()
+            w.drain_all_entries()
         };
-        for (widget_id, cancel_tx) in widget_cancel {
-            let _ = cancel_tx.send(());
+        for (widget_id, maybe_cancel_tx) in widget_cancel {
+            if let Some(cancel_tx) = maybe_cancel_tx {
+                let _ = cancel_tx.send(());
+            }
             self.client
                 .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
                     widget_id,
@@ -439,6 +445,67 @@ impl SnaqLiteBackend {
         self.state.lock().await.active_canvas_id()
     }
 
+    fn canvas_payload_from_model(
+        model: snaq_lite_lang::CanvasDocument,
+    ) -> crate::pubsub::CanvasDocumentPayload {
+        crate::pubsub::CanvasDocumentPayload {
+            canvas_id: model.canvas_id,
+            nodes: model
+                .nodes
+                .into_iter()
+                .map(|n| crate::pubsub::CanvasNodeDocumentPayload {
+                    uri: n.uri,
+                    source: n.source,
+                    version: n.version,
+                })
+                .collect(),
+            edges: model
+                .edges
+                .into_iter()
+                .map(|e| crate::pubsub::CanvasEdgePayload {
+                    source_uri: e.source_uri,
+                    target_uri: e.target_uri,
+                    target_param_id: e.target_param_id,
+                })
+                .collect(),
+        }
+    }
+
+    fn canvas_model_from_payload(
+        payload: crate::pubsub::CanvasDocumentPayload,
+    ) -> snaq_lite_lang::CanvasDocument {
+        snaq_lite_lang::CanvasDocument {
+            canvas_id: payload.canvas_id,
+            nodes: payload
+                .nodes
+                .into_iter()
+                .map(|n| snaq_lite_lang::CanvasNodeDocument {
+                    uri: n.uri,
+                    source: n.source,
+                    version: n.version,
+                })
+                .collect(),
+            edges: payload
+                .edges
+                .into_iter()
+                .map(|e| snaq_lite_lang::CanvasEdge {
+                    source_uri: e.source_uri,
+                    target_uri: e.target_uri,
+                    target_param_id: e.target_param_id,
+                })
+                .collect(),
+        }
+    }
+
+    async fn send_publish_result_notifications(&self, params: PublishResultParams) {
+        self.client
+            .send_notification::<PublishResultNotification>(params.clone())
+            .await;
+        self.client
+            .send_notification::<PublishNodeResultNotification>(params)
+            .await;
+    }
+
     async fn cancel_subscription_entries(
         &self,
         entries: Vec<(String, Option<futures::channel::oneshot::Sender<()>>)>,
@@ -449,16 +516,15 @@ impl SnaqLiteBackend {
             if let Some(tx) = maybe_tx {
                 let _ = tx.send(());
             }
-            self.client
-                .send_notification::<PublishResultNotification>(PublishResultParams {
-                    subscription_id,
-                    status: PublishStatus::Cancelled,
-                    revision: None,
-                    canvas_id: canvas_id.clone(),
-                    uri: None,
-                    data: Some(serde_json::json!({ "reason": reason })),
-                })
-                .await;
+            self.send_publish_result_notifications(PublishResultParams {
+                subscription_id,
+                status: PublishStatus::Cancelled,
+                revision: None,
+                canvas_id: canvas_id.clone(),
+                uri: None,
+                data: Some(serde_json::json!({ "reason": reason })),
+            })
+            .await;
         }
     }
 
@@ -538,9 +604,7 @@ impl SnaqLiteBackend {
     async fn drain_notifications(&self) {
         let mut rx = self.notification_rx.lock().await;
         while let Ok((_id, params)) = rx.try_recv() {
-            self.client
-                .send_notification::<PublishResultNotification>(params)
-                .await;
+            self.send_publish_result_notifications(params).await;
         }
     }
 
@@ -753,26 +817,43 @@ impl SnaqLiteBackend {
                                 .set_cancel_tx(&subscription_id, Some(cancel_tx));
                             let sid = subscription_id.clone();
                             let notification_tx = self.notification_tx.clone();
+                            let canvas_id_for_stream = canvas_id.clone();
+                            let uri_for_stream = uri.to_string();
                             std::thread::spawn(move || {
-                                run_stream_consumer(db, inner, sid, notification_tx, cancel_rx);
+                                run_stream_consumer(
+                                    db,
+                                    inner,
+                                    sid,
+                                    revision,
+                                    canvas_id_for_stream,
+                                    Some(uri_for_stream),
+                                    notification_tx,
+                                    cancel_rx,
+                                );
                             });
                         }
                         #[cfg(target_arch = "wasm32")]
                         {
                             let display = snaq_lite_lang::format_vector_for_widget_display(&db, &v)
                                 .unwrap_or_else(|_| "<vector>".to_string());
-                            self.client
-                                .send_notification::<PublishResultNotification>(
-                                    PublishResultParams {
-                                        subscription_id: subscription_id.clone(),
-                                        status: PublishStatus::Completed,
-                                        revision,
-                                        canvas_id: canvas_id.clone(),
-                                        uri: Some(uri.to_string()),
-                                        data: Some(serde_json::json!({ "display": display })),
-                                    },
-                                )
-                                .await;
+                            self.send_publish_result_notifications(PublishResultParams {
+                                subscription_id: subscription_id.clone(),
+                                status: PublishStatus::Running,
+                                revision,
+                                canvas_id: canvas_id.clone(),
+                                uri: Some(uri.to_string()),
+                                data: Some(serde_json::json!({ "elements": [] })),
+                            })
+                            .await;
+                            self.send_publish_result_notifications(PublishResultParams {
+                                subscription_id: subscription_id.clone(),
+                                status: PublishStatus::Completed,
+                                revision,
+                                canvas_id: canvas_id.clone(),
+                                uri: Some(uri.to_string()),
+                                data: Some(serde_json::json!({ "display": display })),
+                            })
+                            .await;
                             self.subscriptions
                                 .lock()
                                 .await
@@ -782,16 +863,15 @@ impl SnaqLiteBackend {
                     _ => {
                         let display = snaq_lite_lang::format_value_for_display(&db, &value)
                             .unwrap_or_else(|_| "<error>".to_string());
-                        self.client
-                            .send_notification::<PublishResultNotification>(PublishResultParams {
-                                subscription_id: subscription_id.clone(),
-                                status: PublishStatus::Completed,
-                                revision,
-                                canvas_id: canvas_id.clone(),
-                                uri: Some(uri.to_string()),
-                                data: Some(serde_json::json!({ "display": display })),
-                            })
-                            .await;
+                        self.send_publish_result_notifications(PublishResultParams {
+                            subscription_id: subscription_id.clone(),
+                            status: PublishStatus::Completed,
+                            revision,
+                            canvas_id: canvas_id.clone(),
+                            uri: Some(uri.to_string()),
+                            data: Some(serde_json::json!({ "display": display })),
+                        })
+                        .await;
                         self.subscriptions
                             .lock()
                             .await
@@ -799,16 +879,15 @@ impl SnaqLiteBackend {
                     }
                 },
                 Err(e) => {
-                    self.client
-                        .send_notification::<PublishResultNotification>(PublishResultParams {
-                            subscription_id: subscription_id.clone(),
-                            status: PublishStatus::Error,
-                            revision,
-                            canvas_id: canvas_id.clone(),
-                            uri: Some(uri.to_string()),
-                            data: Some(serde_json::json!({ "message": e.to_string() })),
-                        })
-                        .await;
+                    self.send_publish_result_notifications(PublishResultParams {
+                        subscription_id: subscription_id.clone(),
+                        status: PublishStatus::Error,
+                        revision,
+                        canvas_id: canvas_id.clone(),
+                        uri: Some(uri.to_string()),
+                        data: Some(serde_json::json!({ "message": e.to_string() })),
+                    })
+                    .await;
                     self.subscriptions
                         .lock()
                         .await
@@ -938,8 +1017,19 @@ impl SnaqLiteBackend {
                         {
                             let sid = subscription_id.clone();
                             let notification_tx = self.notification_tx.clone();
+                            let canvas_id_for_stream = canvas_id.clone();
+                            let uri_for_stream = uri.to_string();
                             std::thread::spawn(move || {
-                                run_stream_consumer(db, inner, sid, notification_tx, cancel_rx);
+                                run_stream_consumer(
+                                    db,
+                                    inner,
+                                    sid,
+                                    None,
+                                    canvas_id_for_stream,
+                                    Some(uri_for_stream),
+                                    notification_tx,
+                                    cancel_rx,
+                                );
                             });
                         }
                         #[cfg(target_arch = "wasm32")]
@@ -949,26 +1039,17 @@ impl SnaqLiteBackend {
                                 .unwrap_or_else(|_| "<vector>".to_string());
                             let _ = (inner, cancel_rx);
                             let sid = subscription_id.clone();
-                            self.client
-                                .send_notification::<PublishResultNotification>(
-                                    PublishResultParams {
-                                        subscription_id: sid,
-                                        status: PublishStatus::Completed,
-                                        revision: None,
-                                        canvas_id: canvas_id.clone(),
-                                        uri: Some(uri.to_string()),
-                                        data: Some(serde_json::json!({ "display": display })),
-                                    },
-                                )
-                                .await;
-                        }
-                    }
-                    _ => {
-                        let display = snaq_lite_lang::format_value_for_display(&db, &value)
-                            .unwrap_or_else(|_| "<error>".to_string());
-                        self.client
-                            .send_notification::<PublishResultNotification>(PublishResultParams {
-                                subscription_id: subscription_id.clone(),
+                            self.send_publish_result_notifications(PublishResultParams {
+                                subscription_id: sid.clone(),
+                                status: PublishStatus::Running,
+                                revision: None,
+                                canvas_id: canvas_id.clone(),
+                                uri: Some(uri.to_string()),
+                                data: Some(serde_json::json!({ "elements": [] })),
+                            })
+                            .await;
+                            self.send_publish_result_notifications(PublishResultParams {
+                                subscription_id: sid,
                                 status: PublishStatus::Completed,
                                 revision: None,
                                 canvas_id: canvas_id.clone(),
@@ -976,9 +1057,127 @@ impl SnaqLiteBackend {
                                 data: Some(serde_json::json!({ "display": display })),
                             })
                             .await;
+                        }
+                    }
+                    _ => {
+                        let display = snaq_lite_lang::format_value_for_display(&db, &value)
+                            .unwrap_or_else(|_| "<error>".to_string());
+                        self.send_publish_result_notifications(PublishResultParams {
+                            subscription_id: subscription_id.clone(),
+                            status: PublishStatus::Completed,
+                            revision: None,
+                            canvas_id: canvas_id.clone(),
+                            uri: Some(uri.to_string()),
+                            data: Some(serde_json::json!({ "display": display })),
+                        })
+                        .await;
                     }
                 }
                 Ok(SubscribeResponse { subscription_id })
+            }
+        }
+    }
+
+    /// Handle snaqlite/subscribeNode: canonical node-centric subscription API.
+    /// Internally reuses the same subscription runtime as snaqlite/subscribe.
+    pub async fn subscribe_node(
+        &self,
+        params: SubscribeNodeParams,
+    ) -> tower_lsp::jsonrpc::Result<SubscribeNodeResponse> {
+        self.drain_notifications().await;
+        let uri = Url::parse(&params.source_uri)
+            .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid sourceUri"))?;
+        self.ensure_canvas_uri_request(&uri).await?;
+        let state = self.state.lock().await;
+        if !state.has_document(&uri) {
+            drop(state);
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "document not open or URI mismatch",
+            ));
+        }
+        let version = state.document_version(&uri);
+        let canvas_id = state.active_canvas_id();
+        drop(state);
+
+        let result = self.run_node_with_graph_inputs(&uri, None).await;
+        match result {
+            Err(e) => Err(tower_lsp::jsonrpc::Error::invalid_params(format!(
+                "run error: {e}"
+            ))),
+            Ok((value, db)) => {
+                let subscription_id = uuid::Uuid::new_v4().to_string();
+                self.subscriptions
+                    .lock()
+                    .await
+                    .insert(subscription_id.clone(), uri.clone(), version, None);
+                match &value {
+                    snaq_lite_lang::Value::Vector(v) => {
+                        let inner = v.inner.clone();
+                        let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
+                        self.subscriptions
+                            .lock()
+                            .await
+                            .set_cancel_tx(&subscription_id, Some(cancel_tx));
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            let sid = subscription_id.clone();
+                            let notification_tx = self.notification_tx.clone();
+                            let canvas_id_for_stream = canvas_id.clone();
+                            let uri_for_stream = uri.to_string();
+                            std::thread::spawn(move || {
+                                run_stream_consumer(
+                                    db,
+                                    inner,
+                                    sid,
+                                    None,
+                                    canvas_id_for_stream,
+                                    Some(uri_for_stream),
+                                    notification_tx,
+                                    cancel_rx,
+                                );
+                            });
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            let display = snaq_lite_lang::format_vector_for_widget_display(&db, v)
+                                .unwrap_or_else(|_| "<vector>".to_string());
+                            let _ = (inner, cancel_rx);
+                            let sid = subscription_id.clone();
+                            self.send_publish_result_notifications(PublishResultParams {
+                                subscription_id: sid.clone(),
+                                status: PublishStatus::Running,
+                                revision: None,
+                                canvas_id: canvas_id.clone(),
+                                uri: Some(uri.to_string()),
+                                data: Some(serde_json::json!({ "elements": [] })),
+                            })
+                            .await;
+                            self.send_publish_result_notifications(PublishResultParams {
+                                subscription_id: sid,
+                                status: PublishStatus::Completed,
+                                revision: None,
+                                canvas_id: canvas_id.clone(),
+                                uri: Some(uri.to_string()),
+                                data: Some(serde_json::json!({ "display": display })),
+                            })
+                            .await;
+                        }
+                    }
+                    _ => {
+                        let display = snaq_lite_lang::format_value_for_display(&db, &value)
+                            .unwrap_or_else(|_| "<error>".to_string());
+                        self.send_publish_result_notifications(PublishResultParams {
+                            subscription_id: subscription_id.clone(),
+                            status: PublishStatus::Completed,
+                            revision: None,
+                            canvas_id: canvas_id.clone(),
+                            uri: Some(uri.to_string()),
+                            data: Some(serde_json::json!({ "display": display })),
+                        })
+                        .await;
+                    }
+                }
+                Ok(SubscribeNodeResponse { subscription_id })
             }
         }
     }
@@ -991,6 +1190,17 @@ impl SnaqLiteBackend {
             let _ = cancel_tx.send(());
         }
         Ok(())
+    }
+
+    /// Handle snaqlite/unsubscribeNode: canonical node-centric unsubscribe API.
+    pub async fn unsubscribe_node(
+        &self,
+        params: UnsubscribeNodeParams,
+    ) -> tower_lsp::jsonrpc::Result<()> {
+        self.unsubscribe(UnsubscribeParams {
+            subscription_id: params.subscription_id,
+        })
+        .await
     }
 
     /// Handle snaqlite/graph/connect: type-check and add edge.
@@ -1177,6 +1387,129 @@ impl SnaqLiteBackend {
         self.drain_widget_notifications().await;
         Ok(ResetNamespaceResponse {
             removed_documents: removed_uris.len(),
+        })
+    }
+
+    /// Export the canonical canvas snapshot (documents + graph edges).
+    pub async fn graph_export_canvas_document(
+        &self,
+        _params: ExportCanvasDocumentParams,
+    ) -> tower_lsp::jsonrpc::Result<ExportCanvasDocumentResponse> {
+        let (canvas_id, docs, edges) = {
+            let state = self.state.lock().await;
+            let canvas_id = state.active_canvas_id();
+            let docs = state.snapshot_documents();
+            let edges = self.graph_state.lock().await.edges_snapshot();
+            (canvas_id, docs, edges)
+        };
+        let model = snaq_lite_lang::CanvasDocument {
+            canvas_id,
+            nodes: docs
+                .into_iter()
+                .map(|(uri, source, version)| snaq_lite_lang::CanvasNodeDocument {
+                    uri: uri.to_string(),
+                    source,
+                    version,
+                })
+                .collect(),
+            edges: edges
+                .into_iter()
+                .map(|e| snaq_lite_lang::CanvasEdge {
+                    source_uri: e.source_uri.to_string(),
+                    target_uri: e.target_uri.to_string(),
+                    target_param_id: e.target_input_name,
+                })
+                .collect(),
+        };
+        Ok(ExportCanvasDocumentResponse {
+            canvas_document: Self::canvas_payload_from_model(model),
+        })
+    }
+
+    /// Import a canonical canvas snapshot and rebuild runtime state.
+    pub async fn graph_import_canvas_document(
+        &self,
+        params: ImportCanvasDocumentParams,
+    ) -> tower_lsp::jsonrpc::Result<ImportCanvasDocumentResponse> {
+        let model = Self::canvas_model_from_payload(params.canvas_document);
+        let mut node_entries: Vec<(Url, String, i32)> = Vec::new();
+        for (idx, node) in model.nodes.iter().enumerate() {
+            let uri = Url::parse(&node.uri)
+                .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid node uri"))?;
+            self.ensure_canvas_uri_request(&uri).await?;
+            let version = node.version.unwrap_or((idx as i32) + 1);
+            node_entries.push((uri, node.source.clone(), version));
+        }
+        let node_uri_set: std::collections::HashSet<Url> =
+            node_entries.iter().map(|(u, _, _)| u.clone()).collect();
+        if node_uri_set.len() != node_entries.len() {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "duplicate node uri in canvasDocument",
+            ));
+        }
+        let mut edges = Vec::with_capacity(model.edges.len());
+        for edge in &model.edges {
+            let source_uri = Url::parse(&edge.source_uri)
+                .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid edge sourceUri"))?;
+            let target_uri = Url::parse(&edge.target_uri)
+                .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid edge targetUri"))?;
+            if !node_uri_set.contains(&source_uri) || !node_uri_set.contains(&target_uri) {
+                return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                    "edge uri must refer to an imported node uri",
+                ));
+            }
+            edges.push(graph::GraphEdge {
+                source_uri,
+                target_uri,
+                target_input_name: edge.target_param_id.clone(),
+            });
+        }
+
+        // Cancel and clear runtime state first to avoid stale streams/subscriptions.
+        let subscription_entries = {
+            let mut subs = self.subscriptions.lock().await;
+            subs.drain_all_entries()
+        };
+        self.cancel_subscription_entries(subscription_entries, "Canvas import")
+            .await;
+        let widget_entries = {
+            let mut widgets = self.widgets.lock().await;
+            widgets.drain_all_entries()
+        };
+        self.cancel_widget_entries(widget_entries, "Canvas import").await;
+        {
+            let mut results = self.node_results.lock().await;
+            results.clear();
+        }
+        let removed_docs = {
+            let mut state = self.state.lock().await;
+            state.clear_documents()
+        };
+        for uri in removed_docs {
+            self.client.publish_diagnostics(uri, Vec::new(), None).await;
+        }
+        {
+            let mut graph = self.graph_state.lock().await;
+            graph.replace_edges(edges.clone());
+        }
+        {
+            let mut state = self.state.lock().await;
+            for (uri, source, version) in &node_entries {
+                state.update_document(uri.clone(), *version, source);
+            }
+        }
+
+        let uris: Vec<Url> = node_entries.iter().map(|(u, _, _)| u.clone()).collect();
+        for uri in &uris {
+            self.publish_diagnostics(uri.clone()).await;
+            self.send_node_signature_updated(uri).await;
+        }
+        self.recompute_and_push(&uris).await;
+        self.drain_notifications().await;
+        self.drain_widget_notifications().await;
+        Ok(ImportCanvasDocumentResponse {
+            imported_nodes: node_entries.len(),
+            imported_edges: edges.len(),
         })
     }
 
@@ -1870,10 +2203,14 @@ fn feed_value_to_senders(
 /// Creates the stream inside the async block so it borrows db correctly.
 /// Exits on stream end (sends Completed) or when cancel_rx fires (no final notification).
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 fn run_stream_consumer(
     db: salsa::DatabaseImpl,
     inner: snaq_lite_lang::LazyVector,
     subscription_id: String,
+    revision: Option<u64>,
+    canvas_id: Option<String>,
+    uri: Option<String>,
     notification_tx: NotificationSender,
     cancel_rx: futures::channel::oneshot::Receiver<()>,
 ) {
@@ -1908,9 +2245,9 @@ fn run_stream_consumer(
                                     PublishResultParams {
                                         subscription_id: subscription_id.clone(),
                                         status: PublishStatus::Running,
-                                        revision: None,
-                                        canvas_id: None,
-                                        uri: None,
+                                        revision,
+                                        canvas_id: canvas_id.clone(),
+                                        uri: uri.clone(),
                                         data: Some(data),
                                     },
                                 ));
@@ -1934,9 +2271,9 @@ fn run_stream_consumer(
                 PublishResultParams {
                     subscription_id: subscription_id.clone(),
                     status: PublishStatus::Running,
-                    revision: None,
-                    canvas_id: None,
-                    uri: None,
+                    revision,
+                    canvas_id: canvas_id.clone(),
+                    uri: uri.clone(),
                     data: Some(serde_json::json!({
                         "elements": batch,
                         "offset": offset,
@@ -1951,9 +2288,9 @@ fn run_stream_consumer(
             PublishResultParams {
                 subscription_id: sid,
                 status: PublishStatus::Completed,
-                revision: None,
-                canvas_id: None,
-                uri: None,
+                revision,
+                canvas_id,
+                uri,
                 data: Some(serde_json::json!({ "totalElements": total })),
             },
         ));
@@ -2084,7 +2421,9 @@ pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSo
         widget_notification_rx: Arc::new(Mutex::new(widget_notification_rx)),
     })
     .custom_method("snaqlite/subscribe", SnaqLiteBackend::subscribe)
+    .custom_method("snaqlite/subscribeNode", SnaqLiteBackend::subscribe_node)
     .custom_method("snaqlite/unsubscribe", SnaqLiteBackend::unsubscribe)
+    .custom_method("snaqlite/unsubscribeNode", SnaqLiteBackend::unsubscribe_node)
     .custom_method("snaqlite/graph/connect", SnaqLiteBackend::graph_connect)
     .custom_method(
         "snaqlite/graph/disconnect",
@@ -2093,6 +2432,14 @@ pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSo
     .custom_method(
         "snaqlite/graph/resetNamespace",
         SnaqLiteBackend::graph_reset_namespace,
+    )
+    .custom_method(
+        "snaqlite/graph/exportCanvasDocument",
+        SnaqLiteBackend::graph_export_canvas_document,
+    )
+    .custom_method(
+        "snaqlite/graph/importCanvasDocument",
+        SnaqLiteBackend::graph_import_canvas_document,
     )
     .custom_method(
         "snaqlite/graph/subscribeWidget",
@@ -2459,6 +2806,51 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn run_stream_consumer_propagates_metadata_fields() {
+        use futures::stream::StreamExt;
+        let (value, db) = snaq_lite_lang::run_with_stream_inputs(
+            "[1, 2, 3]",
+            &snaq_lite_lang::default_si_registry(),
+            std::collections::HashMap::new(),
+        )
+        .expect("vector run");
+        let snaq_lite_lang::Value::Vector(v) = value else {
+            panic!("expected vector value");
+        };
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<(String, PublishResultParams)>();
+        let (_cancel_tx, cancel_rx) = futures::channel::oneshot::channel::<()>();
+        run_stream_consumer(
+            db,
+            v.inner,
+            "sub-1".to_string(),
+            Some(7),
+            Some("canvas-a".to_string()),
+            Some("snaq://canvas-a/node.sl".to_string()),
+            tx,
+            cancel_rx,
+        );
+
+        let messages = futures::executor::block_on(async move {
+            let mut out = Vec::new();
+            while let Some((_, params)) = rx.next().await {
+                let is_completed = matches!(params.status, PublishStatus::Completed);
+                out.push(params);
+                if is_completed {
+                    break;
+                }
+            }
+            out
+        });
+        assert!(!messages.is_empty(), "stream consumer should emit notifications");
+        for params in &messages {
+            assert_eq!(params.revision, Some(7));
+            assert_eq!(params.canvas_id.as_deref(), Some("canvas-a"));
+            assert_eq!(params.uri.as_deref(), Some("snaq://canvas-a/node.sl"));
+        }
+    }
+
     #[test]
     fn subscription_registry_invalidate_all() {
         let mut reg = subscription::SubscriptionRegistry::new();
@@ -2475,6 +2867,21 @@ mod tests {
         assert!(ids.contains("sub-2"));
         assert!(reg.remove("sub-1").is_none());
         assert!(reg.remove("sub-2").is_none());
+    }
+
+    #[test]
+    fn subscription_registry_drain_all_entries_includes_scalar_and_streaming() {
+        let mut reg = subscription::SubscriptionRegistry::new();
+        let uri = Url::parse("file:///doc.snaq").unwrap();
+        let (tx, _rx) = futures::channel::oneshot::channel();
+        reg.insert("sub-stream".to_string(), uri.clone(), Some(1), Some(tx));
+        reg.insert("sub-scalar".to_string(), uri, Some(1), None);
+        let drained = reg.drain_all_entries();
+        assert_eq!(drained.len(), 2);
+        assert!(drained.iter().any(|(id, tx)| id == "sub-stream" && tx.is_some()));
+        assert!(drained.iter().any(|(id, tx)| id == "sub-scalar" && tx.is_none()));
+        assert!(reg.remove("sub-stream").is_none());
+        assert!(reg.remove("sub-scalar").is_none());
     }
 
     // ---- graph state ----
@@ -2691,6 +3098,21 @@ mod tests {
             cancelled.iter().map(|(id, _)| id.as_str()).collect();
         assert!(ids.contains("w1"));
         assert!(ids.contains("w2"));
+    }
+
+    #[test]
+    fn widget_registry_drain_all_entries_includes_scalar_and_streaming() {
+        let mut reg = widget_registry::WidgetRegistry::new();
+        let uri = Url::parse("file:///a.snaq").unwrap();
+        let (tx, _rx) = futures::channel::oneshot::channel();
+        reg.insert("w-stream".to_string(), uri.clone(), tx);
+        reg.insert_scalar("w-scalar".to_string(), uri);
+        let drained = reg.drain_all_entries();
+        assert_eq!(drained.len(), 2);
+        assert!(drained.iter().any(|(id, tx)| id == "w-stream" && tx.is_some()));
+        assert!(drained.iter().any(|(id, tx)| id == "w-scalar" && tx.is_none()));
+        assert!(reg.remove("w-stream").is_none());
+        assert!(reg.remove("w-scalar").is_none());
     }
 
     #[test]

@@ -10,6 +10,31 @@ pub struct GraphInputDecl {
     pub type_name: String,
 }
 
+/// Canonical node document representation for a canvas snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanvasNodeDocument {
+    pub uri: String,
+    pub source: String,
+    pub version: Option<i32>,
+}
+
+/// Canonical graph edge representation for a canvas snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanvasEdge {
+    pub source_uri: String,
+    pub target_uri: String,
+    /// Stable target input identity (param id).
+    pub target_param_id: String,
+}
+
+/// Canonical language-level canvas snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanvasDocument {
+    pub canvas_id: Option<String>,
+    pub nodes: Vec<CanvasNodeDocument>,
+    pub edges: Vec<CanvasEdge>,
+}
+
 /// Returns a stable type name for a value, for use in graph port type checking and LSP notifications.
 /// Used as the node `outputType` in snaqlite/graph/nodeSignatureUpdated.
 pub fn value_type_name(value: &Value) -> Option<String> {

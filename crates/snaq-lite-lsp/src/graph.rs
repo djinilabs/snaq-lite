@@ -115,6 +115,16 @@ impl GraphState {
         });
     }
 
+    /// Replace all graph edges with the provided list.
+    pub fn replace_edges(&mut self, edges: Vec<GraphEdge>) {
+        self.edges = edges;
+    }
+
+    /// Snapshot current edges.
+    pub fn edges_snapshot(&self) -> Vec<GraphEdge> {
+        self.edges.clone()
+    }
+
     /// True when adding `source -> target` would create a cycle in the current graph.
     pub fn would_create_cycle(
         &self,

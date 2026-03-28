@@ -23,6 +23,9 @@ The server supports subscribing to the **root result** of the current document. 
 | `snaqlite/subscribe` | Request | `{ textDocument: { uri }, range?: Range }` (range optional; root-only in Phase 1) | `{ subscriptionId: string }` or error |
 | `snaqlite/unsubscribe` | Request | `{ subscriptionId: string }` | `null` or error |
 | `snaqlite/publishResult` | Notification (server → client) | `{ subscriptionId, status, data? }` | — |
+| `snaqlite/subscribeNode` | Request | `{ sourceUri }` | `{ subscriptionId: string }` or error |
+| `snaqlite/unsubscribeNode` | Request | `{ subscriptionId: string }` | `null` or error |
+| `snaqlite/publishNodeResult` | Notification (server → client) | Same payload as `snaqlite/publishResult` | — |
 
 **Status:** `"Running"` \| `"Completed"` \| `"Error"` \| `"Cancelled"`.
 
@@ -33,11 +36,16 @@ The server supports subscribing to the **root result** of the current document. 
 - **Error:** `{ message: string }`.
 - **Cancelled:** optional `{ reason?: string }` (e.g. `"Document changed"`).
 
+`subscribeNode`/`unsubscribeNode` are the canonical node-centric APIs. `subscribe`/`unsubscribe` remain supported for compatibility and use the same runtime pipeline.
+
 ### Lifecycle
 
-- **Subscribe:** Client sends `snaqlite/subscribe` with the document URI. The server runs the document (root-only); if the result is a vector, it spawns a background consumer and returns a `subscriptionId`. The client then receives `snaqlite/publishResult` with status `Running` (batches) and finally `Completed` or `Error`.
-- **Unsubscribe:** Client sends `snaqlite/unsubscribe` with `subscriptionId`. The server cancels the consumer and stops sending for that subscription.
-- **Document change:** On `textDocument/didChange` (or open), the server invalidates all subscriptions for that URI and sends `snaqlite/publishResult` with status `Cancelled` and reason `"Document changed"` for each.
+- **Subscribe:** Client sends `snaqlite/subscribeNode` (or legacy `snaqlite/subscribe`) for a node URI.
+  - `subscribeNode` evaluates with graph inputs (upstream wiring applied).
+  - Legacy `subscribe` evaluates document root with empty stream inputs (no graph wiring).
+  - If the result is a vector, the server spawns a background consumer and returns a `subscriptionId`. The client receives both `snaqlite/publishResult` and `snaqlite/publishNodeResult` with status `Running` (batches on native) and finally `Completed` or `Error`.
+- **Unsubscribe:** Client sends `snaqlite/unsubscribeNode` (or legacy `snaqlite/unsubscribe`) with `subscriptionId`. The server cancels the consumer and stops sending for that subscription.
+- **Document change:** On `textDocument/didChange` (or open), the server recomputes impacted nodes and pushes fresh `Completed` / `Error` updates for active subscriptions/widgets on affected URIs.
 
 Clients should send `snaqlite/unsubscribe` when closing the file or hiding the results panel.
 
@@ -56,7 +64,7 @@ The server supports a **visual computation graph** (DAG): each **Computation Box
 - **Notification `snaqlite/graph/nodeSignatureUpdated`** — After each `didOpen` / `didChange` for a URI, the server sends this notification with:
   - `uri` (string)
   - `inputs`: array of `{ name, paramId, type }` (declared input ports; `paramId` is stable across rename)
-  - `outputType`: optional string (e.g. `"Vector"`, `"Numeric"`) inferred from a run with empty stream inputs, or `null` if not available.
+  - `outputType`: optional string (e.g. `"Vector"`, `"Numeric"`) inferred from graph-aware execution (upstream inputs applied when wired), or `null` if not available.
 
 The frontend can use this to draw input/output anchors on the canvas.
 
@@ -65,7 +73,7 @@ The frontend can use this to draw input/output anchors on the canvas.
 - **Request `snaqlite/graph/connect`** — Params: `sourceUri`, `targetUri`, `targetInputName`. `targetInputName` can be either display name or stable `paramId`. The server resolves both URIs to open documents, rejects cycle-creating connects, infers source output with graph-aware execution, and verifies type compatibility (exact type name match; target `Undefined` accepts any). On success it adds or replaces the edge (at most one source per target input/paramId). On type mismatch it returns JSON-RPC error `-32001` (`"Type mismatch"`). On cycle it returns server error `-32002`.
 - **Request `snaqlite/graph/disconnect`** — Params: `targetUri`, `targetInputName`. Removes the edge for that target and input. Widgets subscribed to the target node are invalidated (see reactive invalidation).
 
-Running a node with graph inputs: when the server needs a node’s result (for `nodeSignatureUpdated` output type or for `subscribeWidget`), it topologically sorts the subgraph that includes that node, runs each ancestor node in order, creates stream handles for vector outputs so downstream nodes can read them, then runs the target node with `stream_inputs` built from the graph edges. On WASM only single-node runs with empty inputs are used.
+Running a node with graph inputs: when the server needs a node’s result (for `nodeSignatureUpdated` output type or for `subscribeWidget`), it topologically sorts the subgraph that includes that node, runs each ancestor node in order, creates stream handles for vector outputs so downstream nodes can read them, then runs the target node with `stream_inputs` built from the graph edges.
 
 ### Widget subscriptions (Presentation Blocks)
 
@@ -85,6 +93,7 @@ Running a node with graph inputs: when the server needs a node’s result (for `
 Multiple widgets on the same node each get their own run and cached result.
 
 Notifications can include metadata fields:
+
 - `revision` (monotonic per-node recompute revision),
 - `canvasId` (active canvas identity),
 - `uri` (document/node URI the update belongs to).
@@ -113,6 +122,18 @@ For URI-namespace based canvas isolation, the server exposes:
 - The first used URI binds the LSP instance to a single canvas identity.
 - Later graph/subscription/document operations with a different canvas identity are rejected.
 - For `snaq://` URIs, canvas identity is the URI host (example: `snaq://canvas-a/node_1.sl` -> `canvas-a`).
+
+### Canonical canvas snapshot
+
+- **Request `snaqlite/graph/exportCanvasDocument`** — Params: `{}`.
+  - Response: `{ canvasDocument }`, where `canvasDocument` contains:
+    - `canvasId` (optional),
+    - `nodes[]`: `{ uri, source, version? }`,
+    - `edges[]`: `{ sourceUri, targetUri, targetParamId }`.
+- **Request `snaqlite/graph/importCanvasDocument`** — Params: `{ canvasDocument }`.
+  - Replaces in-memory runtime state with the supplied snapshot.
+  - Cancels active subscriptions/widgets (`reason: "Canvas import"`), clears node-result cache, imports documents/edges, recomputes imported nodes, and republishes diagnostics/signatures.
+  - Response: `{ importedNodes, importedEdges }`.
 
 ## Native (stdio)
 
@@ -173,7 +194,7 @@ The server can run inside a Web Worker so the IDE (e.g. in the browser) does not
 ## Limits and edge cases
 
 - **Multi-document** — The server tracks a map of URI → document. Opening or changing a document creates or updates the entry for that URI; virtual URIs (e.g. `snaq://graph/...`) are supported the same way as file URIs.
-- **Pub-sub** — Subscriptions are root-only (whole-document result). Subscribing to a range is not yet supported. Stream input source for `$name` is not in subscribe params (Phase 1); the server runs with empty stream inputs, so unbound `$name` yields a run error. On WASM, vector results from `snaqlite/subscribe` are intentionally sent as a single `Completed` notification (no `Running` stream batches). For canvas/UI result browsing and pagination, use `snaqlite/graph/subscribeWidget` + `snaqlite/graph/fetchResultSlice`.
+- **Pub-sub** — Subscriptions are root-only (whole-document result). Subscribing to a range is not yet supported. Stream input source for `$name` is not in subscribe params (Phase 1); the server runs with empty stream inputs, so unbound `$name` yields a run error. On WASM, vector subscriptions do not stream element batches, but status notifications follow `Running` then `Completed` for lifecycle parity. For canvas/UI result browsing and pagination, use `snaqlite/graph/subscribeWidget` + `snaqlite/graph/fetchResultSlice`.
 - **Vector summary on WASM** — For some lazy vector kinds, `resultSummary.length` / `totalElements` in Completed payload may be omitted until data is materialized. Clients should rely on `fetchResultSlice` for authoritative pagination metadata.
 - **Incremental sync** — The server uses incremental text sync (`TextDocumentSyncKind::INCREMENTAL`) and supports full-text replacement fallback when range is omitted. A `didChange` with an empty `content_changes` array is a no-op.
 - **Input declaration runtime semantics** — Native and WASM intentionally differ for declared `input` bindings: native preserves scalar-friendly binding for single-item inputs, while WASM keeps lazy vector/stream binding to avoid blocking the worker event loop.

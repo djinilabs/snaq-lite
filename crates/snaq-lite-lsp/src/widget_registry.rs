@@ -182,6 +182,17 @@ impl WidgetRegistry {
         }
         out
     }
+
+    /// Drain all widgets, returning ids with optional cancel senders.
+    /// Useful when callers must emit a terminal notification for every removed widget.
+    pub fn drain_all_entries(
+        &mut self,
+    ) -> Vec<(String, Option<futures::channel::oneshot::Sender<()>>)> {
+        self.by_id
+            .drain()
+            .map(|(id, mut entry)| (id, entry.cancel_tx.take()))
+            .collect()
+    }
 }
 
 impl Default for WidgetRegistry {

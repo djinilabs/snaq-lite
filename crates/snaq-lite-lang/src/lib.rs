@@ -53,6 +53,7 @@ pub use map_registry::{
 pub use stream_variance::{decimal_string_to_quantity, StreamVarianceMode};
 pub use csv_stream_parse::{csv_delimiter_from_line, parse_csv_line_to_record, strip_bom};
 pub use graph::{
+    CanvasDocument, CanvasEdge, CanvasNodeDocument,
     extract_input_decls_from_block, extract_input_decls_from_block_with_ids, value_type_name,
     GraphInputDecl,
 };

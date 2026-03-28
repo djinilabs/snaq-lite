@@ -11,6 +11,14 @@ impl tower_lsp::lsp_types::notification::Notification for PublishResultNotificat
     const METHOD: &'static str = "snaqlite/publishResult";
 }
 
+/// Custom LSP notification for snaqlite/publishNodeResult (server → client).
+/// Node-centric alias of publishResult with identical payload shape.
+pub struct PublishNodeResultNotification;
+impl tower_lsp::lsp_types::notification::Notification for PublishNodeResultNotification {
+    type Params = PublishResultParams;
+    const METHOD: &'static str = "snaqlite/publishNodeResult";
+}
+
 /// Params for snaqlite/subscribe. Range identifies the code block/expression to watch.
 /// Phase 1: root-only subscription (range can be omitted or ignored; whole document result).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,10 +42,31 @@ pub struct SubscribeResponse {
     pub subscription_id: String,
 }
 
+/// Params for snaqlite/subscribeNode (node-centric canonical API).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscribeNodeParams {
+    pub source_uri: String,
+}
+
+/// Response for snaqlite/subscribeNode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscribeNodeResponse {
+    pub subscription_id: String,
+}
+
 /// Params for snaqlite/unsubscribe.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnsubscribeParams {
+    pub subscription_id: String,
+}
+
+/// Params for snaqlite/unsubscribeNode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsubscribeNodeParams {
     pub subscription_id: String,
 }
 
@@ -110,6 +139,54 @@ pub struct ConnectParams {
 pub struct DisconnectParams {
     pub target_uri: String,
     pub target_input_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasNodeDocumentPayload {
+    pub uri: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasEdgePayload {
+    pub source_uri: String,
+    pub target_uri: String,
+    pub target_param_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasDocumentPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canvas_id: Option<String>,
+    pub nodes: Vec<CanvasNodeDocumentPayload>,
+    pub edges: Vec<CanvasEdgePayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportCanvasDocumentParams {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportCanvasDocumentResponse {
+    pub canvas_document: CanvasDocumentPayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportCanvasDocumentParams {
+    pub canvas_document: CanvasDocumentPayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportCanvasDocumentResponse {
+    pub imported_nodes: usize,
+    pub imported_edges: usize,
 }
 
 /// Params for snaqlite/graph/resetNamespace request.
@@ -288,6 +365,7 @@ pub fn value_to_slice_element(
 mod tests {
     use super::*;
     use snaq_lite_lang::Value;
+    use tower_lsp::lsp_types::notification::Notification;
 
     #[test]
     fn value_to_slice_element_preserves_path_contract() {
@@ -310,5 +388,46 @@ mod tests {
         );
         assert_eq!(scalar["display"].as_str(), Some("2"));
         assert!(scalar.get("path").is_none());
+    }
+
+    #[test]
+    fn node_subscribe_params_roundtrip_json() {
+        let params = SubscribeNodeParams {
+            source_uri: "snaq://canvas/node_1.sl".to_string(),
+        };
+        let json = serde_json::to_value(&params).expect("serialize");
+        assert_eq!(json["sourceUri"], serde_json::json!("snaq://canvas/node_1.sl"));
+        let decoded: SubscribeNodeParams = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(decoded.source_uri, "snaq://canvas/node_1.sl");
+    }
+
+    #[test]
+    fn publish_node_result_notification_method_name_is_stable() {
+        assert_eq!(
+            PublishNodeResultNotification::METHOD,
+            "snaqlite/publishNodeResult"
+        );
+    }
+
+    #[test]
+    fn canvas_document_payload_roundtrip_json() {
+        let payload = CanvasDocumentPayload {
+            canvas_id: Some("canvas-a".to_string()),
+            nodes: vec![CanvasNodeDocumentPayload {
+                uri: "snaq://canvas-a/n1.sl".to_string(),
+                source: "1 + 2".to_string(),
+                version: Some(1),
+            }],
+            edges: vec![CanvasEdgePayload {
+                source_uri: "snaq://canvas-a/n1.sl".to_string(),
+                target_uri: "snaq://canvas-a/n2.sl".to_string(),
+                target_param_id: "p1".to_string(),
+            }],
+        };
+        let json = serde_json::to_value(&payload).expect("serialize");
+        let decoded: CanvasDocumentPayload = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(decoded.canvas_id.as_deref(), Some("canvas-a"));
+        assert_eq!(decoded.nodes.len(), 1);
+        assert_eq!(decoded.edges.len(), 1);
     }
 }

@@ -2139,7 +2139,7 @@ fn value_inner<'db>(
                 let n = exprs.len();
                 for (i, e) in exprs.iter().enumerate() {
                     match e.data(db) {
-                        ExprData::InputDecl(name, _param_id, type_name) => {
+                        ExprData::InputDecl(name, _param_id, _type_name) => {
                             if !seen_input_names.insert(name.clone()) {
                                 return Err(with_span_if_missing(
                                     RunError::new(RunErrorKind::InvalidArgument(format!(
@@ -2156,7 +2156,7 @@ fn value_inner<'db>(
                             });
                             #[cfg(not(target_arch = "wasm32"))]
                             let input_value = if let Some(handle_id) = handle_id {
-                                if type_name == "Vector" {
+                                if _type_name == "Vector" {
                                     Value::Vector(VectorValue::column(LazyVector::FromInput(handle_id)))
                                 } else {
                                     stream_input_to_value(handle_id)

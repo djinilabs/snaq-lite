@@ -63,6 +63,11 @@ impl ResultHandleRegistry {
             self.by_uri.insert(source_uri.clone(), id.clone());
             id
         });
+        if let Some(existing) = self.by_handle.get(&handle) {
+            if existing.revision == revision && existing.value == value {
+                return handle;
+            }
+        }
         self.by_handle.insert(
             handle.clone(),
             ResultHandleEntry {

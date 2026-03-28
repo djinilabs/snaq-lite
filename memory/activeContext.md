@@ -2,6 +2,16 @@
 
 ## Just completed
 
+- **Bridge LSP Canvas Runtime Gaps (execution pass):**
+  - `crates/snaq-lite-lsp/src/lib.rs`: vector subscriptions now emit summary/handle-style completion on WASM (no eager vector display), native stream notifications include `resultHandle`, and graph recompute now reevaluates downstream on every mutation wave (not fingerprint-gated only).
+  - `crates/snaq-lite-lsp/src/lib.rs` + `src/result_handle_registry.rs`: non-replayable `FromInput` nested-path fetches now reject with `invalid_params`; unchanged handle upserts no longer invalidate cursors.
+  - `crates/snaq-lite-lsp/src/lib.rs`: introduced deterministic `WiredNodeProjection` assembly (sorted inbound param mapping) for graph execution setup.
+  - `crates/snaq-lite-lsp/src/lib.rs`: param helper RPCs moved from line-split rewriting to parse/span-aware `InputDecl` edits with identifier validation and source-preserving updates.
+  - `docs/LSP.md`: normalized Completed payload contract (summary + optional handle for vectors/maps), documented mutation-triggered reevaluation policy, and clarified graph URI contract + renameParam declaration-only behavior.
+  - `crates/snaq-lite-lsp/src/pubsub.rs`: added protocol roundtrip coverage for vector Completed payload with summary + `resultHandle`.
+  - `crates/snaq-lite-lsp/tests/lsp_integration.rs`: added/updated acceptance coverage for recompute-on-same-output, graph URI enforcement, non-replayable nested-path rejection, vector handle/slice flow, and param helper source-preservation/identifier guards.
+  - Verification green: `cargo test -p snaq-lite-lsp`, `cargo test -p snaq-lite-lang`, `pnpm test`, `pnpm run lint`, `pnpm smoketest`.
+
 - **Bridge lazy evaluation + streaming gaps (phase execution):**
   - `crates/snaq-lite-lsp/src/lib.rs`: `recompute_and_push` now propagates downstream only when node output fingerprint changes, reducing no-op didChange fanout. Added integration tests for changed-output propagation and same-output no-propagation.
   - `crates/snaq-lite-lang/src/queries.rs`: vector-typed input declarations now bind lazily to `LazyVector::FromInput` across native and WASM, while native keeps scalar-friendly binding for non-vector declarations; `norm` and `corr` now stream in single pass, and `median`/`quantile` now reject non-replayable `FromInput` streams explicitly.
@@ -344,3 +354,9 @@
 - **LSP graph add-param duplicate normalization:** During review, found and fixed a related bug in `graph_add_param`: duplicate checks used raw `name`/`paramId` while insertion used trimmed values, so whitespace-padded input could bypass duplicate detection. Added integration test `graph_add_param_rejects_duplicate_name_when_whitespace_padded` (red first, then green). Implementation now normalizes `name`, `paramId`, and `typeName` once and uses normalized values for validation, duplicate checks, and generated source text. Verification: new targeted test passes, existing rename trim test passes, full `cargo test -p snaq-lite-lsp` passes, and repo `pnpm run check` passes.
 - **Canvas rebind coverage + lifecycle fix:** Verified a gap where `canvas_rebind_is_allowed_after_full_drain` previously passed with a weak assertion (`hover` error-free but null result). Strengthened the test to require non-null hover on canvas-b after draining canvas-a, reproduced failure, then fixed `did_open` and `did_change` to call `ensure_canvas_uri_request` (rebind-aware) instead of direct `state.ensure_canvas_uri` checks. Verification: strengthened rebind test now passes; full `cargo test -p snaq-lite-lsp` passes; repo `pnpm run check` passes.
 - **Canvas rebind semantic assertion hardening:** Improved the rebind integration test to assert hover contents include the expected rebound document value (`5` for `2 + 3`), preventing future false positives where a non-null but incorrect hover payload could still pass. Verification: targeted test, full `cargo test -p snaq-lite-lsp`, and `pnpm run check` all pass.
+- **LSP review/improvement pass (post-plan hardening):**
+  - Fixed `graph_add_param` insertion formatting so adding a new input no longer introduces extra blank lines when inserting before the first non-input statement.
+  - Added `graph_add_param_preserves_blank_line_before_body` integration coverage to enforce source-preserving formatting around the input/body boundary.
+  - Added `graph_connect_order_does_not_change_downstream_result` integration coverage to verify equivalent downstream evaluation when connect operations are applied in different orders (deterministic wiring projection behavior).
+  - Verification green: `cargo test -p snaq-lite-lsp`, `pnpm test`, `pnpm run lint`.
+- **Recompute cache-eviction issue verification:** reviewed `recompute_and_push` in `crates/snaq-lite-lsp/src/lib.rs` against the reported "clear-all impacted_set + value-change gate skip" bug; current implementation does not include that gate/flow. Applied cleanup only (removed stale changed-output wording/unused tuple field) and re-verified with `cargo test -p snaq-lite-lsp` and `pnpm check` (green).

@@ -32,7 +32,10 @@ The server supports subscribing to the **root result** of the current document. 
 **Data (wire format):**
 
 - **Running:** `{ elements: Array<element>, offset?: number, count?: number }`. Each `element` is either `{ display: string }`, `null` (undefined), or `{ kind: "error", message: string }`.
-- **Completed:** optional `{ display?: string, totalElements?: number }`.
+- **Completed:** optional payload with type-aware summary and optional handle.
+  - Scalars: `{ display: string, resultHandle?: string }`.
+  - Vectors/maps: `{ resultType, resultSummary?, totalElements?, resultHandle? }`.
+  - Vector/map `Completed` payloads do **not** include full materialized content.
 - **Error:** `{ message: string }`.
 - **Cancelled:** optional `{ reason?: string }` (e.g. `"Document changed"`).
 
@@ -45,7 +48,7 @@ The server supports subscribing to the **root result** of the current document. 
   - Legacy `subscribe` evaluates document root with empty stream inputs (no graph wiring).
   - If the result is a vector, the server spawns a background consumer and returns a `subscriptionId`. The client receives both `snaqlite/publishResult` and `snaqlite/publishNodeResult` with status `Running` (batches on native) and finally `Completed` or `Error`.
 - **Unsubscribe:** Client sends `snaqlite/unsubscribeNode` (or legacy `snaqlite/unsubscribe`) with `subscriptionId`. The server cancels the consumer and stops sending for that subscription.
-- **Document change:** On `textDocument/didChange` (or open), the server recomputes impacted nodes and pushes fresh `Completed` / `Error` updates for active subscriptions/widgets on affected URIs. Downstream propagation is value-change gated: descendants are enqueued only when the upstream node result fingerprint actually changes.
+- **Document change:** On `textDocument/didChange` (or open), the server recomputes impacted nodes and pushes fresh `Completed` / `Error` updates for active subscriptions/widgets on affected URIs. Descendants are reevaluated for each graph/text mutation so dependent outputs stay synchronized with edit/link churn.
 
 Clients should send `snaqlite/unsubscribe` when closing the file or hiding the results panel.
 
@@ -123,6 +126,7 @@ For URI-namespace based canvas isolation, the server exposes:
 - Later graph/subscription/document operations with a different canvas identity are rejected.
 - Rebinding to a different canvas id is allowed only after full runtime drain (no open documents, active subscriptions/widgets, or active result handles/cursors).
 - For `snaq://` URIs, canvas identity is the URI host (example: `snaq://canvas-a/node_1.sl` -> `canvas-a`).
+- Graph-facing operations should use canonical `snaq://<canvasId>/...` URIs to avoid ambiguous cross-canvas identity.
 
 ### Param helper RPCs
 
@@ -131,6 +135,8 @@ Optional helpers for UI ergonomics while keeping source text canonical:
 - `snaqlite/graph/renameParam` with `{ uri, paramId, newName }`
 - `snaqlite/graph/addParam` with `{ uri, paramId, name, typeName }`
 - `snaqlite/graph/removeParam` with `{ uri, paramId }`
+
+`renameParam` updates the input declaration only; it does not rename identifier usages in the block body.
 
 ### Canonical canvas snapshot
 
@@ -203,8 +209,8 @@ The server can run inside a Web Worker so the IDE (e.g. in the browser) does not
 ## Limits and edge cases
 
 - **Multi-document** — The server tracks a map of URI → document. Opening or changing a document creates or updates the entry for that URI; virtual URIs (e.g. `snaq://graph/...`) are supported the same way as file URIs.
-- **Pub-sub** — Subscriptions are root-only (whole-document result). Subscribing to a range is not yet supported. Stream input source for `$name` is not in subscribe params (Phase 1); the server runs with empty stream inputs, so unbound `$name` yields a run error. On WASM, vector subscriptions do not stream element batches, but status notifications follow `Running` then `Completed` for lifecycle parity. For canvas/UI result browsing and pagination, use `snaqlite/graph/subscribeWidget` + `snaqlite/graph/fetchResultSlice`.
-- **Vector summary on WASM** — For some lazy vector kinds, `resultSummary.length` / `totalElements` in Completed payload may be omitted until data is materialized. Clients should rely on `fetchResultSlice` for authoritative pagination metadata.
+- **Pub-sub** — Subscriptions are root-only (whole-document result). Subscribing to a range is not yet supported. Stream input source for `$name` is not in subscribe params (Phase 1); the server runs with empty stream inputs, so unbound `$name` yields a run error. On WASM, vector subscriptions do not stream element batches, but status notifications follow `Running` then `Completed` for lifecycle parity. Vector/map `Completed` payloads contain summary + optional `resultHandle`; fetch detailed content via `snaqlite/graph/fetchResultSlice`.
+- **Vector summary on WASM** — For some lazy vector kinds, `resultSummary.length` / `totalElements` in Completed payload may be omitted until data is materialized. Clients should rely on `fetchResultSlice` for authoritative pagination metadata and detailed values.
 - **Incremental sync** — The server uses incremental text sync (`TextDocumentSyncKind::INCREMENTAL`) and supports full-text replacement fallback when range is omitted. A `didChange` with an empty `content_changes` array is a no-op.
 - **Input declaration runtime semantics** — Vector-typed declared inputs (`input x: Vector`) use lazy stream-vector binding (`LazyVector::FromInput`) on both native and WASM. Native preserves scalar-friendly binding for non-vector declared inputs when a single value is provided.
 - **Diagnostics** — Parse and resolve/simplify errors are reported; optional runtime validation can add more. No debouncing; every change triggers a new diagnostic run.

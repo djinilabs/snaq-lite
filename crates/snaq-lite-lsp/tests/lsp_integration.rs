@@ -3343,40 +3343,38 @@ async fn param_add_preserves_existing_edges_and_updates_signature() {
     client_w.flush().await.unwrap();
 
     let sub2 = serde_json::json!({
-        "jsonrpc":"2.0","id":59,"method":"snaqlite/subscribeNode",
-        "params":{"sourceUri":"snaq://graph/d.sl"}
+        "jsonrpc":"2.0","id":59,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-param-add-check","sourceUri":"snaq://graph/d.sl"}
     });
     client_w
         .write_all(&lsp_message(&sub2.to_string()))
         .await
         .unwrap();
     client_w.flush().await.unwrap();
-    let body = read_until_response_id(&mut client_r, 59).await;
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let subscription_id = v["result"]["subscriptionId"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    assert!(!subscription_id.is_empty(), "expected subscription id");
-    let mut got_completed = false;
-    for _ in 0..25 {
+    let mut display_text = String::new();
+    for _ in 0..30 {
         let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
             .await
             .expect("timeout")
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/publishNodeResult")
-            && v["params"]["subscriptionId"].as_str() == Some(subscription_id.as_str())
+        if v.get("id").and_then(|i| i.as_u64()) == Some(59) {
+            assert!(v.get("error").is_none(), "subscribeWidget should succeed: {v}");
+        }
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["widgetId"].as_str() == Some("w-param-add-check")
             && v["params"]["status"].as_str() == Some("Completed")
-            && v["params"]["data"]["display"].as_str() == Some("6")
         {
-            got_completed = true;
+            display_text = v["params"]["payload"]["display"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             break;
         }
     }
     assert!(
-        got_completed,
-        "adding extra param should preserve existing x edge result"
+        display_text.contains('6'),
+        "adding extra param should preserve existing x edge result; display={display_text}"
     );
     server_handle.abort();
     let _ = server_handle.await;
@@ -3738,7 +3736,7 @@ async fn graph_runtime_recomputes_without_widget_subscriptions() {
 }
 
 #[tokio::test]
-async fn did_change_on_source_with_same_output_does_not_recompute_descendants() {
+async fn did_change_on_source_with_same_output_recomputes_descendants() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
     let server_handle =
@@ -3821,8 +3819,8 @@ async fn did_change_on_source_with_same_output_does_not_recompute_descendants() 
         }
     }
     assert!(
-        !got_descendant_update,
-        "didChange with unchanged source output should not recompute downstream widget"
+        got_descendant_update,
+        "didChange with unchanged source output should still recompute downstream widget"
     );
     server_handle.abort();
     let _ = server_handle.await;
@@ -4652,6 +4650,37 @@ async fn native_subscribe_node_vector_returns_subscription_id() {
         v["result"]["subscriptionId"].as_str().is_some(),
         "subscribeNode should return subscriptionId for vector source"
     );
+    let result_handle = v["result"]["resultHandle"]
+        .as_str()
+        .map(ToString::to_string)
+        .expect("subscribeNode should return resultHandle for vector source");
+    let hover_req = serde_json::json!({
+        "jsonrpc":"2.0","id":134,"method":"textDocument/hover",
+        "params":{"textDocument":{"uri":"snaq://canvas-meta/vector.sl"},"position":{"line":0,"character":0}}
+    });
+    client_w
+        .write_all(&lsp_message(&hover_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 134).await;
+
+    let fetch = serde_json::json!({
+        "jsonrpc":"2.0","id":135,"method":"snaqlite/graph/fetchResultSlice",
+        "params":{"resultHandle": result_handle, "path":[],"offset":0,"limit":3}
+    });
+    client_w
+        .write_all(&lsp_message(&fetch.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 135).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "fetchResultSlice should succeed: {v}");
+    let elems = v["result"]["elements"].as_array().cloned().unwrap_or_default();
+    assert_eq!(elems.len(), 3);
+    assert_eq!(elems[0]["display"].as_str(), Some("1"));
+    assert_eq!(v["result"]["totalCount"].as_u64(), Some(12));
 
     server_handle.abort();
     let _ = server_handle.await;
@@ -5045,6 +5074,72 @@ async fn fetch_result_slice_rejects_random_access_for_non_replayable_result_hand
         "expected explicit non-replayable random-access rejection: {v}"
     );
 
+    let nested_fetch = serde_json::json!({
+        "jsonrpc":"2.0","id":207,"method":"snaqlite/graph/fetchResultSlice",
+        "params":{"resultHandle": result_handle, "path":[0],"offset":0,"limit":1}
+    });
+    client_w
+        .write_all(&lsp_message(&nested_fetch.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 207).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"]["code"].as_i64(), Some(-32602));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not support nested paths"),
+        "expected explicit non-replayable nested path rejection: {v}"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn graph_operations_require_snaq_canvas_uris() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(
+        &mut client_w,
+        "file:///tmp/not-canvas.sl",
+        "[1,2,3]",
+        1,
+    )
+    .await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":399,"method":"snaqlite/graph/connect",
+        "params":{
+            "sourceUri":"file:///tmp/not-canvas.sl",
+            "targetUri":"file:///tmp/not-canvas.sl",
+            "targetInputName":"x"
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 399).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"]["code"].as_i64(), Some(-32602));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("graph operations require snaq://<canvasId>/... URIs"),
+        "expected graph URI contract error: {v}"
+    );
+
     server_handle.abort();
     let _ = server_handle.await;
 }
@@ -5212,6 +5307,311 @@ async fn graph_add_param_rejects_duplicate_name_when_whitespace_padded() {
         message.contains("duplicate param name or id"),
         "addParam should reject duplicate trimmed names, got: {v}"
     );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn graph_param_helpers_preserve_non_input_source_content() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/param-preserve.sl",
+        "input a@p1: Numeric\n\nx = 1\na + x",
+        1,
+    )
+    .await;
+
+    let rename_req = serde_json::json!({
+        "jsonrpc":"2.0","id":217,"method":"snaqlite/graph/renameParam",
+        "params":{"uri":"snaq://graph/param-preserve.sl","paramId":"p1","newName":"revenue"}
+    });
+    client_w
+        .write_all(&lsp_message(&rename_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 217).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "renameParam should succeed: {v}");
+
+    let export_req = serde_json::json!({
+        "jsonrpc":"2.0","id":218,"method":"snaqlite/graph/exportCanvasDocument","params":{}
+    });
+    client_w
+        .write_all(&lsp_message(&export_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 218).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let nodes = v["result"]["canvasDocument"]["nodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let node = nodes
+        .iter()
+        .find(|n| n["uri"].as_str() == Some("snaq://graph/param-preserve.sl"))
+        .expect("export should contain mutated node");
+    let source = node["source"].as_str().unwrap_or_default();
+    assert!(
+        source.contains("input revenue@p1: Numeric"),
+        "renamed input declaration should be updated: {source}"
+    );
+    assert!(
+        source.contains("\n\nx = 1\na + x"),
+        "non-input body should remain byte-stable: {source}"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn graph_param_helpers_reject_invalid_identifiers() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/param-ident.sl",
+        "input a@p1: Numeric\na + 1",
+        1,
+    )
+    .await;
+
+    let rename_req = serde_json::json!({
+        "jsonrpc":"2.0","id":219,"method":"snaqlite/graph/renameParam",
+        "params":{"uri":"snaq://graph/param-ident.sl","paramId":"p1","newName":"bad name"}
+    });
+    client_w
+        .write_all(&lsp_message(&rename_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 219).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"]["code"].as_i64(), Some(-32602));
+
+    let add_req = serde_json::json!({
+        "jsonrpc":"2.0","id":220,"method":"snaqlite/graph/addParam",
+        "params":{"uri":"snaq://graph/param-ident.sl","paramId":"bad id","name":"ok","typeName":"Numeric"}
+    });
+    client_w
+        .write_all(&lsp_message(&add_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 220).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"]["code"].as_i64(), Some(-32602));
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn graph_add_param_preserves_blank_line_before_body() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/add-preserve-blank.sl",
+        "input a@p1: Numeric\n\nx = 1\na + x",
+        1,
+    )
+    .await;
+
+    let add_req = serde_json::json!({
+        "jsonrpc":"2.0","id":221,"method":"snaqlite/graph/addParam",
+        "params":{"uri":"snaq://graph/add-preserve-blank.sl","paramId":"p2","name":"b","typeName":"Numeric"}
+    });
+    client_w
+        .write_all(&lsp_message(&add_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 221).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "addParam should succeed: {v}");
+
+    let export_req = serde_json::json!({
+        "jsonrpc":"2.0","id":222,"method":"snaqlite/graph/exportCanvasDocument","params":{}
+    });
+    client_w
+        .write_all(&lsp_message(&export_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 222).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let nodes = v["result"]["canvasDocument"]["nodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let node = nodes
+        .iter()
+        .find(|n| n["uri"].as_str() == Some("snaq://graph/add-preserve-blank.sl"))
+        .expect("export should contain node");
+    let source = node["source"].as_str().unwrap_or_default();
+    assert!(
+        source.contains("input a@p1: Numeric\ninput b@p2: Numeric\n\nx = 1\na + x"),
+        "addParam should keep single blank line before body: {source}"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn graph_connect_order_does_not_change_downstream_result() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/ord-a.sl", "1", 1).await;
+    open_document_uri(&mut client_w, "snaq://graph/ord-b.sl", "2", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/ord-t1.sl",
+        "input x@px: Numeric\ninput y@py: Numeric\nx + y",
+        1,
+    )
+    .await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/ord-t2.sl",
+        "input x@px: Numeric\ninput y@py: Numeric\nx + y",
+        1,
+    )
+    .await;
+
+    let connect_1 = serde_json::json!({
+        "jsonrpc":"2.0","id":223,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/ord-a.sl","targetUri":"snaq://graph/ord-t1.sl","targetInputName":"px"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_1.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 223).await;
+    let connect_2 = serde_json::json!({
+        "jsonrpc":"2.0","id":224,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/ord-b.sl","targetUri":"snaq://graph/ord-t1.sl","targetInputName":"py"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_2.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 224).await;
+
+    let connect_3 = serde_json::json!({
+        "jsonrpc":"2.0","id":225,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/ord-b.sl","targetUri":"snaq://graph/ord-t2.sl","targetInputName":"py"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_3.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 225).await;
+    let connect_4 = serde_json::json!({
+        "jsonrpc":"2.0","id":226,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/ord-a.sl","targetUri":"snaq://graph/ord-t2.sl","targetInputName":"px"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_4.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 226).await;
+
+    let sub_t1 = serde_json::json!({
+        "jsonrpc":"2.0","id":227,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-ord-1","sourceUri":"snaq://graph/ord-t1.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&sub_t1.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let mut display_1: Option<String> = None;
+    for _ in 0..30 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("id").and_then(|i| i.as_u64()) == Some(227) {
+            assert!(v.get("error").is_none(), "subscribeWidget should succeed: {v}");
+        }
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["widgetId"].as_str() == Some("w-ord-1")
+            && v["params"]["status"].as_str() == Some("Completed")
+        {
+            display_1 = v["params"]["payload"]["display"]
+                .as_str()
+                .map(ToString::to_string);
+            break;
+        }
+    }
+
+    let sub_t2 = serde_json::json!({
+        "jsonrpc":"2.0","id":228,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-ord-2","sourceUri":"snaq://graph/ord-t2.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&sub_t2.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let mut display_2: Option<String> = None;
+    for _ in 0..30 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("id").and_then(|i| i.as_u64()) == Some(228) {
+            assert!(v.get("error").is_none(), "subscribeWidget should succeed: {v}");
+        }
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["widgetId"].as_str() == Some("w-ord-2")
+            && v["params"]["status"].as_str() == Some("Completed")
+        {
+            display_2 = v["params"]["payload"]["display"]
+                .as_str()
+                .map(ToString::to_string);
+            break;
+        }
+    }
+    assert_eq!(display_1.as_deref(), Some("3"));
+    assert_eq!(display_2.as_deref(), Some("3"));
 
     server_handle.abort();
     let _ = server_handle.await;

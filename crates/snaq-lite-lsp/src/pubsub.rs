@@ -463,4 +463,31 @@ mod tests {
         assert_eq!(decoded.nodes.len(), 1);
         assert_eq!(decoded.edges.len(), 1);
     }
+
+    #[test]
+    fn publish_result_completed_vector_payload_supports_handle_and_summary() {
+        let params = PublishResultParams {
+            subscription_id: "sub-1".to_string(),
+            status: PublishStatus::Completed,
+            revision: Some(3),
+            canvas_id: Some("canvas-a".to_string()),
+            uri: Some("snaq://canvas-a/n1.sl".to_string()),
+            data: Some(serde_json::json!({
+                "resultType": "Vector",
+                "resultSummary": { "length": 42 },
+                "totalElements": 42,
+                "resultHandle": "h-1"
+            })),
+        };
+        let value = serde_json::to_value(&params).expect("serialize");
+        let data = value.get("data").expect("data should exist");
+        assert_eq!(data.get("resultType").and_then(|v| v.as_str()), Some("Vector"));
+        assert_eq!(
+            data.get("resultHandle").and_then(|v| v.as_str()),
+            Some("h-1")
+        );
+        let decoded: PublishResultParams = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(decoded.subscription_id, "sub-1");
+        assert!(matches!(decoded.status, PublishStatus::Completed));
+    }
 }

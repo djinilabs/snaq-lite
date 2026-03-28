@@ -7,7 +7,7 @@
 use crate::error::{RunError, RunErrorKind, Span};
 use crate::functions;
 use crate::ir::{CallArg, ExprData, ExprDef, Expression, ProgramDef, SpannedExprDef, SpannedExprDefKind, StreamInputRegistry};
-use crate::stream_handle::{take_receiver, ChunkFlattenStream};
+use crate::stream_handle::{create_stream_input, take_receiver, ChunkFlattenStream};
 use crate::map_registry;
 use crate::scope::{closure_env_get, closure_env_register, Env, Scope, StoredValue};
 use crate::user_function;
@@ -23,6 +23,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Neg;
 use std::pin::Pin;
+use std::sync::OnceLock;
 use std::task::{Context, Poll};
 
 thread_local! {
@@ -30,6 +31,61 @@ thread_local! {
     static EVAL_REGISTRY: RefCell<Option<UnitRegistry>> = const { RefCell::new(None) };
     /// Stream input registry for $name lookups (set by run() before evaluation).
     static STREAM_INPUT_REGISTRY: RefCell<Option<StreamInputRegistry>> = const { RefCell::new(None) };
+}
+
+const DEFAULT_TRANSPOSE_BUFFER_LIMIT: usize = 100_000;
+const DEFAULT_OUTER_LEFT_BUFFER_LIMIT: usize = 100_000;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_TRANSPOSE_BUFFER_LIMIT: RefCell<Option<usize>> = const { RefCell::new(None) };
+    static TEST_OUTER_LEFT_BUFFER_LIMIT: RefCell<Option<usize>> = const { RefCell::new(None) };
+}
+
+fn parse_positive_usize_env(var: &str, default: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
+fn transpose_buffer_limit() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(v) = TEST_TRANSPOSE_BUFFER_LIMIT.with(|c| *c.borrow()) {
+            return v;
+        }
+    }
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        parse_positive_usize_env(
+            "SNAQ_TRANSPOSE_BUFFER_LIMIT",
+            DEFAULT_TRANSPOSE_BUFFER_LIMIT,
+        )
+    })
+}
+
+fn outer_left_buffer_limit() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(v) = TEST_OUTER_LEFT_BUFFER_LIMIT.with(|c| *c.borrow()) {
+            return v;
+        }
+    }
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        parse_positive_usize_env(
+            "SNAQ_OUTER_LEFT_BUFFER_LIMIT",
+            DEFAULT_OUTER_LEFT_BUFFER_LIMIT,
+        )
+    })
+}
+
+#[cfg(test)]
+pub fn set_test_vector_buffer_limits(transpose_limit: Option<usize>, outer_left_limit: Option<usize>) {
+    TEST_TRANSPOSE_BUFFER_LIMIT.with(|c| *c.borrow_mut() = transpose_limit);
+    TEST_OUTER_LEFT_BUFFER_LIMIT.with(|c| *c.borrow_mut() = outer_left_limit);
 }
 
 /// Set the unit registry for the current thread (used by run() before evaluation).
@@ -226,6 +282,14 @@ impl<'a> futures::stream::Stream for TransposedVectorStream<'a> {
                         match Pin::new(row_stream.as_mut()).poll_next(cx) {
                             Poll::Ready(Some(item)) => {
                                 this.current_row.push(item);
+                                if this.current_row.len() > transpose_buffer_limit() {
+                                    return Poll::Ready(Some(Err(RunError::new(
+                                        RunErrorKind::InvalidArgument(format!(
+                                            "transpose buffering limit exceeded ({})",
+                                            transpose_buffer_limit()
+                                        )),
+                                    ))));
+                                }
                                 continue;
                             }
                             Poll::Ready(None) => {
@@ -239,6 +303,14 @@ impl<'a> futures::stream::Stream for TransposedVectorStream<'a> {
                     match Pin::new(this.inner.as_mut()).poll_next(cx) {
                         Poll::Ready(Some(item)) => {
                             this.buffer.push(item.clone());
+                            if this.buffer.len() > transpose_buffer_limit() {
+                                return Poll::Ready(Some(Err(RunError::new(
+                                    RunErrorKind::InvalidArgument(format!(
+                                        "transpose buffering limit exceeded ({})",
+                                        transpose_buffer_limit()
+                                    )),
+                                ))));
+                            }
                             if let Ok(Some(Value::Vector(v))) = &item {
                                 let row_stream = vector_into_stream(this.db, v.inner.clone());
                                 this.row_stream = Some(Box::new(row_stream));
@@ -410,6 +482,14 @@ impl<'a> futures::stream::Stream for OuterProductVectorStream<'a> {
                     match Pin::new(left_stream.as_mut()).poll_next(cx) {
                         Poll::Ready(Some(item)) => {
                             this.left_buffer.push(item);
+                            if this.left_buffer.len() > outer_left_buffer_limit() {
+                                return Poll::Ready(Some(Err(RunError::new(
+                                    RunErrorKind::InvalidArgument(format!(
+                                        "outer product left-buffer limit exceeded ({})",
+                                        outer_left_buffer_limit()
+                                    )),
+                                ))));
+                            }
                             continue;
                         }
                         Poll::Ready(None) => {
@@ -853,20 +933,59 @@ fn stream_input_to_value(handle_id: crate::stream_handle::StreamHandleId) -> Res
     use futures::stream::StreamExt;
     let receiver = take_receiver(handle_id)
         .ok_or_else(|| RunError::new(RunErrorKind::StreamInputNotAvailable))?;
-    let stream = ChunkFlattenStream::new(receiver);
-    let results: Vec<Result<Option<Value>, RunError>> =
-        futures::executor::block_on(async move { stream.collect().await });
-    if let Some(Err(e)) = results.first() {
-        return Err(e.clone());
-    }
-    if results.len() == 1 {
-        match &results[0] {
-            Ok(Some(v)) => return Ok(v.clone()),
-            Ok(None) => return Ok(Value::Undefined),
-            Err(e) => return Err(e.clone()),
+    let mut stream = ChunkFlattenStream::new(receiver);
+    let first = futures::executor::block_on(async { stream.next().await });
+    let Some(first_item) = first else {
+        return Ok(Value::Undefined);
+    };
+    match first_item {
+        Err(e) => Err(e),
+        Ok(first_opt) => {
+            let second = futures::executor::block_on(async { stream.next().await });
+            let Some(second_item) = second else {
+                return match first_opt {
+                    Some(v) => Ok(v),
+                    None => Ok(Value::Undefined),
+                };
+            };
+            let (new_handle, mut sender) = create_stream_input();
+            futures::executor::block_on(async {
+                use futures::SinkExt;
+                sender
+                    .send(vec![Ok(first_opt), second_item])
+                    .await
+                    .map_err(|_| RunError::new(RunErrorKind::StreamInputNotAvailable))
+            })?;
+            std::thread::spawn(move || {
+                use futures::SinkExt;
+                use futures::stream::StreamExt;
+                const FORWARD_CHUNK_SIZE: usize = 128;
+                let mut batch: Vec<Result<Option<Value>, RunError>> =
+                    Vec::with_capacity(FORWARD_CHUNK_SIZE);
+                loop {
+                    let next = futures::executor::block_on(async { stream.next().await });
+                    match next {
+                        Some(item) => {
+                            batch.push(item);
+                            if batch.len() >= FORWARD_CHUNK_SIZE
+                                && futures::executor::block_on(async {
+                                    sender.send(std::mem::take(&mut batch)).await
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                if !batch.is_empty() {
+                    let _ = futures::executor::block_on(async { sender.send(batch).await });
+                }
+            });
+            Ok(Value::Vector(VectorValue::column(LazyVector::FromInput(new_handle))))
         }
     }
-    Ok(Value::Vector(VectorValue::column(LazyVector::from_evaluated(results))))
 }
 
 /// Parse bracket-key string as vector index: non-negative integer literal, or variable name (look up in scope).

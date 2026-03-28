@@ -110,6 +110,10 @@ Vectors are displayed in a list-like form, e.g. `[1, 2, 3]` or `[1 m, 2 m]`. Nes
 - **Converting a vector to a single quantity:** Not supported. If the result of an expression is a vector and you request a numeric quantity (e.g. `run_numeric`), the runtime returns an error: **operation not supported for vector**.
 - **Binding a vector to a variable:** Supported. You can bind a vector to a name and use it in later expressions (see [VARIABLE_BINDINGS.md](VARIABLE_BINDINGS.md)).
 - **Transpose and outer product memory:** Transpose and column×row outer product are lazy at the API level, but mathematically require buffering parts of the input while producing output columns.
+- **Buffer safety guards:** The runtime enforces bounded buffering for these operators:
+  - `transpose` uses `SNAQ_TRANSPOSE_BUFFER_LIMIT` (default `100000` buffered elements per phase).
+  - `outer product` uses `SNAQ_OUTER_LEFT_BUFFER_LIMIT` (default `100000` left-side buffered elements).
+  - If a limit is exceeded, evaluation fails with an explicit runtime error instead of continuing with unbounded memory growth.
 
 ## See also
 

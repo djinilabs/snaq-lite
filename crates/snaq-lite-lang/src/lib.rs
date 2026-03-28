@@ -2151,6 +2151,28 @@ mod tests {
     }
 
     #[test]
+    fn run_transpose_respects_buffer_limit_guard() {
+        crate::queries::set_test_vector_buffer_limits(Some(2), None);
+        let err = run_format("[[1,2,3],[4,5,6]]'").unwrap_err();
+        crate::queries::set_test_vector_buffer_limits(None, None);
+        assert!(
+            err.to_string().contains("transpose buffering limit exceeded"),
+            "unexpected transpose buffer-limit error: {err}"
+        );
+    }
+
+    #[test]
+    fn run_outer_product_respects_left_buffer_limit_guard() {
+        crate::queries::set_test_vector_buffer_limits(None, Some(2));
+        let err = run_format("[1,2,3] * [10,20]'").unwrap_err();
+        crate::queries::set_test_vector_buffer_limits(None, None);
+        assert!(
+            err.to_string().contains("outer product left-buffer limit exceeded"),
+            "unexpected outer-product buffer-limit error: {err}"
+        );
+    }
+
+    #[test]
     fn run_vector_literal_returns_vector() {
         let v = run("[1, 2, 3]").unwrap();
         assert!(matches!(v, Value::Vector(_)));

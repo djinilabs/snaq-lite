@@ -201,8 +201,9 @@ impl LanguageServer for SnaqLiteBackend {
         drop(state);
         self.reconcile_graph_for_uri(&uri).await;
         let revalidated_targets = self.revalidate_related_edge_types(&uri).await;
+        let force_downstream = !revalidated_targets.is_empty();
         let changed_roots = Self::recompute_roots_for_change(&uri, revalidated_targets);
-        self.recompute_and_push(&changed_roots).await;
+        self.recompute_and_push(&changed_roots, force_downstream).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
         self.publish_diagnostics(uri.clone()).await;
@@ -231,8 +232,9 @@ impl LanguageServer for SnaqLiteBackend {
         drop(state);
         self.reconcile_graph_for_uri(&uri).await;
         let revalidated_targets = self.revalidate_related_edge_types(&uri).await;
+        let force_downstream = !revalidated_targets.is_empty();
         let changed_roots = Self::recompute_roots_for_change(&uri, revalidated_targets);
-        self.recompute_and_push(&changed_roots).await;
+        self.recompute_and_push(&changed_roots, force_downstream).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
         self.publish_diagnostics(uri.clone()).await;
@@ -257,7 +259,7 @@ impl LanguageServer for SnaqLiteBackend {
         let changed_roots = self.cleanup_for_closed_uri(&uri).await;
         self.client.publish_diagnostics(uri.clone(), Vec::new(), None).await;
         if !changed_roots.is_empty() {
-            self.recompute_and_push(&changed_roots).await;
+            self.recompute_and_push(&changed_roots, true).await;
         }
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
@@ -1002,7 +1004,7 @@ impl SnaqLiteBackend {
     }
 
     /// Eager recompute for changed URIs + descendants and push update events.
-    async fn recompute_and_push(&self, changed: &[Url]) {
+    async fn recompute_and_push(&self, changed: &[Url], force_downstream: bool) {
         let docs = {
             let state = self.state.lock().await;
             state.document_uris()
@@ -1021,18 +1023,18 @@ impl SnaqLiteBackend {
             let result = self
                 .run_node_with_graph_inputs_cached(&uri, None, &mut shared_cache)
                 .await;
-            let (revision, result_handle) = {
+            let (revision, semantic_changed, result_handle) = {
                 let mut store = self.node_results.lock().await;
                 match &result {
                     Ok((value, _)) => {
-                        let (rev, _changed) =
+                        let (rev, changed) =
                             store.upsert_value_if_changed(uri.clone(), value.clone());
-                        (Some(rev), Some((rev, value.clone())))
+                        (Some(rev), changed, Some((rev, value.clone())))
                     }
                     Err(e) => {
-                        let (rev, _changed) =
+                        let (rev, changed) =
                             store.upsert_error_if_changed(uri.clone(), e.to_string());
-                        (Some(rev), None)
+                        (Some(rev), changed, None)
                     }
                 }
             };
@@ -1051,13 +1053,15 @@ impl SnaqLiteBackend {
             .await;
             self.update_document_subscribers_for_uri(&uri, result, revision, result_handle.as_deref())
                 .await;
-            let downstream = { self.graph_state.lock().await.targets_from_source(&uri) };
-            for target in downstream {
-                if !docs.contains(&target) || !queued.insert(target.clone()) {
-                    continue;
+            if force_downstream || semantic_changed {
+                let downstream = { self.graph_state.lock().await.targets_from_source(&uri) };
+                for target in downstream {
+                    if !docs.contains(&target) || !queued.insert(target.clone()) {
+                        continue;
+                    }
+                    shared_cache.remove(&target);
+                    queue.push_back(target);
                 }
-                shared_cache.remove(&target);
-                queue.push_back(target);
             }
         }
         let mut cache = self.run_cache.lock().await;
@@ -1451,7 +1455,7 @@ impl SnaqLiteBackend {
             let mut graph = self.graph_state.lock().await;
             graph.connect(source_uri, target_uri.clone(), target_param_id);
         }
-        self.recompute_and_push(std::slice::from_ref(&target_uri)).await;
+        self.recompute_and_push(std::slice::from_ref(&target_uri), true).await;
         self.drain_widget_notifications().await;
         self.drain_notifications().await;
         Ok(())
@@ -1482,7 +1486,7 @@ impl SnaqLiteBackend {
             let mut graph = self.graph_state.lock().await;
             graph.disconnect(&target_uri, &target_param_id);
         }
-        self.recompute_and_push(std::slice::from_ref(&target_uri)).await;
+        self.recompute_and_push(std::slice::from_ref(&target_uri), true).await;
         self.drain_widget_notifications().await;
         self.drain_notifications().await;
         Ok(())
@@ -1538,8 +1542,9 @@ impl SnaqLiteBackend {
         let _ = next_version;
         self.reconcile_graph_for_uri(uri).await;
         let revalidated_targets = self.revalidate_related_edge_types(uri).await;
+        let force_downstream = !revalidated_targets.is_empty();
         let changed_roots = Self::recompute_roots_for_change(uri, revalidated_targets);
-        self.recompute_and_push(&changed_roots).await;
+        self.recompute_and_push(&changed_roots, force_downstream).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
         self.publish_diagnostics(uri.clone()).await;
@@ -1774,7 +1779,7 @@ impl SnaqLiteBackend {
             self.client.publish_diagnostics(uri.clone(), Vec::new(), None).await;
         }
         if !impacted_descendants.is_empty() {
-            self.recompute_and_push(&impacted_descendants).await;
+            self.recompute_and_push(&impacted_descendants, true).await;
         }
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
@@ -1898,7 +1903,7 @@ impl SnaqLiteBackend {
             self.publish_diagnostics(uri.clone()).await;
             self.send_node_signature_updated(uri).await;
         }
-        self.recompute_and_push(&uris).await;
+        self.recompute_and_push(&uris, true).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
         Ok(ImportCanvasDocumentResponse {
@@ -2023,8 +2028,9 @@ impl SnaqLiteBackend {
                     start: idx,
                     length: 1,
                 };
-                let collected = snaq_lite_lang::collect_vector_stream(db, slice);
-                let item = collected.into_iter().next()?;
+                use futures::stream::StreamExt;
+                let mut stream = snaq_lite_lang::vector_into_stream(db, slice);
+                let item = run_local_future(async move { stream.next().await })?;
                 match item {
                     Ok(Some(val)) => val,
                     _ => return None,

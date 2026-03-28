@@ -3736,7 +3736,7 @@ async fn graph_runtime_recomputes_without_widget_subscriptions() {
 }
 
 #[tokio::test]
-async fn did_change_on_source_with_same_output_recomputes_descendants() {
+async fn did_change_on_source_with_same_output_does_not_recompute_descendants() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
     let server_handle =
@@ -3792,10 +3792,10 @@ async fn did_change_on_source_with_same_output_recomputes_descendants() {
         .unwrap();
     client_w.flush().await.unwrap();
     let _ = read_until_response_id(&mut client_r, 558).await;
-
+    // First, make a semantic change to establish an update baseline.
     let did_change = serde_json::json!({
         "jsonrpc":"2.0","method":"textDocument/didChange",
-        "params":{"textDocument":{"uri":"snaq://graph/src-same.sl","version":2},"contentChanges":[{"text":"(2)"}]}
+        "params":{"textDocument":{"uri":"snaq://graph/src-same.sl","version":2},"contentChanges":[{"text":"(3)"}]}
     });
     client_w
         .write_all(&lsp_message(&did_change.to_string()))
@@ -3803,9 +3803,42 @@ async fn did_change_on_source_with_same_output_recomputes_descendants() {
         .unwrap();
     client_w.flush().await.unwrap();
 
-    let mut got_descendant_update = false;
-    for _ in 0..10 {
+    let mut saw_changed_output_update = false;
+    for _ in 0..20 {
         let maybe = timeout(Duration::from_millis(500), read_one_lsp_message_async(&mut client_r)).await;
+        let Ok(Ok(body)) = maybe else {
+            continue;
+        };
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["widgetId"].as_str() == Some("w-same-output")
+            && v["params"]["status"].as_str() == Some("Completed")
+        {
+            if v["params"]["payload"]["display"].as_str() == Some("8") {
+                saw_changed_output_update = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_changed_output_update,
+        "expected downstream update after semantic source change to 3"
+    );
+
+    // Then perform a non-semantic edit (same numeric output) and assert no descendant update.
+    let did_change_same_output = serde_json::json!({
+        "jsonrpc":"2.0","method":"textDocument/didChange",
+        "params":{"textDocument":{"uri":"snaq://graph/src-same.sl","version":3},"contentChanges":[{"text":"( 3 )"}]}
+    });
+    client_w
+        .write_all(&lsp_message(&did_change_same_output.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut got_descendant_update = false;
+    for _ in 0..8 {
+        let maybe = timeout(Duration::from_millis(400), read_one_lsp_message_async(&mut client_r)).await;
         let Ok(Ok(body)) = maybe else {
             continue;
         };
@@ -3819,8 +3852,8 @@ async fn did_change_on_source_with_same_output_recomputes_descendants() {
         }
     }
     assert!(
-        got_descendant_update,
-        "didChange with unchanged source output should still recompute downstream widget"
+        !got_descendant_update,
+        "didChange with unchanged source output should not recompute downstream widget"
     );
     server_handle.abort();
     let _ = server_handle.await;

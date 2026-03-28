@@ -48,7 +48,7 @@ The server supports subscribing to the **root result** of the current document. 
   - Legacy `subscribe` evaluates document root with empty stream inputs (no graph wiring).
   - If the result is a vector, the server spawns a background consumer and returns a `subscriptionId`. The client receives both `snaqlite/publishResult` and `snaqlite/publishNodeResult` with status `Running` (batches on native) and finally `Completed` or `Error`.
 - **Unsubscribe:** Client sends `snaqlite/unsubscribeNode` (or legacy `snaqlite/unsubscribe`) with `subscriptionId`. The server cancels the consumer and stops sending for that subscription.
-- **Document change:** On `textDocument/didChange` (or open), the server recomputes impacted nodes and pushes fresh `Completed` / `Error` updates for active subscriptions/widgets on affected URIs. Descendants are reevaluated for each graph/text mutation so dependent outputs stay synchronized with edit/link churn.
+- **Document change:** On `textDocument/didChange` (or open), the server recomputes impacted nodes and pushes fresh `Completed` / `Error` updates for active subscriptions/widgets on affected URIs. Descendant propagation is **semantic-change gated**: downstream nodes are reevaluated only when an upstream node’s value/error state changes. Topology mutations (connect/disconnect/edge pruning) still force downstream reevaluation.
 
 Clients should send `snaqlite/unsubscribe` when closing the file or hiding the results panel.
 
@@ -103,7 +103,7 @@ Notifications can include metadata fields:
 
 ### Reactive updates and lifecycle
 
-- **Document change** — On `didChange` / `didOpen` for a URI, the server reconciles graph inputs, recomputes impacted nodes, and pushes fresh `Completed` / `Error` updates to active subscriptions/widgets for affected nodes.
+- **Document change** — On `didChange` / `didOpen` for a URI, the server reconciles graph inputs, recomputes impacted nodes, and pushes fresh `Completed` / `Error` updates to active subscriptions/widgets for affected nodes. Downstream recompute is skipped when upstream output/error is unchanged; topology changes still force propagation.
 - **Document close** — On `didClose` for a URI, the server removes the document from state, removes graph edges where the URI is source/target, clears cached node result, cancels subscriptions/widgets bound to that URI (`Cancelled` with reason `"Document closed"`), and recomputes downstream dependents.
 - **Edge removal** — When `snaqlite/graph/disconnect` is called, the server removes the edge and invalidates all widget subscriptions for the target URI (cancel and send `widgetDataUpdate` Cancelled). The UI triggers disconnect when the user deletes an edge (e.g. select edge and Backspace).
 - Connect failure (type mismatch) does not add an edge, so no invalidation is needed.

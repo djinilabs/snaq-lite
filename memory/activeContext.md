@@ -2,6 +2,22 @@
 
 ## Just completed
 
+- **Phase pass: runtime stream-first input binding + bounded multidimensional buffering**
+  - `crates/snaq-lite-lang/src/queries.rs`: native scalar-friendly `InputDecl` binding no longer fully materializes multi-item streams; it now peeks first/second item, preserves scalar behavior for single-item streams, and forwards multi-item streams lazily via a new `FromInput` handle.
+  - `crates/snaq-lite-lang/src/queries.rs`: added transpose and outer-product buffer guardrails with explicit fail-fast errors:
+    - `SNAQ_TRANSPOSE_BUFFER_LIMIT` (default `100000`)
+    - `SNAQ_OUTER_LEFT_BUFFER_LIMIT` (default `100000`)
+  - `crates/snaq-lite-lang/src/lib.rs`: added tests for transpose/outer buffer-limit guard behavior.
+  - `docs/VECTORS.md`: documented bounded-buffer limits and error behavior for transpose/outer.
+  - Verification green: `cargo test -p snaq-lite-lang`, `cargo test -p snaq-lite-lsp --test lsp_integration`, `pnpm test`, `pnpm run lint`.
+
+- **Phase pass: semantic-change-gated graph propagation + streaming path fix**
+  - `crates/snaq-lite-lsp/src/lib.rs`: `recompute_and_push` now accepts `force_downstream` and enqueues descendants only when upstream value/error changed, while topology mutation paths (`connect`/`disconnect`/close/reset/import and edge-prune passes) force downstream propagation.
+  - `crates/snaq-lite-lsp/src/lib.rs`: `resolve_path` vector index path now streams a single item via `vector_into_stream(...Take{length:1})` instead of `collect_vector_stream`, removing accidental eager collection on path traversal.
+  - `crates/snaq-lite-lsp/tests/lsp_integration.rs`: replaced same-output propagation expectation with `did_change_on_source_with_same_output_does_not_recompute_descendants`, asserting no descendant widget `Completed` update on non-semantic source edits.
+  - `docs/LSP.md`: updated lifecycle/reactivity docs to describe semantic-change gating and topology-forced recompute behavior.
+  - Verification green: `cargo test -p snaq-lite-lsp --test lsp_integration`, `cargo test -p snaq-lite-lang`, `pnpm test`, `pnpm run lint`.
+
 - **Bridge LSP Canvas Runtime Gaps (execution pass):**
   - `crates/snaq-lite-lsp/src/lib.rs`: vector subscriptions now emit summary/handle-style completion on WASM (no eager vector display), native stream notifications include `resultHandle`, and graph recompute now reevaluates downstream on every mutation wave (not fingerprint-gated only).
   - `crates/snaq-lite-lsp/src/lib.rs` + `src/result_handle_registry.rs`: non-replayable `FromInput` nested-path fetches now reject with `invalid_params`; unchanged handle upserts no longer invalidate cursors.

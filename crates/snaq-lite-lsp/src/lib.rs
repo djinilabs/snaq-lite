@@ -29,9 +29,10 @@ use crate::mapping::SERVER_NAME;
 use crate::pubsub::{
     ConnectParams, DisconnectParams, FetchResultSliceParams, FetchResultSliceResponse,
     NodeInputPort, NodeSignatureUpdatedNotification, NodeSignatureUpdatedParams, PathSegment,
-    PublishResultNotification, PublishResultParams, PublishStatus, ResultType, SubscribeParams,
-    SubscribeResponse, SubscribeWidgetParams, UnsubscribeParams, UnsubscribeWidgetParams,
-    WidgetDataStatus, WidgetDataUpdateNotification, WidgetDataUpdateParams,
+    PublishResultNotification, PublishResultParams, PublishStatus, ResetNamespaceParams,
+    ResetNamespaceResponse, ResultType, SubscribeParams, SubscribeResponse, SubscribeWidgetParams,
+    UnsubscribeParams, UnsubscribeWidgetParams, WidgetDataStatus, WidgetDataUpdateNotification,
+    WidgetDataUpdateParams,
 };
 use crate::subscription::SubscriptionRegistry;
 use crate::widget_registry::WidgetRegistry;
@@ -157,7 +158,9 @@ impl LanguageServer for SnaqLiteBackend {
         state.update_document(uri.clone(), version, &text);
         drop(state);
         self.reconcile_graph_for_uri(&uri).await;
-        self.recompute_and_push(std::slice::from_ref(&uri)).await;
+        let revalidated_targets = self.revalidate_related_edge_types(&uri).await;
+        let changed_roots = Self::recompute_roots_for_change(&uri, revalidated_targets);
+        self.recompute_and_push(&changed_roots).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
         self.publish_diagnostics(uri.clone()).await;
@@ -173,11 +176,24 @@ impl LanguageServer for SnaqLiteBackend {
         }
         drop(state);
         self.reconcile_graph_for_uri(&uri).await;
-        self.recompute_and_push(std::slice::from_ref(&uri)).await;
+        let revalidated_targets = self.revalidate_related_edge_types(&uri).await;
+        let changed_roots = Self::recompute_roots_for_change(&uri, revalidated_targets);
+        self.recompute_and_push(&changed_roots).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
         self.publish_diagnostics(uri.clone()).await;
         self.send_node_signature_updated(&uri).await;
+    }
+
+    async fn did_close(&self, params: tower_lsp::lsp_types::DidCloseTextDocumentParams) {
+        let uri = params.text_document.uri.clone();
+        let changed_roots = self.cleanup_for_closed_uri(&uri).await;
+        self.client.publish_diagnostics(uri.clone(), Vec::new(), None).await;
+        if !changed_roots.is_empty() {
+            self.recompute_and_push(&changed_roots).await;
+        }
+        self.drain_notifications().await;
+        self.drain_widget_notifications().await;
     }
 
     async fn hover(
@@ -332,6 +348,110 @@ impl LanguageServer for SnaqLiteBackend {
 }
 
 impl SnaqLiteBackend {
+    fn recompute_roots_for_change(changed_uri: &Url, revalidated_targets: Vec<Url>) -> Vec<Url> {
+        let mut changed_roots = Vec::with_capacity(1 + revalidated_targets.len());
+        let mut seen = std::collections::HashSet::with_capacity(1 + revalidated_targets.len());
+        if seen.insert(changed_uri.clone()) {
+            changed_roots.push(changed_uri.clone());
+        }
+        for target in revalidated_targets {
+            if seen.insert(target.clone()) {
+                changed_roots.push(target);
+            }
+        }
+        changed_roots
+    }
+
+    fn uri_matches_prefix(uri: &str, prefix: &str) -> bool {
+        if !uri.starts_with(prefix) {
+            return false;
+        }
+        if uri.len() == prefix.len() || prefix.ends_with('/') {
+            return true;
+        }
+        matches!(
+            uri.as_bytes().get(prefix.len()).copied(),
+            Some(b'/') | Some(b'?') | Some(b'#')
+        )
+    }
+
+    async fn cancel_subscription_entries(
+        &self,
+        entries: Vec<(String, Option<futures::channel::oneshot::Sender<()>>)>,
+        reason: &str,
+    ) {
+        for (subscription_id, maybe_tx) in entries {
+            if let Some(tx) = maybe_tx {
+                let _ = tx.send(());
+            }
+            self.client
+                .send_notification::<PublishResultNotification>(PublishResultParams {
+                    subscription_id,
+                    status: PublishStatus::Cancelled,
+                    data: Some(serde_json::json!({ "reason": reason })),
+                })
+                .await;
+        }
+    }
+
+    async fn cancel_widget_entries(
+        &self,
+        entries: Vec<(String, Option<futures::channel::oneshot::Sender<()>>)>,
+        reason: &str,
+    ) {
+        for (widget_id, maybe_tx) in entries {
+            if let Some(tx) = maybe_tx {
+                let _ = tx.send(());
+            }
+            self.client
+                .send_notification::<WidgetDataUpdateNotification>(WidgetDataUpdateParams {
+                    widget_id,
+                    status: WidgetDataStatus::Cancelled,
+                    payload: Some(serde_json::json!({ "reason": reason })),
+                })
+                .await;
+        }
+    }
+
+    async fn cleanup_for_closed_uri(&self, uri: &Url) -> Vec<Url> {
+        let docs_before = {
+            let state = self.state.lock().await;
+            state.document_uris()
+        };
+        let descendants = {
+            let graph = self.graph_state.lock().await;
+            graph.descendants_from_source(uri, &docs_before)
+        };
+        {
+            let mut state = self.state.lock().await;
+            let _ = state.remove_document(uri);
+        }
+        {
+            let mut graph = self.graph_state.lock().await;
+            let _ = graph.remove_edges_for_uri(uri);
+        }
+        {
+            let mut node_results = self.node_results.lock().await;
+            let _ = node_results.remove(uri);
+        }
+        let subscription_entries = {
+            let mut subs = self.subscriptions.lock().await;
+            subs.remove_uri_all(uri)
+        };
+        self.cancel_subscription_entries(subscription_entries, "Document closed")
+            .await;
+        let widget_entries = {
+            let mut widgets = self.widgets.lock().await;
+            widgets.invalidate_uri(uri)
+        };
+        self.cancel_widget_entries(widget_entries, "Document closed")
+            .await;
+        descendants
+            .into_iter()
+            .filter(|u| u != uri)
+            .collect::<Vec<Url>>()
+    }
+
     async fn publish_diagnostics(&self, uri: Url) {
         let state = self.state.lock().await;
         let diagnostics = state.diagnostics(&uri);
@@ -388,6 +508,101 @@ impl SnaqLiteBackend {
             let mut graph = self.graph_state.lock().await;
             graph.reconcile_target_inputs(uri, &valid_inputs)
         };
+    }
+
+    async fn revalidate_related_edge_types(&self, changed_uri: &Url) -> Vec<Url> {
+        let mut targets = vec![changed_uri.clone()];
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(changed_uri.clone());
+        let downstream = { self.graph_state.lock().await.targets_from_source(changed_uri) };
+        for uri in downstream {
+            if seen.insert(uri.clone()) {
+                targets.push(uri);
+            }
+        }
+        let mut disconnected_targets = Vec::new();
+        for target_uri in targets {
+            if self.revalidate_target_edge_types(&target_uri).await {
+                disconnected_targets.push(target_uri);
+            }
+        }
+        disconnected_targets
+    }
+
+    async fn revalidate_target_edge_types(&self, target_uri: &Url) -> bool {
+        let incoming = { self.graph_state.lock().await.incoming(target_uri) };
+        if incoming.is_empty() {
+            return false;
+        }
+        let (target_inputs, source_docs, unit_registry) = {
+            let state = self.state.lock().await;
+            let Some(target_doc) = state.get_document(target_uri) else {
+                return false;
+            };
+            if !target_doc.parse_succeeded {
+                return false;
+            }
+            let target_inputs: std::collections::HashMap<String, String> = target_doc
+                .root_def
+                .as_ref()
+                .map(snaq_lite_lang::extract_input_decls_from_block)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            let source_docs: std::collections::HashMap<Url, (String, bool)> = incoming
+                .iter()
+                .map(|(_, source_uri)| {
+                    let parse_succeeded = state
+                        .get_document(source_uri)
+                        .map(|d| d.parse_succeeded)
+                        .unwrap_or(false);
+                    (source_uri.clone(), (state.source(source_uri), parse_succeeded))
+                })
+                .collect();
+            (
+                target_inputs,
+                source_docs,
+                state.unit_registry().clone(),
+            )
+        };
+        let mut invalid_inputs: Vec<String> = Vec::new();
+        for (input_name, source_uri) in incoming {
+            let Some(target_type) = target_inputs.get(&input_name) else {
+                continue;
+            };
+            if target_type == "Undefined" {
+                continue;
+            }
+            let Some((source_source, source_parse_succeeded)) = source_docs.get(&source_uri) else {
+                invalid_inputs.push(input_name.clone());
+                continue;
+            };
+            if !*source_parse_succeeded {
+                continue;
+            }
+            let Some(source_output_type) = snaq_lite_lang::run_with_stream_inputs(
+                source_source,
+                &unit_registry,
+                std::collections::HashMap::new(),
+            )
+            .ok()
+            .and_then(|(value, _)| snaq_lite_lang::value_type_name(&value))
+            else {
+                // Keep existing wiring on transient source run failures.
+                continue;
+            };
+            if &source_output_type != target_type {
+                invalid_inputs.push(input_name);
+            }
+        }
+        if invalid_inputs.is_empty() {
+            return false;
+        }
+        let mut graph = self.graph_state.lock().await;
+        for input_name in invalid_inputs {
+            graph.disconnect(target_uri, &input_name);
+        }
+        true
     }
 
     async fn update_widget_subscribers_for_uri(
@@ -752,6 +967,83 @@ impl SnaqLiteBackend {
         Ok(())
     }
 
+    /// Handle snaqlite/graph/resetNamespace: clear graph/runtime state for matching URI prefix.
+    pub async fn graph_reset_namespace(
+        &self,
+        params: ResetNamespaceParams,
+    ) -> tower_lsp::jsonrpc::Result<ResetNamespaceResponse> {
+        if params.uri_prefix.is_empty() {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "uriPrefix must not be empty",
+            ));
+        }
+        let docs_before = {
+            let state = self.state.lock().await;
+            state.document_uris()
+        };
+        let removed_uris: Vec<Url> = docs_before
+            .iter()
+            .filter(|u| Self::uri_matches_prefix(u.as_str(), &params.uri_prefix))
+            .cloned()
+            .collect();
+        if removed_uris.is_empty() {
+            return Ok(ResetNamespaceResponse {
+                removed_documents: 0,
+            });
+        }
+        let removed_uri_set: std::collections::HashSet<Url> = removed_uris.iter().cloned().collect();
+        let impacted_descendants = {
+            let graph = self.graph_state.lock().await;
+            let mut impacted = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for uri in &removed_uris {
+                for d in graph.descendants_from_source(uri, &docs_before) {
+                    if !removed_uri_set.contains(&d) && seen.insert(d.clone()) {
+                        impacted.push(d);
+                    }
+                }
+            }
+            impacted
+        };
+
+        {
+            let mut state = self.state.lock().await;
+            let _ = state.remove_documents_with_prefix(&params.uri_prefix);
+        }
+        {
+            let mut graph = self.graph_state.lock().await;
+            let _ = graph.remove_edges_with_prefix(&params.uri_prefix);
+        }
+        {
+            let mut node_results = self.node_results.lock().await;
+            let _ = node_results.remove_with_prefix(&params.uri_prefix);
+        }
+        let subscription_entries = {
+            let mut subs = self.subscriptions.lock().await;
+            subs.remove_prefix_all(&params.uri_prefix)
+        };
+        self.cancel_subscription_entries(subscription_entries, "Namespace reset")
+            .await;
+        let widget_entries = {
+            let mut widgets = self.widgets.lock().await;
+            widgets.remove_prefix(&params.uri_prefix)
+        };
+        self.cancel_widget_entries(widget_entries, "Namespace reset")
+            .await;
+
+        for uri in &removed_uris {
+            self.client.publish_diagnostics(uri.clone(), Vec::new(), None).await;
+        }
+        if !impacted_descendants.is_empty() {
+            self.recompute_and_push(&impacted_descendants).await;
+        }
+        self.drain_notifications().await;
+        self.drain_widget_notifications().await;
+        Ok(ResetNamespaceResponse {
+            removed_documents: removed_uris.len(),
+        })
+    }
+
     /// Build Completed payload with resultType, resultSummary, and display/totalElements.
     fn build_completed_payload(
         value: &snaq_lite_lang::Value,
@@ -761,24 +1053,28 @@ impl SnaqLiteBackend {
         use snaq_lite_lang::map_registry;
         let (result_type, result_summary, display, total_elements) = match value {
             snaq_lite_lang::Value::Vector(v) => {
-                // On WASM, avoid blocking on stream-backed vectors (e.g. CSV FromInput); use 0 so client shows vector view and fetches via fetchResultSlice.
+                // Keep payload generation non-blocking on WASM for non-materialized vectors.
+                // For those vectors, UI can fetch paged data via fetchResultSlice.
                 #[cfg(target_arch = "wasm32")]
                 let length = match &v.inner {
-                    snaq_lite_lang::LazyVector::FromInput(_) => 0u64,
-                    _ => snaq_lite_lang::collect_vector_stream(db, v.inner.clone()).len() as u64,
+                    snaq_lite_lang::LazyVector::FromInput(_) => Some(0u64),
+                    snaq_lite_lang::LazyVector::FromEvaluated(collected) => {
+                        Some(collected.len() as u64)
+                    }
+                    snaq_lite_lang::LazyVector::FromExprs(defs) => Some(defs.len() as u64),
+                    _ => None,
                 };
                 #[cfg(not(target_arch = "wasm32"))]
-                let length =
-                    snaq_lite_lang::collect_vector_stream(db, v.inner.clone()).len() as u64;
+                let length = Some(snaq_lite_lang::collect_vector_stream(db, v.inner.clone()).len() as u64);
                 (
                     ResultType::Vector,
                     Some(ResultSummary {
-                        length: Some(length),
+                        length,
                         keys: None,
                         key_count: None,
                     }),
                     None,
-                    Some(length),
+                    length,
                 )
             }
             snaq_lite_lang::Value::Map(id) => {
@@ -965,10 +1261,12 @@ impl SnaqLiteBackend {
             Option<PendingUpdate>,
         );
 
-        let (elements, total_count, pending_update) = {
+        let db = {
             let state = self.state.lock().await;
-            let db = state.db();
-            let sub_value = Self::resolve_path(&value, &path_segments, db).ok_or_else(|| {
+            state.db().clone()
+        };
+        let (elements, total_count, pending_update) = {
+            let sub_value = Self::resolve_path(&value, &path_segments, &db).ok_or_else(|| {
                 tower_lsp::jsonrpc::Error::invalid_params("Invalid path or value not found")
             })?;
 
@@ -983,7 +1281,7 @@ impl SnaqLiteBackend {
                         match (&v.inner, path_segments.is_empty()) {
                         (snaq_lite_lang::LazyVector::FromInput(_), true) => {
                             let collected =
-                                snaq_lite_lang::collect_vector_stream(db, v.inner.clone());
+                                snaq_lite_lang::collect_vector_stream(&db, v.inner.clone());
                             let len = collected.len() as u64;
                             let materialized = snaq_lite_lang::Value::Vector(
                                 snaq_lite_lang::VectorValue {
@@ -991,7 +1289,7 @@ impl SnaqLiteBackend {
                                     orientation: v.orientation,
                                 },
                             );
-                            let payload = Self::build_completed_payload(&materialized, db);
+                            let payload = Self::build_completed_payload(&materialized, &db);
                             let start = offset.min(collected.len());
                             let end = (offset + limit).min(collected.len());
                             let slice_vec: Vec<_> = collected[start..end].to_vec();
@@ -1010,20 +1308,30 @@ impl SnaqLiteBackend {
                             (total_count, slice_vec, None)
                         }
                         (_, _) => {
-                            let total_count = {
-                                let stream = snaq_lite_lang::vector_into_stream(db, v.inner.clone());
-                                futures::executor::block_on(async move {
-                                    use futures::stream::StreamExt;
-                                    stream.fold(0u64, |acc, _| async move { acc + 1 }).await
+                            // Single-pass materialization avoids an extra blocking pass just to count.
+                            let collected =
+                                snaq_lite_lang::collect_vector_stream(&db, v.inner.clone());
+                            let total_count = collected.len() as u64;
+                            let start = offset.min(collected.len());
+                            let end = (offset + limit).min(collected.len());
+                            let slice_vec: Vec<_> = collected[start..end].to_vec();
+                            let pending_update = if path_segments.is_empty() {
+                                let materialized = snaq_lite_lang::Value::Vector(
+                                    snaq_lite_lang::VectorValue {
+                                        inner: snaq_lite_lang::LazyVector::FromEvaluated(collected),
+                                        orientation: v.orientation,
+                                    },
+                                );
+                                let payload = Self::build_completed_payload(&materialized, &db);
+                                Some(PendingUpdate {
+                                    widget_id: params.widget_id.clone(),
+                                    materialized,
+                                    payload,
                                 })
+                            } else {
+                                None
                             };
-                            let take = snaq_lite_lang::LazyVector::Take {
-                                source: Box::new(v.inner.clone()),
-                                start: offset,
-                                length: limit,
-                            };
-                            let slice_vec = snaq_lite_lang::collect_vector_stream(db, take);
-                            (total_count, slice_vec, None)
+                            (total_count, slice_vec, pending_update)
                         }
                     };
 
@@ -1034,7 +1342,7 @@ impl SnaqLiteBackend {
                             Ok(Some(val)) => {
                                 let mut elem_path = path_json.clone();
                                 elem_path.push(serde_json::json!((offset + i) as u64));
-                                crate::pubsub::value_to_slice_element(db, val, &elem_path)
+                                crate::pubsub::value_to_slice_element(&db, val, &elem_path)
                             }
                             Ok(None) => serde_json::Value::Null,
                             Err(e) => serde_json::json!({
@@ -1059,7 +1367,7 @@ impl SnaqLiteBackend {
                             elem_path.push(serde_json::json!(k));
                             serde_json::json!({
                                 "key": k,
-                                "value": crate::pubsub::value_to_slice_element(db, val, &elem_path)
+                                "value": crate::pubsub::value_to_slice_element(&db, val, &elem_path)
                             })
                         })
                         .collect();
@@ -1504,6 +1812,10 @@ pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSo
     .custom_method(
         "snaqlite/graph/disconnect",
         SnaqLiteBackend::graph_disconnect,
+    )
+    .custom_method(
+        "snaqlite/graph/resetNamespace",
+        SnaqLiteBackend::graph_reset_namespace,
     )
     .custom_method(
         "snaqlite/graph/subscribeWidget",

@@ -105,6 +105,21 @@ pub struct DisconnectParams {
     pub target_input_name: String,
 }
 
+/// Params for snaqlite/graph/resetNamespace request.
+/// Removes graph/runtime state for all URIs that start with `uriPrefix`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetNamespaceParams {
+    pub uri_prefix: String,
+}
+
+/// Response for snaqlite/graph/resetNamespace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetNamespaceResponse {
+    pub removed_documents: usize,
+}
+
 /// Notification snaqlite/graph/widgetDataUpdate (server → client).
 pub struct WidgetDataUpdateNotification;
 impl tower_lsp::lsp_types::notification::Notification for WidgetDataUpdateNotification {

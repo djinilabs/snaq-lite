@@ -3624,3 +3624,422 @@ async fn native_transient_parse_error_does_not_prune_existing_edge() {
     server_handle.abort();
     let _ = server_handle.await;
 }
+
+#[tokio::test]
+async fn native_did_close_removes_document_edges_and_pushes_downstream_error() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/source-close.sl", "7", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/target-close.sl",
+        "input x: Numeric\nx * 2",
+        1,
+    )
+    .await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":100,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/source-close.sl","targetUri":"snaq://graph/target-close.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 100).await;
+
+    let sub_req = serde_json::json!({
+        "jsonrpc":"2.0","id":101,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-close","sourceUri":"snaq://graph/target-close.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&sub_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 101).await;
+
+    // Close the source document: edges should be removed and downstream widget should become Error.
+    let did_close = serde_json::json!({
+        "jsonrpc":"2.0","method":"textDocument/didClose",
+        "params":{"textDocument":{"uri":"snaq://graph/source-close.sl"}}
+    });
+    client_w
+        .write_all(&lsp_message(&did_close.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut got_error = false;
+    for _ in 0..30 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["widgetId"].as_str() == Some("w-close")
+            && v["params"]["status"].as_str() == Some("Error")
+        {
+            got_error = true;
+            break;
+        }
+    }
+    assert!(got_error, "didClose should trigger downstream Error update");
+
+    // Source is closed; connect must fail because source document is no longer open.
+    let connect_again = serde_json::json!({
+        "jsonrpc":"2.0","id":102,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/source-close.sl","targetUri":"snaq://graph/target-close.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_again.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 102).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        v.get("error").is_some(),
+        "connect should fail after didClose removed source document"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn native_reset_namespace_clears_docs_and_allows_clean_reopen() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://canvasA/source.sl", "3", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://canvasA/target.sl",
+        "input x: Numeric\nx * 2",
+        1,
+    )
+    .await;
+    open_document_uri(&mut client_w, "snaq://canvasB/other.sl", "9", 1).await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":110,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://canvasA/source.sl","targetUri":"snaq://canvasA/target.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 110).await;
+
+    let reset_req = serde_json::json!({
+        "jsonrpc":"2.0","id":111,"method":"snaqlite/graph/resetNamespace",
+        "params":{"uriPrefix":"snaq://canvasA/"}
+    });
+    client_w
+        .write_all(&lsp_message(&reset_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 111).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        v["result"]["removedDocuments"].as_u64(),
+        Some(2),
+        "resetNamespace should remove the two canvasA documents"
+    );
+
+    let connect_removed = serde_json::json!({
+        "jsonrpc":"2.0","id":112,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://canvasA/source.sl","targetUri":"snaq://canvasA/target.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_removed.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 112).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        v.get("error").is_some(),
+        "connect should fail for removed namespace documents"
+    );
+
+    // Reopen same URIs and reconnect to ensure clean state.
+    open_document_uri(&mut client_w, "snaq://canvasA/source.sl", "5", 2).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://canvasA/target.sl",
+        "input x: Numeric\nx * 2",
+        2,
+    )
+    .await;
+    let reconnect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":113,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://canvasA/source.sl","targetUri":"snaq://canvasA/target.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&reconnect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 113).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        v.get("error").is_none(),
+        "reconnect should succeed after reopen in reset namespace"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn native_type_change_prunes_edge_with_same_param_name() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/source-type.sl", "7", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/target-type.sl",
+        "input x: Numeric\nx * 2",
+        1,
+    )
+    .await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":120,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/source-type.sl","targetUri":"snaq://graph/target-type.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 120).await;
+
+    let sub_req = serde_json::json!({
+        "jsonrpc":"2.0","id":121,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-type","sourceUri":"snaq://graph/target-type.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&sub_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 121).await;
+
+    // Change only the declared input type for x (name unchanged): Numeric -> Vector.
+    let did_change_target = serde_json::json!({
+        "jsonrpc":"2.0","method":"textDocument/didChange",
+        "params":{"textDocument":{"uri":"snaq://graph/target-type.sl","version":2},"contentChanges":[{"text":"input x: Vector\nx.sum()"}]}
+    });
+    client_w
+        .write_all(&lsp_message(&did_change_target.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut got_error_after_type_change = false;
+    for _ in 0..30 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["widgetId"].as_str() == Some("w-type")
+            && v["params"]["status"].as_str() == Some("Error")
+        {
+            got_error_after_type_change = true;
+            break;
+        }
+    }
+    assert!(
+        got_error_after_type_change,
+        "changing declared type should prune incompatible edge and produce Error update"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn source_output_type_change_prunes_edge_and_recomputes_target() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/source-output-type.sl", "7", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/target-output-type.sl",
+        "input x: Numeric\nx * 2",
+        1,
+    )
+    .await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":140,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/source-output-type.sl","targetUri":"snaq://graph/target-output-type.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 140).await;
+
+    let sub_req = serde_json::json!({
+        "jsonrpc":"2.0","id":141,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-source-output-type","sourceUri":"snaq://graph/target-output-type.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&sub_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 141).await;
+
+    // Source output changes from Numeric -> Vector. Edge should be pruned and target recomputed to Error.
+    let source_change = serde_json::json!({
+        "jsonrpc":"2.0","method":"textDocument/didChange",
+        "params":{"textDocument":{"uri":"snaq://graph/source-output-type.sl","version":2},"contentChanges":[{"text":"[1, 2]"}]}
+    });
+    client_w
+        .write_all(&lsp_message(&source_change.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    // Pump one request so queued notifications are drained deterministically.
+    let hover_req = serde_json::json!({
+        "jsonrpc":"2.0","id":142,"method":"textDocument/hover",
+        "params":{"textDocument":{"uri":"snaq://graph/target-output-type.sl"},"position":{"line":0,"character":0}}
+    });
+    client_w
+        .write_all(&lsp_message(&hover_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut saw_target_error = false;
+    for _ in 0..40 {
+        let body = timeout(Duration::from_secs(2), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("id").and_then(|i| i.as_u64()) == Some(142) {
+            continue;
+        }
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["widgetId"].as_str() == Some("w-source-output-type")
+            && v["params"]["status"].as_str() == Some("Error")
+        {
+            saw_target_error = true;
+            break;
+        }
+    }
+    assert!(
+        saw_target_error,
+        "source output type change should prune edge and recompute target to Error"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn fetch_result_slice_materializes_root_once_for_non_evaluated_vectors() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/slice-root.sl",
+        "[1,2,3,4,5].map(fn v => (v * 2))",
+        1,
+    )
+    .await;
+
+    let sub_req = serde_json::json!({
+        "jsonrpc":"2.0","id":130,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-slice-root","sourceUri":"snaq://graph/slice-root.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&sub_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 130).await;
+
+    let fetch_a = serde_json::json!({
+        "jsonrpc":"2.0","id":131,"method":"snaqlite/graph/fetchResultSlice",
+        "params":{"widgetId":"w-slice-root","path":[],"offset":1,"limit":2}
+    });
+    client_w
+        .write_all(&lsp_message(&fetch_a.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 131).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let result = v.get("result").cloned().unwrap_or_default();
+    assert_eq!(result["totalCount"].as_u64(), Some(5));
+    assert_eq!(result["hasMore"].as_bool(), Some(true));
+    let elems = result["elements"].as_array().cloned().unwrap_or_default();
+    assert_eq!(elems.len(), 2);
+    assert_eq!(elems[0]["display"].as_str(), Some("4"));
+    assert_eq!(elems[1]["display"].as_str(), Some("6"));
+
+    let fetch_b = serde_json::json!({
+        "jsonrpc":"2.0","id":132,"method":"snaqlite/graph/fetchResultSlice",
+        "params":{"widgetId":"w-slice-root","path":[],"offset":4,"limit":2}
+    });
+    client_w
+        .write_all(&lsp_message(&fetch_b.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 132).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let result = v.get("result").cloned().unwrap_or_default();
+    assert_eq!(result["totalCount"].as_u64(), Some(5));
+    assert_eq!(result["hasMore"].as_bool(), Some(false));
+    let elems = result["elements"].as_array().cloned().unwrap_or_default();
+    assert_eq!(elems.len(), 1);
+    assert_eq!(elems[0]["display"].as_str(), Some("10"));
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}

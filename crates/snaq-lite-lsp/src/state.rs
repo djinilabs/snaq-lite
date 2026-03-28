@@ -38,6 +38,19 @@ fn empty_block_def() -> ExprDef {
 }
 
 impl LspState {
+    fn uri_matches_prefix(uri: &str, prefix: &str) -> bool {
+        if !uri.starts_with(prefix) {
+            return false;
+        }
+        if uri.len() == prefix.len() || prefix.ends_with('/') {
+            return true;
+        }
+        matches!(
+            uri.as_bytes().get(prefix.len()).copied(),
+            Some(b'/') | Some(b'?') | Some(b'#')
+        )
+    }
+
     pub fn new() -> Self {
         Self {
             db: salsa::DatabaseImpl::new(),
@@ -171,6 +184,26 @@ impl LspState {
             .get(uri)
             .map(|e| e.source.clone())
             .unwrap_or_default()
+    }
+
+    /// Remove one document by URI. Returns true when removed.
+    pub fn remove_document(&mut self, uri: &Url) -> bool {
+        self.documents.remove(uri).is_some()
+    }
+
+    /// Remove all documents whose URI string starts with the provided prefix.
+    /// Returns removed URIs.
+    pub fn remove_documents_with_prefix(&mut self, uri_prefix: &str) -> Vec<Url> {
+        let mut removed = Vec::new();
+        self.documents.retain(|uri, _entry| {
+            if Self::uri_matches_prefix(uri.as_str(), uri_prefix) {
+                removed.push(uri.clone());
+                false
+            } else {
+                true
+            }
+        });
+        removed
     }
 
     /// Unit registry (for run_with_stream_inputs in subscribe).

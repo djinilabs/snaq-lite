@@ -17,6 +17,19 @@ pub struct WidgetRegistry {
 }
 
 impl WidgetRegistry {
+    fn uri_matches_prefix(uri: &str, prefix: &str) -> bool {
+        if !uri.starts_with(prefix) {
+            return false;
+        }
+        if uri.len() == prefix.len() || prefix.ends_with('/') {
+            return true;
+        }
+        matches!(
+            uri.as_bytes().get(prefix.len()).copied(),
+            Some(b'/') | Some(b'?') | Some(b'#')
+        )
+    }
+
     pub fn new() -> Self {
         Self {
             by_id: HashMap::new(),
@@ -128,6 +141,24 @@ impl WidgetRegistry {
         let mut out = Vec::new();
         self.by_id.retain(|id, entry| {
             if entry.source_uri == *uri {
+                out.push((id.clone(), entry.cancel_tx.take()));
+                false
+            } else {
+                true
+            }
+        });
+        out
+    }
+
+    /// Remove all widgets whose source URI starts with `uri_prefix`.
+    /// Returns (widget_id, optional cancel_tx) for each removed widget.
+    pub fn remove_prefix(
+        &mut self,
+        uri_prefix: &str,
+    ) -> Vec<(String, Option<futures::channel::oneshot::Sender<()>>)> {
+        let mut out = Vec::new();
+        self.by_id.retain(|id, entry| {
+            if Self::uri_matches_prefix(entry.source_uri.as_str(), uri_prefix) {
                 out.push((id.clone(), entry.cancel_tx.take()));
                 false
             } else {

@@ -18,6 +18,19 @@ pub struct GraphState {
 }
 
 impl GraphState {
+    fn uri_matches_prefix(uri: &str, prefix: &str) -> bool {
+        if !uri.starts_with(prefix) {
+            return false;
+        }
+        if uri.len() == prefix.len() || prefix.ends_with('/') {
+            return true;
+        }
+        matches!(
+            uri.as_bytes().get(prefix.len()).copied(),
+            Some(b'/') | Some(b'?') | Some(b'#')
+        )
+    }
+
     pub fn new() -> Self {
         Self {
             edges: Vec::new(),
@@ -106,6 +119,26 @@ impl GraphState {
     pub fn disconnect(&mut self, target_uri: &Url, target_input_name: &str) {
         self.edges
             .retain(|e| !(e.target_uri == *target_uri && e.target_input_name == target_input_name));
+    }
+
+    /// Remove all edges where `uri` is either source or target.
+    /// Returns the number of removed edges.
+    pub fn remove_edges_for_uri(&mut self, uri: &Url) -> usize {
+        let before = self.edges.len();
+        self.edges
+            .retain(|e| e.source_uri != *uri && e.target_uri != *uri);
+        before.saturating_sub(self.edges.len())
+    }
+
+    /// Remove all edges where source or target URI starts with `uri_prefix`.
+    /// Returns the number of removed edges.
+    pub fn remove_edges_with_prefix(&mut self, uri_prefix: &str) -> usize {
+        let before = self.edges.len();
+        self.edges.retain(|e| {
+            !Self::uri_matches_prefix(e.source_uri.as_str(), uri_prefix)
+                && !Self::uri_matches_prefix(e.target_uri.as_str(), uri_prefix)
+        });
+        before.saturating_sub(self.edges.len())
     }
 
     /// Remove edges whose target input no longer exists on the target node.

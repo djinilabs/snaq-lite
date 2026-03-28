@@ -6,6 +6,7 @@ The snaq-lite LSP server powers IDE features (diagnostics, hover, inlay hints) f
 
 - **Initialize / Initialized** — Handshake and capability negotiation.
 - **Text document sync** — Full document sync on open and change.
+  (The server advertises incremental sync and applies `didChange` ranges when provided.)
 - **Diagnostics** — Parse and resolve errors are reported as LSP diagnostics (e.g. red squiggles). Errors include source location (line/column). Positions use 0-based line and **byte offset** as character (consistent with the language’s span representation).
 - **Hover** — At a position, shows the evaluated value (numeric, symbolic, or formatted) for the expression under the cursor.
 - **Inlay hints** — Inline hints after expressions showing the computed value (e.g. `→ 5` or `→ 3 m`).
@@ -18,7 +19,7 @@ The server supports subscribing to the **root result** of the current document. 
 ### Methods
 
 | Method | Type | Payload | Response / effect |
-|--------|------|--------|------------------|
+| --- | --- | --- | --- |
 | `snaqlite/subscribe` | Request | `{ textDocument: { uri }, range?: Range }` (range optional; root-only in Phase 1) | `{ subscriptionId: string }` or error |
 | `snaqlite/unsubscribe` | Request | `{ subscriptionId: string }` | `null` or error |
 | `snaqlite/publishResult` | Notification (server → client) | `{ subscriptionId, status, data? }` | — |
@@ -83,11 +84,24 @@ Running a node with graph inputs: when the server needs a node’s result (for `
 
 Multiple widgets on the same node each get their own run and cached result.
 
-### Reactive invalidation
+### Reactive updates and lifecycle
 
-- **Document change** — On `didChange` / `didOpen` for a URI, the server invalidates all subscriptions (pub-sub and widget) that reference that URI: it cancels background tasks and sends `Cancelled` (e.g. `snaqlite/publishResult` or `snaqlite/graph/widgetDataUpdate` with reason such as `"Document changed"`).
+- **Document change** — On `didChange` / `didOpen` for a URI, the server reconciles graph inputs, recomputes impacted nodes, and pushes fresh `Completed` / `Error` updates to active subscriptions/widgets for affected nodes.
+- **Document close** — On `didClose` for a URI, the server removes the document from state, removes graph edges where the URI is source/target, clears cached node result, cancels subscriptions/widgets bound to that URI (`Cancelled` with reason `"Document closed"`), and recomputes downstream dependents.
 - **Edge removal** — When `snaqlite/graph/disconnect` is called, the server removes the edge and invalidates all widget subscriptions for the target URI (cancel and send `widgetDataUpdate` Cancelled). The UI triggers disconnect when the user deletes an edge (e.g. select edge and Backspace).
 - Connect failure (type mismatch) does not add an edge, so no invalidation is needed.
+
+### Namespace reset (soft canvas isolation)
+
+For URI-namespace based canvas isolation, the server exposes:
+
+- **Request `snaqlite/graph/resetNamespace`** — Params: `{ uriPrefix: string }`.
+  - Removes all open documents with URI starting with `uriPrefix`.
+  - Removes graph edges whose source or target URI starts with `uriPrefix`.
+  - Removes node-result cache entries for matching URIs.
+  - Cancels matching subscriptions/widgets (`Cancelled`, reason `"Namespace reset"`).
+  - Recomputes remaining downstream nodes that depended on removed sources.
+  - Response: `{ removedDocuments: number }`.
 
 ## Native (stdio)
 
@@ -148,7 +162,9 @@ The server can run inside a Web Worker so the IDE (e.g. in the browser) does not
 ## Limits and edge cases
 
 - **Multi-document** — The server tracks a map of URI → document. Opening or changing a document creates or updates the entry for that URI; virtual URIs (e.g. `snaq://graph/...`) are supported the same way as file URIs.
-- **Pub-sub** — Subscriptions are root-only (whole-document result). Subscribing to a range is not yet supported. Stream input source for `$name` is not in subscribe params (Phase 1); the server runs with empty stream inputs, so unbound `$name` yields a run error. On WASM, vector results are sent as a single `Completed` notification (no streaming). Document change cancels all subscriptions for that URI. On server shutdown, all subscriptions are cancelled and each client receives `Cancelled` with reason `"Server shutdown"`.
-- **Full sync** — Only full-document sync is used; incremental sync is not implemented. A `didChange` with an empty `content_changes` array is a no-op.
+- **Pub-sub** — Subscriptions are root-only (whole-document result). Subscribing to a range is not yet supported. Stream input source for `$name` is not in subscribe params (Phase 1); the server runs with empty stream inputs, so unbound `$name` yields a run error. On WASM, vector results from `snaqlite/subscribe` are intentionally sent as a single `Completed` notification (no `Running` stream batches). For canvas/UI result browsing and pagination, use `snaqlite/graph/subscribeWidget` + `snaqlite/graph/fetchResultSlice`.
+- **Vector summary on WASM** — For some lazy vector kinds, `resultSummary.length` / `totalElements` in Completed payload may be omitted until data is materialized. Clients should rely on `fetchResultSlice` for authoritative pagination metadata.
+- **Incremental sync** — The server uses incremental text sync (`TextDocumentSyncKind::INCREMENTAL`) and supports full-text replacement fallback when range is omitted. A `didChange` with an empty `content_changes` array is a no-op.
+- **Input declaration runtime semantics** — Native and WASM intentionally differ for declared `input` bindings: native preserves scalar-friendly binding for single-item inputs, while WASM keeps lazy vector/stream binding to avoid blocking the worker event loop.
 - **Diagnostics** — Parse and resolve/simplify errors are reported; optional runtime validation can add more. No debouncing; every change triggers a new diagnostic run.
 - **Hover / inlay** — Depend on the current Salsa program and source; if the document has parse errors, hover and inlay may be empty or partial.

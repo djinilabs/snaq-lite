@@ -15,6 +15,19 @@ pub struct NodeResultRegistry {
 }
 
 impl NodeResultRegistry {
+    fn uri_matches_prefix(uri: &str, prefix: &str) -> bool {
+        if !uri.starts_with(prefix) {
+            return false;
+        }
+        if uri.len() == prefix.len() || prefix.ends_with('/') {
+            return true;
+        }
+        matches!(
+            uri.as_bytes().get(prefix.len()).copied(),
+            Some(b'/') | Some(b'?') | Some(b'#')
+        )
+    }
+
     pub fn new() -> Self {
         Self {
             by_uri: HashMap::new(),
@@ -57,6 +70,17 @@ impl NodeResultRegistry {
 
     pub fn get(&self, uri: &Url) -> Option<&NodeResultEntry> {
         self.by_uri.get(uri)
+    }
+
+    pub fn remove(&mut self, uri: &Url) -> bool {
+        self.by_uri.remove(uri).is_some()
+    }
+
+    pub fn remove_with_prefix(&mut self, uri_prefix: &str) -> usize {
+        let before = self.by_uri.len();
+        self.by_uri
+            .retain(|uri, _| !Self::uri_matches_prefix(uri.as_str(), uri_prefix));
+        before.saturating_sub(self.by_uri.len())
     }
 }
 

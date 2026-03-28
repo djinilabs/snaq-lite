@@ -20,6 +20,19 @@ pub struct SubscriptionRegistry {
 }
 
 impl SubscriptionRegistry {
+    fn uri_matches_prefix(uri: &str, prefix: &str) -> bool {
+        if !uri.starts_with(prefix) {
+            return false;
+        }
+        if uri.len() == prefix.len() || prefix.ends_with('/') {
+            return true;
+        }
+        matches!(
+            uri.as_bytes().get(prefix.len()).copied(),
+            Some(b'/') | Some(b'?') | Some(b'#')
+        )
+    }
+
     pub fn new() -> Self {
         Self {
             by_id: HashMap::new(),
@@ -86,6 +99,41 @@ impl SubscriptionRegistry {
                 if let Some(tx) = entry.cancel_tx.take() {
                     out.push((id.clone(), tx));
                 }
+                false
+            } else {
+                true
+            }
+        });
+        out
+    }
+
+    /// Remove all subscriptions for the given URI, returning ids and optional cancel senders.
+    pub fn remove_uri_all(
+        &mut self,
+        uri: &Url,
+    ) -> Vec<(SubscriptionId, Option<futures::channel::oneshot::Sender<()>>)> {
+        let mut out = Vec::new();
+        self.by_id.retain(|id, entry| {
+            if entry.uri == *uri {
+                out.push((id.clone(), entry.cancel_tx.take()));
+                false
+            } else {
+                true
+            }
+        });
+        out
+    }
+
+    /// Remove all subscriptions for URIs that start with `uri_prefix`.
+    /// Returns ids and optional cancel senders.
+    pub fn remove_prefix_all(
+        &mut self,
+        uri_prefix: &str,
+    ) -> Vec<(SubscriptionId, Option<futures::channel::oneshot::Sender<()>>)> {
+        let mut out = Vec::new();
+        self.by_id.retain(|id, entry| {
+            if Self::uri_matches_prefix(entry.uri.as_str(), uri_prefix) {
+                out.push((id.clone(), entry.cancel_tx.take()));
                 false
             } else {
                 true

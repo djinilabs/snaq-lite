@@ -978,26 +978,17 @@ impl SnaqLiteBackend {
 
     /// Eager recompute for changed URIs + descendants and push update events.
     async fn recompute_and_push(&self, changed: &[Url]) {
-        let (docs, impacted) = {
+        let docs = {
             let state = self.state.lock().await;
-            let docs = state.document_uris();
-            let graph = self.graph_state.lock().await;
-            let impacted = graph.impacted_from_changed_nodes(changed, &docs);
-            (docs, impacted)
+            state.document_uris()
         };
-        let impacted_set: std::collections::HashSet<Url> = impacted.iter().cloned().collect();
-        let mut shared_cache = {
-            let mut cache = self.run_cache.lock().await;
-            for uri in &impacted_set {
-                cache.remove(uri);
-            }
-            cache.clone()
-        };
+        let mut shared_cache = { self.run_cache.lock().await.clone() };
         let mut queue: std::collections::VecDeque<Url> = std::collections::VecDeque::new();
         let mut queued: std::collections::HashSet<Url> = std::collections::HashSet::new();
         // Seed only changed roots; descendants are queued strictly when upstream output changes.
         for uri in changed {
             if docs.contains(uri) && queued.insert(uri.clone()) {
+                shared_cache.remove(uri);
                 queue.push_back(uri.clone());
             }
         }

@@ -28,16 +28,16 @@ use tower_lsp::lsp_types::{
 
 use crate::mapping::SERVER_NAME;
 use crate::pubsub::{
-    ConnectParams, DisconnectParams, ExportCanvasDocumentParams, ExportCanvasDocumentResponse,
-    FetchResultSliceParams, FetchResultSliceResponse, ImportCanvasDocumentParams,
-    ImportCanvasDocumentResponse, NodeInputPort, NodeSignatureUpdatedNotification,
-    NodeSignatureUpdatedParams, PathSegment, PublishNodeResultNotification,
-    PublishResultNotification, PublishResultParams, PublishStatus, ResetNamespaceParams,
-    ResetNamespaceResponse, ResultType, SubscribeNodeParams, SubscribeNodeResponse,
-    SubscribeParams, SubscribeResponse, SubscribeWidgetParams, UnsubscribeNodeParams,
-    UnsubscribeParams, UnsubscribeWidgetParams, WidgetDataStatus, WidgetDataUpdateNotification,
-    WidgetDataUpdateParams,
-    RenameParamParams, AddParamParams, RemoveParamParams,
+    AddParamParams, ApplyGraphPatchParams, ApplyGraphPatchResponse, BootstrapSessionParams,
+    BootstrapSessionResponse, ConnectParams, DisconnectParams, ExportCanvasDocumentParams,
+    ExportCanvasDocumentResponse, FetchResultSliceParams, FetchResultSliceResponse,
+    GraphPatchOperation, ImportCanvasDocumentParams, ImportCanvasDocumentResponse, NodeInputPort,
+    NodeSignatureUpdatedNotification, NodeSignatureUpdatedParams, PathSegment,
+    PublishNodeResultNotification, PublishResultNotification, PublishResultParams, PublishStatus,
+    RemoveParamParams, RenameParamParams, ResetNamespaceParams, ResetNamespaceResponse, ResultType,
+    SubscribeNodeParams, SubscribeNodeResponse, SubscribeParams, SubscribeResponse,
+    SubscribeWidgetParams, UnsubscribeNodeParams, UnsubscribeParams, UnsubscribeWidgetParams,
+    WidgetDataStatus, WidgetDataUpdateNotification, WidgetDataUpdateParams,
 };
 use crate::subscription::SubscriptionRegistry;
 use crate::widget_registry::WidgetRegistry;
@@ -457,6 +457,19 @@ impl SnaqLiteBackend {
             .map(|decl| decl.param_id.clone())
     }
 
+    fn are_graph_types_compatible(source_type: &str, target_type: &str) -> bool {
+        if target_type == "Undefined" {
+            return true;
+        }
+        if source_type == target_type {
+            return true;
+        }
+        matches!(
+            (source_type, target_type),
+            ("Numeric", "Symbolic") | ("FuzzyBool", "Symbolic")
+        )
+    }
+
     async fn ensure_canvas_uri_request(&self, uri: &Url) -> tower_lsp::jsonrpc::Result<()> {
         {
             let mut state = self.state.lock().await;
@@ -592,6 +605,66 @@ impl SnaqLiteBackend {
         self.client
             .send_notification::<PublishNodeResultNotification>(params)
             .await;
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn send_wasm_vector_progress_notifications(
+        &self,
+        subscription_id: &str,
+        db: &salsa::DatabaseImpl,
+        inner: snaq_lite_lang::LazyVector,
+        revision: u64,
+        canvas_id: Option<String>,
+        uri: &Url,
+        result_handle: &str,
+    ) {
+        use futures::stream::StreamExt;
+        const BATCH_SIZE: usize = 100;
+        let mut stream = snaq_lite_lang::vector_into_stream(db, inner);
+        let mut batch: Vec<serde_json::Value> = Vec::with_capacity(BATCH_SIZE);
+        let mut offset: u64 = 0;
+        while let Some(item) = stream.next().await {
+            batch.push(crate::pubsub::stream_element_to_json(db, &item));
+            if batch.len() >= BATCH_SIZE {
+                self.send_publish_result_notifications(PublishResultParams {
+                    subscription_id: subscription_id.to_string(),
+                    status: PublishStatus::Running,
+                    revision: Some(revision),
+                    canvas_id: canvas_id.clone(),
+                    uri: Some(uri.to_string()),
+                    data: Self::with_result_handle_data(
+                        Some(serde_json::json!({
+                            "elements": batch,
+                            "offset": offset,
+                            "count": BATCH_SIZE
+                        })),
+                        Some(result_handle),
+                    ),
+                })
+                .await;
+                offset += BATCH_SIZE as u64;
+                batch = Vec::with_capacity(BATCH_SIZE);
+            }
+        }
+        if !batch.is_empty() {
+            let count = batch.len();
+            self.send_publish_result_notifications(PublishResultParams {
+                subscription_id: subscription_id.to_string(),
+                status: PublishStatus::Running,
+                revision: Some(revision),
+                canvas_id: canvas_id.clone(),
+                uri: Some(uri.to_string()),
+                data: Self::with_result_handle_data(
+                    Some(serde_json::json!({
+                        "elements": batch,
+                        "offset": offset,
+                        "count": count
+                    })),
+                    Some(result_handle),
+                ),
+            })
+            .await;
+        }
     }
 
     async fn cancel_subscription_entries(
@@ -820,7 +893,7 @@ impl SnaqLiteBackend {
                 // Keep existing wiring on transient source run failures.
                 continue;
             };
-            if &source_output_type != target_type {
+            if !Self::are_graph_types_compatible(&source_output_type, target_type) {
                 invalid_inputs.push(input_name);
             }
         }
@@ -1185,19 +1258,17 @@ impl SnaqLiteBackend {
                                 &db,
                                 Some(&result_handle),
                             );
-                            let _ = (inner, cancel_rx);
+                            let _ = cancel_rx;
                             let sid = subscription_id.clone();
-                            self.send_publish_result_notifications(PublishResultParams {
-                                subscription_id: sid.clone(),
-                                status: PublishStatus::Running,
-                                revision: Some(revision),
-                                canvas_id: canvas_id.clone(),
-                                uri: Some(uri.to_string()),
-                                data: Self::with_result_handle_data(
-                                    Some(serde_json::json!({ "elements": [] })),
-                                    Some(&result_handle),
-                                ),
-                            })
+                            self.send_wasm_vector_progress_notifications(
+                                &sid,
+                                &db,
+                                inner,
+                                revision,
+                                canvas_id.clone(),
+                                &uri,
+                                &result_handle,
+                            )
                             .await;
                             self.send_publish_result_notifications(PublishResultParams {
                                 subscription_id: sid,
@@ -1307,19 +1378,17 @@ impl SnaqLiteBackend {
                                 &db,
                                 Some(&result_handle),
                             );
-                            let _ = (inner, cancel_rx);
+                            let _ = cancel_rx;
                             let sid = subscription_id.clone();
-                            self.send_publish_result_notifications(PublishResultParams {
-                                subscription_id: sid.clone(),
-                                status: PublishStatus::Running,
-                                revision: Some(revision),
-                                canvas_id: canvas_id.clone(),
-                                uri: Some(uri.to_string()),
-                                data: Self::with_result_handle_data(
-                                    Some(serde_json::json!({ "elements": [] })),
-                                    Some(&result_handle),
-                                ),
-                            })
+                            self.send_wasm_vector_progress_notifications(
+                                &sid,
+                                &db,
+                                inner,
+                                revision,
+                                canvas_id.clone(),
+                                &uri,
+                                &result_handle,
+                            )
                             .await;
                             self.send_publish_result_notifications(PublishResultParams {
                                 subscription_id: sid,
@@ -1437,9 +1506,8 @@ impl SnaqLiteBackend {
         .unwrap_or_else(|| "Unknown".to_string());
         // Target input type "Undefined" means accept any (e.g. presentation boxes).
         let source_type_unknown = source_output_type == "Unknown";
-        if target_input_type != "Undefined"
-            && !source_type_unknown
-            && source_output_type != target_input_type
+        if !source_type_unknown
+            && !Self::are_graph_types_compatible(&source_output_type, &target_input_type)
         {
             return Err(tower_lsp::jsonrpc::Error {
                 code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32001),
@@ -1528,6 +1596,374 @@ impl SnaqLiteBackend {
         out
     }
 
+    fn replace_identifier_spans(
+        source: &str,
+        spans: &[snaq_lite_lang::Span],
+        replacement: &str,
+    ) -> String {
+        let mut ordered = spans.to_vec();
+        ordered.sort_by(|a, b| b.start.cmp(&a.start).then_with(|| b.end.cmp(&a.end)));
+        let mut out = source.to_string();
+        for span in ordered {
+            if span.start >= span.end || span.end > out.len() {
+                continue;
+            }
+            if !out.is_char_boundary(span.start) || !out.is_char_boundary(span.end) {
+                continue;
+            }
+            out.replace_range(span.start..span.end, replacement);
+        }
+        out
+    }
+
+    fn collect_param_symbol_rename_spans(
+        source: &str,
+        target_param_id: &str,
+        old_name: &str,
+        unit_registry: &snaq_lite_lang::UnitRegistry,
+    ) -> tower_lsp::jsonrpc::Result<Vec<snaq_lite_lang::Span>> {
+        use snaq_lite_lang::ir::{SpannedCallArg, SpannedExprDef, SpannedExprDefKind};
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum BindingOrigin {
+            TargetParam,
+            Other,
+        }
+
+        fn current_binding(
+            scopes: &[std::collections::HashMap<String, BindingOrigin>],
+            name: &str,
+        ) -> Option<BindingOrigin> {
+            scopes.iter().rev().find_map(|scope| scope.get(name).copied())
+        }
+
+        fn visit_expr(
+            expr: &SpannedExprDef,
+            old_name: &str,
+            scopes: &mut Vec<std::collections::HashMap<String, BindingOrigin>>,
+            out: &mut Vec<snaq_lite_lang::Span>,
+            target_param_id: &str,
+        ) {
+            match &expr.value {
+                SpannedExprDefKind::LitSymbol(name) => {
+                    if name == old_name
+                        && matches!(current_binding(scopes, old_name), Some(BindingOrigin::TargetParam))
+                    {
+                        out.push(expr.span);
+                    }
+                }
+                SpannedExprDefKind::Add(l, r)
+                | SpannedExprDefKind::Sub(l, r)
+                | SpannedExprDefKind::Mul(l, r)
+                | SpannedExprDefKind::Div(l, r)
+                | SpannedExprDefKind::Eq(l, r)
+                | SpannedExprDefKind::Ne(l, r)
+                | SpannedExprDefKind::Lt(l, r)
+                | SpannedExprDefKind::Le(l, r)
+                | SpannedExprDefKind::Gt(l, r)
+                | SpannedExprDefKind::Ge(l, r)
+                | SpannedExprDefKind::And(l, r)
+                | SpannedExprDefKind::As(l, r)
+                | SpannedExprDefKind::WithPrecision(l, r) => {
+                    visit_expr(l, old_name, scopes, out, target_param_id);
+                    visit_expr(r, old_name, scopes, out, target_param_id);
+                }
+                SpannedExprDefKind::Index(base, _) | SpannedExprDefKind::Member(base, _) => {
+                    visit_expr(base, old_name, scopes, out, target_param_id);
+                }
+                SpannedExprDefKind::Neg(inner) | SpannedExprDefKind::Transpose(inner) => {
+                    visit_expr(inner, old_name, scopes, out, target_param_id);
+                }
+                SpannedExprDefKind::Call(_, args)
+                | SpannedExprDefKind::CallExpr(_, args)
+                | SpannedExprDefKind::MethodCall(_, _, args) => {
+                    if let SpannedExprDefKind::CallExpr(callee, _) = &expr.value {
+                        visit_expr(callee, old_name, scopes, out, target_param_id);
+                    }
+                    if let SpannedExprDefKind::MethodCall(base, _, _) = &expr.value {
+                        visit_expr(base, old_name, scopes, out, target_param_id);
+                    }
+                    for arg in args {
+                        match arg {
+                            SpannedCallArg::Positional(e) | SpannedCallArg::Named(_, e) => {
+                                visit_expr(e, old_name, scopes, out, target_param_id);
+                            }
+                        }
+                    }
+                }
+                SpannedExprDefKind::If(c, t, e) => {
+                    visit_expr(c, old_name, scopes, out, target_param_id);
+                    visit_expr(t, old_name, scopes, out, target_param_id);
+                    visit_expr(e, old_name, scopes, out, target_param_id);
+                }
+                SpannedExprDefKind::VecLiteral(items) => {
+                    for item in items {
+                        visit_expr(item, old_name, scopes, out, target_param_id);
+                    }
+                }
+                SpannedExprDefKind::MapLiteral(entries) => {
+                    for (_, value) in entries {
+                        visit_expr(value, old_name, scopes, out, target_param_id);
+                    }
+                }
+                SpannedExprDefKind::Binding(name, rhs) => {
+                    // Binding rhs is evaluated before the name enters scope.
+                    visit_expr(rhs, old_name, scopes, out, target_param_id);
+                    if let Some(frame) = scopes.last_mut() {
+                        frame.insert(name.clone(), BindingOrigin::Other);
+                    }
+                }
+                SpannedExprDefKind::InputDecl(name, param_id, _) => {
+                    let origin = if name == old_name && param_id == target_param_id {
+                        BindingOrigin::TargetParam
+                    } else {
+                        BindingOrigin::Other
+                    };
+                    if let Some(frame) = scopes.last_mut() {
+                        frame.insert(name.clone(), origin);
+                    }
+                }
+                SpannedExprDefKind::Block(items) => {
+                    scopes.push(std::collections::HashMap::new());
+                    for item in items {
+                        visit_expr(item, old_name, scopes, out, target_param_id);
+                    }
+                    let _ = scopes.pop();
+                }
+                SpannedExprDefKind::Lambda(params, body) => {
+                    // Default args are evaluated in outer scope; lambda body has parameter scope.
+                    for (_, default) in params {
+                        if let Some(expr) = default {
+                            visit_expr(expr, old_name, scopes, out, target_param_id);
+                        }
+                    }
+                    scopes.push(std::collections::HashMap::new());
+                    if let Some(frame) = scopes.last_mut() {
+                        for (param_name, _) in params {
+                            frame.insert(param_name.clone(), BindingOrigin::Other);
+                        }
+                    }
+                    visit_expr(body, old_name, scopes, out, target_param_id);
+                    let _ = scopes.pop();
+                }
+                SpannedExprDefKind::LitScalar(_)
+                | SpannedExprDefKind::LitWithUnit(_, _)
+                | SpannedExprDefKind::LitUnit(_)
+                | SpannedExprDefKind::Lit(_)
+                | SpannedExprDefKind::LitFuzzyBool(_)
+                | SpannedExprDefKind::LitTemporal(_)
+                | SpannedExprDefKind::LitDate(_)
+                | SpannedExprDefKind::ExternalStream(_) => {}
+            }
+        }
+
+        let parsed = snaq_lite_lang::parse(source)
+            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("parse error: {e}")))?;
+        let resolved = snaq_lite_lang::resolve::resolve(parsed, unit_registry)
+            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("resolve error: {e}")))?;
+        let mut scopes = vec![std::collections::HashMap::new()];
+        let mut out = Vec::new();
+        visit_expr(&resolved, old_name, &mut scopes, &mut out, target_param_id);
+        Ok(out)
+    }
+
+    fn compute_rename_param_source(
+        source: &str,
+        param_id: &str,
+        new_name: &str,
+        unit_registry: &snaq_lite_lang::UnitRegistry,
+    ) -> tower_lsp::jsonrpc::Result<String> {
+        if new_name.trim().is_empty() {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "newName must not be empty",
+            ));
+        }
+        let trimmed_new_name = new_name.trim();
+        if !Self::is_valid_identifier(trimmed_new_name) {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "newName must be a valid identifier",
+            ));
+        }
+        let decls = Self::parsed_input_decls(source)?;
+        let target = decls.iter().find(|(_, id, _, _)| id == param_id);
+        let Some((old_name, found_param_id, ty, span)) = target else {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "paramId not found",
+            ));
+        };
+        let rename_spans = Self::collect_param_symbol_rename_spans(
+            source,
+            found_param_id,
+            old_name,
+            unit_registry,
+        )?;
+        let symbols_updated = Self::replace_identifier_spans(source, &rename_spans, trimmed_new_name);
+        let new_decl = format!("input {}@{}: {}", trimmed_new_name, found_param_id, ty);
+        Ok(Self::replace_span(&symbols_updated, *span, &new_decl))
+    }
+
+    fn compute_add_param_source(
+        source: &str,
+        param_id: &str,
+        name: &str,
+        type_name: &str,
+    ) -> tower_lsp::jsonrpc::Result<String> {
+        let trimmed_name = name.trim();
+        let trimmed_param_id = param_id.trim();
+        let trimmed_type_name = type_name.trim();
+        if trimmed_name.is_empty() || trimmed_param_id.is_empty() || trimmed_type_name.is_empty() {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "name, paramId and typeName must be non-empty",
+            ));
+        }
+        if !Self::is_valid_identifier(trimmed_name) || !Self::is_valid_identifier(trimmed_param_id) {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "name and paramId must be valid identifiers",
+            ));
+        }
+        let decls = Self::parsed_input_decls(source)?;
+        for (decl_name, decl_param_id, _, _) in &decls {
+            if decl_param_id == trimmed_param_id || decl_name == trimmed_name {
+                return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                    "duplicate param name or id",
+                ));
+            }
+        }
+        let new_line = format!("input {}@{}: {}", trimmed_name, trimmed_param_id, trimmed_type_name);
+        let parsed = snaq_lite_lang::parse(source)
+            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("parse error: {e}")))?;
+        let insert_offset = match parsed.value {
+            snaq_lite_lang::ir::SpannedExprDefKind::Block(items) => {
+                let mut end_of_input_prefix = 0usize;
+                let mut saw_non_input = false;
+                for item in items {
+                    if saw_non_input {
+                        break;
+                    }
+                    match item.value {
+                        snaq_lite_lang::ir::SpannedExprDefKind::InputDecl(_, _, _) => {
+                            end_of_input_prefix = item.span.end;
+                        }
+                        _ => saw_non_input = true,
+                    }
+                }
+                end_of_input_prefix
+            }
+            _ => 0,
+        };
+        let updated = if insert_offset == 0 {
+            if source.is_empty() {
+                new_line
+            } else {
+                format!("{new_line}\n{source}")
+            }
+        } else {
+            let prefix = &source[..insert_offset];
+            let suffix = &source[insert_offset..];
+            let mut out = String::new();
+            out.push_str(prefix);
+            if !prefix.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&new_line);
+            if !suffix.is_empty() {
+                if !suffix.starts_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(suffix);
+            }
+            out
+        };
+        Ok(updated)
+    }
+
+    fn compute_remove_param_source(
+        source: &str,
+        param_id: &str,
+    ) -> tower_lsp::jsonrpc::Result<String> {
+        let decls = Self::parsed_input_decls(source)?;
+        let target = decls.iter().find(|(_, id, _, _)| id == param_id);
+        let Some((_name, _param_id, _ty, span)) = target else {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "paramId not found",
+            ));
+        };
+        Ok(Self::replace_span(source, *span, ""))
+    }
+
+    fn input_decls_from_source(
+        source: &str,
+    ) -> tower_lsp::jsonrpc::Result<Vec<snaq_lite_lang::GraphInputDecl>> {
+        let parsed = snaq_lite_lang::parse(source)
+            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("parse error: {e}")))?;
+        let root = parsed.to_expr_def();
+        Ok(snaq_lite_lang::extract_input_decls_from_block_with_ids(&root))
+    }
+
+    fn reconcile_staged_target_inputs_for_source(
+        staged_graph: &mut graph::GraphState,
+        uri: &Url,
+        source: &str,
+    ) -> bool {
+        let Ok(inputs) = Self::input_decls_from_source(source) else {
+            return false;
+        };
+        let valid_inputs: std::collections::HashSet<String> =
+            inputs.into_iter().map(|decl| decl.param_id).collect();
+        !staged_graph
+            .reconcile_target_inputs(uri, &valid_inputs)
+            .is_empty()
+    }
+
+    fn infer_output_type_with_staged_graph(
+        staged_graph: &graph::GraphState,
+        source_by_uri: &std::collections::HashMap<Url, String>,
+        unit_registry: &snaq_lite_lang::UnitRegistry,
+        sink_uri: &Url,
+    ) -> Option<String> {
+        let docs: std::collections::HashSet<Url> = source_by_uri.keys().cloned().collect();
+        let order = staged_graph.topological_order(sink_uri, &docs)?;
+        let sources: Vec<(Url, String)> = order
+            .iter()
+            .map(|uri| {
+                let source = source_by_uri.get(uri).cloned().unwrap_or_default();
+                (uri.clone(), source)
+            })
+            .collect();
+        let incoming_map: std::collections::HashMap<Url, Vec<(String, Url)>> = order
+            .iter()
+            .map(|uri| (uri.clone(), staged_graph.incoming(uri)))
+            .collect();
+        let input_name_by_param_id: std::collections::HashMap<
+            Url,
+            std::collections::HashMap<String, String>,
+        > = order
+            .iter()
+            .map(|uri| {
+                let names = source_by_uri
+                    .get(uri)
+                    .and_then(|source| Self::input_decls_from_source(source).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|decl| (decl.param_id, decl.name))
+                    .collect();
+                (uri.clone(), names)
+            })
+            .collect();
+        run_node_with_graph_inputs_impl(
+            &order,
+            &sources,
+            unit_registry,
+            &incoming_map,
+            &input_name_by_param_id,
+            sink_uri,
+            None,
+            None,
+        )
+        .ok()
+        .and_then(|(value, _)| snaq_lite_lang::value_type_name(&value))
+    }
+
     async fn apply_param_source_update(
         &self,
         uri: &Url,
@@ -1559,35 +1995,19 @@ impl SnaqLiteBackend {
         let uri =
             Url::parse(&params.uri).map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid uri"))?;
         self.ensure_graph_canvas_uri_request(&uri).await?;
-        let source = {
+        let (source, unit_registry) = {
             let state = self.state.lock().await;
             if !state.has_document(&uri) {
                 return Err(tower_lsp::jsonrpc::Error::invalid_params("document not open"));
             }
-            state.source(&uri)
+            (state.source(&uri), state.unit_registry().clone())
         };
-        if params.new_name.trim().is_empty() {
-            return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                "newName must not be empty",
-            ));
-        }
-        let trimmed_new_name = params.new_name.trim();
-        if !Self::is_valid_identifier(trimmed_new_name) {
-            return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                "newName must be a valid identifier",
-            ));
-        }
-        let decls = Self::parsed_input_decls(&source)?;
-        let target = decls
-            .iter()
-            .find(|(_, param_id, _, _)| *param_id == params.param_id);
-        let Some((_, param_id, ty, span)) = target else {
-            return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                "paramId not found",
-            ));
-        };
-        let new_decl = format!("input {}@{}: {}", trimmed_new_name, param_id, ty);
-        let updated = Self::replace_span(&source, *span, &new_decl);
+        let updated = Self::compute_rename_param_source(
+            &source,
+            &params.param_id,
+            &params.new_name,
+            &unit_registry,
+        )?;
         self.apply_param_source_update(&uri, updated).await
     }
 
@@ -1595,19 +2015,6 @@ impl SnaqLiteBackend {
         let uri =
             Url::parse(&params.uri).map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid uri"))?;
         self.ensure_graph_canvas_uri_request(&uri).await?;
-        let trimmed_name = params.name.trim();
-        let trimmed_param_id = params.param_id.trim();
-        let trimmed_type_name = params.type_name.trim();
-        if trimmed_name.is_empty() || trimmed_param_id.is_empty() || trimmed_type_name.is_empty() {
-            return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                "name, paramId and typeName must be non-empty",
-            ));
-        }
-        if !Self::is_valid_identifier(trimmed_name) || !Self::is_valid_identifier(trimmed_param_id) {
-            return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                "name and paramId must be valid identifiers",
-            ));
-        }
         let source = {
             let state = self.state.lock().await;
             if !state.has_document(&uri) {
@@ -1615,68 +2022,12 @@ impl SnaqLiteBackend {
             }
             state.source(&uri)
         };
-        let decls = Self::parsed_input_decls(&source)?;
-        for (name, param_id, _type_name, _) in &decls {
-            if param_id == trimmed_param_id || name == trimmed_name {
-                return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                    "duplicate param name or id",
-                ));
-            }
-        }
-        let new_line = format!(
-            "input {}@{}: {}",
-            trimmed_name,
-            trimmed_param_id,
-            trimmed_type_name
-        );
-        let parsed = snaq_lite_lang::parse(&source)
-            .map_err(|e| tower_lsp::jsonrpc::Error::invalid_params(format!("parse error: {e}")))?;
-        let insert_offset = match parsed.value {
-            snaq_lite_lang::ir::SpannedExprDefKind::Block(items) => {
-                let mut end_of_input_prefix = 0usize;
-                let mut saw_non_input = false;
-                for item in items {
-                    if saw_non_input {
-                        break;
-                    }
-                    match item.value {
-                        snaq_lite_lang::ir::SpannedExprDefKind::InputDecl(_, _, _) => {
-                            end_of_input_prefix = item.span.end;
-                        }
-                        _ => saw_non_input = true,
-                    }
-                }
-                if end_of_input_prefix == 0 {
-                    0
-                } else {
-                    end_of_input_prefix
-                }
-            }
-            _ => 0,
-        };
-        let updated = if insert_offset == 0 {
-            if source.is_empty() {
-                new_line
-            } else {
-                format!("{new_line}\n{source}")
-            }
-        } else {
-            let prefix = &source[..insert_offset];
-            let suffix = &source[insert_offset..];
-            let mut out = String::new();
-            out.push_str(prefix);
-            if !prefix.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str(&new_line);
-            if !suffix.is_empty() {
-                if !suffix.starts_with('\n') {
-                    out.push('\n');
-                }
-                out.push_str(suffix);
-            }
-            out
-        };
+        let updated = Self::compute_add_param_source(
+            &source,
+            &params.param_id,
+            &params.name,
+            &params.type_name,
+        )?;
         self.apply_param_source_update(&uri, updated).await
     }
 
@@ -1694,17 +2045,318 @@ impl SnaqLiteBackend {
             }
             state.source(&uri)
         };
-        let decls = Self::parsed_input_decls(&source)?;
-        let target = decls
-            .iter()
-            .find(|(_, param_id, _, _)| *param_id == params.param_id);
-        let Some((_name, _param_id, _ty, span)) = target else {
-            return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                "paramId not found",
-            ));
-        };
-        let updated = Self::replace_span(&source, *span, "");
+        let updated = Self::compute_remove_param_source(&source, &params.param_id)?;
         self.apply_param_source_update(&uri, updated).await
+    }
+
+    #[allow(clippy::cognitive_complexity)]
+    pub async fn graph_apply_patch(
+        &self,
+        params: ApplyGraphPatchParams,
+    ) -> tower_lsp::jsonrpc::Result<ApplyGraphPatchResponse> {
+        if params.operations.is_empty() {
+            return Ok(ApplyGraphPatchResponse {
+                applied_operations: 0,
+                affected_uris: Vec::new(),
+            });
+        }
+        let (mut source_by_uri, mut next_version_by_uri, unit_registry) = {
+            let state = self.state.lock().await;
+            let mut sources = std::collections::HashMap::new();
+            let mut versions = std::collections::HashMap::new();
+            for (uri, source, version) in state.snapshot_documents() {
+                versions.insert(uri.clone(), version.unwrap_or(0));
+                sources.insert(uri, source);
+            }
+            (sources, versions, state.unit_registry().clone())
+        };
+        let mut staged_graph = {
+            let graph = self.graph_state.lock().await;
+            let mut g = graph::GraphState::new();
+            g.replace_edges(graph.edges_snapshot());
+            g
+        };
+        let mut changed_sources: std::collections::HashSet<Url> = std::collections::HashSet::new();
+        let mut topology_targets: std::collections::HashSet<Url> = std::collections::HashSet::new();
+
+        for operation in &params.operations {
+            match operation {
+                GraphPatchOperation::SetNodeSource { uri, source } => {
+                    let uri = Url::parse(uri)
+                        .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid uri"))?;
+                    self.ensure_graph_canvas_uri_request(&uri).await?;
+                    source_by_uri.insert(uri.clone(), source.clone());
+                    changed_sources.insert(uri.clone());
+                    next_version_by_uri.entry(uri.clone()).or_insert(0);
+                    if Self::reconcile_staged_target_inputs_for_source(
+                        &mut staged_graph,
+                        &uri,
+                        source,
+                    ) {
+                        topology_targets.insert(uri.clone());
+                    }
+                }
+                GraphPatchOperation::Connect {
+                    source_uri,
+                    target_uri,
+                    target_input_name,
+                } => {
+                    let source_uri = Url::parse(source_uri).map_err(|_| {
+                        tower_lsp::jsonrpc::Error::invalid_params("invalid sourceUri")
+                    })?;
+                    let target_uri = Url::parse(target_uri).map_err(|_| {
+                        tower_lsp::jsonrpc::Error::invalid_params("invalid targetUri")
+                    })?;
+                    self.ensure_graph_canvas_uri_request(&source_uri).await?;
+                    self.ensure_graph_canvas_uri_request(&target_uri).await?;
+                    if !source_by_uri.contains_key(&source_uri) || !source_by_uri.contains_key(&target_uri) {
+                        return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                            "source or target document not open",
+                        ));
+                    }
+                    let target_source = source_by_uri
+                        .get(&target_uri)
+                        .ok_or_else(|| {
+                            tower_lsp::jsonrpc::Error::invalid_params("target document not open")
+                        })?;
+                    let target_inputs = Self::input_decls_from_source(target_source)?;
+                    let target_param_id =
+                        Self::resolve_target_input_param_id(&target_inputs, target_input_name)
+                            .ok_or_else(|| {
+                                tower_lsp::jsonrpc::Error::invalid_params(format!(
+                                    "target has no input named or id '{}'",
+                                    target_input_name
+                                ))
+                            })?;
+                    let target_input_type = target_inputs
+                        .iter()
+                        .find(|decl| decl.param_id == target_param_id)
+                        .map(|decl| decl.type_name.clone())
+                        .ok_or_else(|| {
+                            tower_lsp::jsonrpc::Error::invalid_params(format!(
+                                "target has no input named or id '{}'",
+                                target_input_name
+                            ))
+                        })?;
+                    let docs: std::collections::HashSet<Url> =
+                        source_by_uri.keys().cloned().collect();
+                    if staged_graph.would_create_cycle(&source_uri, &target_uri, &docs) {
+                        return Err(tower_lsp::jsonrpc::Error {
+                            code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32002),
+                            message: "graph cycle detected".into(),
+                            data: None,
+                        });
+                    }
+                    let source_output_type = Self::infer_output_type_with_staged_graph(
+                        &staged_graph,
+                        &source_by_uri,
+                        &unit_registry,
+                        &source_uri,
+                    );
+                    if target_input_type != "Undefined" {
+                        if let Some(source_output_type) = source_output_type {
+                            if !Self::are_graph_types_compatible(&source_output_type, &target_input_type)
+                            {
+                                return Err(tower_lsp::jsonrpc::Error {
+                                    code: tower_lsp::jsonrpc::ErrorCode::ServerError(-32001),
+                                    message: format!(
+                                        "Type mismatch: source output type '{}' does not match target input '{}' type '{}'",
+                                        source_output_type, target_input_name, target_input_type
+                                    )
+                                    .into(),
+                                    data: None,
+                                });
+                            }
+                        }
+                    }
+                    staged_graph.connect(source_uri, target_uri.clone(), target_param_id);
+                    topology_targets.insert(target_uri);
+                }
+                GraphPatchOperation::Disconnect {
+                    target_uri,
+                    target_input_name,
+                } => {
+                    let target_uri = Url::parse(target_uri).map_err(|_| {
+                        tower_lsp::jsonrpc::Error::invalid_params("invalid targetUri")
+                    })?;
+                    self.ensure_graph_canvas_uri_request(&target_uri).await?;
+                    let target_param_id = source_by_uri
+                        .get(&target_uri)
+                        .and_then(|source| {
+                            Self::input_decls_from_source(source).ok().and_then(|decls| {
+                                Self::resolve_target_input_param_id(&decls, target_input_name)
+                            })
+                        })
+                        .unwrap_or_else(|| target_input_name.clone());
+                    staged_graph.disconnect(&target_uri, &target_param_id);
+                    topology_targets.insert(target_uri);
+                }
+                GraphPatchOperation::RenameParam {
+                    uri,
+                    param_id,
+                    new_name,
+                } => {
+                    let uri = Url::parse(uri)
+                        .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid uri"))?;
+                    self.ensure_graph_canvas_uri_request(&uri).await?;
+                    let source = source_by_uri.get(&uri).ok_or_else(|| {
+                        tower_lsp::jsonrpc::Error::invalid_params("document not open")
+                    })?;
+                    let updated = Self::compute_rename_param_source(
+                        source,
+                        param_id,
+                        new_name,
+                        &unit_registry,
+                    )?;
+                    source_by_uri.insert(uri.clone(), updated);
+                    changed_sources.insert(uri.clone());
+                    next_version_by_uri.entry(uri.clone()).or_insert(0);
+                    if let Some(updated_source) = source_by_uri.get(&uri) {
+                        if Self::reconcile_staged_target_inputs_for_source(
+                            &mut staged_graph,
+                            &uri,
+                            updated_source,
+                        ) {
+                            topology_targets.insert(uri.clone());
+                        }
+                    }
+                }
+                GraphPatchOperation::AddParam {
+                    uri,
+                    param_id,
+                    name,
+                    type_name,
+                } => {
+                    let uri = Url::parse(uri)
+                        .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid uri"))?;
+                    self.ensure_graph_canvas_uri_request(&uri).await?;
+                    let source = source_by_uri.get(&uri).ok_or_else(|| {
+                        tower_lsp::jsonrpc::Error::invalid_params("document not open")
+                    })?;
+                    let updated =
+                        Self::compute_add_param_source(source, param_id, name, type_name)?;
+                    source_by_uri.insert(uri.clone(), updated);
+                    changed_sources.insert(uri.clone());
+                    next_version_by_uri.entry(uri.clone()).or_insert(0);
+                    if let Some(updated_source) = source_by_uri.get(&uri) {
+                        if Self::reconcile_staged_target_inputs_for_source(
+                            &mut staged_graph,
+                            &uri,
+                            updated_source,
+                        ) {
+                            topology_targets.insert(uri.clone());
+                        }
+                    }
+                }
+                GraphPatchOperation::RemoveParam { uri, param_id } => {
+                    let uri = Url::parse(uri)
+                        .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid uri"))?;
+                    self.ensure_graph_canvas_uri_request(&uri).await?;
+                    let source = source_by_uri.get(&uri).ok_or_else(|| {
+                        tower_lsp::jsonrpc::Error::invalid_params("document not open")
+                    })?;
+                    let updated = Self::compute_remove_param_source(source, param_id)?;
+                    source_by_uri.insert(uri.clone(), updated);
+                    changed_sources.insert(uri.clone());
+                    next_version_by_uri.entry(uri.clone()).or_insert(0);
+                    // Remove known stale edge even when edited source is temporarily invalid.
+                    staged_graph.disconnect(&uri, param_id);
+                    topology_targets.insert(uri.clone());
+                    if let Some(updated_source) = source_by_uri.get(&uri) {
+                        if Self::reconcile_staged_target_inputs_for_source(
+                            &mut staged_graph,
+                            &uri,
+                            updated_source,
+                        ) {
+                            topology_targets.insert(uri.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        {
+            let mut state = self.state.lock().await;
+            for uri in &changed_sources {
+                if let Some(new_source) = source_by_uri.get(uri) {
+                    let next_version = next_version_by_uri
+                        .get(uri)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    state.update_document(uri.clone(), next_version, new_source);
+                }
+            }
+        }
+        {
+            let mut graph = self.graph_state.lock().await;
+            graph.replace_edges(staged_graph.edges_snapshot());
+        }
+
+        let mut revalidated_targets: std::collections::HashSet<Url> = std::collections::HashSet::new();
+        let mut reconciled_pruned_edges = false;
+        for uri in &changed_sources {
+            let edges_before = { self.graph_state.lock().await.edges_snapshot().len() };
+            self.reconcile_graph_for_uri(uri).await;
+            let edges_after = { self.graph_state.lock().await.edges_snapshot().len() };
+            if edges_after < edges_before {
+                reconciled_pruned_edges = true;
+            }
+            for target in self.revalidate_related_edge_types(uri).await {
+                revalidated_targets.insert(target);
+            }
+        }
+
+        let mut changed_roots: std::collections::HashSet<Url> = changed_sources.clone();
+        let had_topology_targets = !topology_targets.is_empty();
+        for target in topology_targets {
+            changed_roots.insert(target);
+        }
+        let had_revalidated_targets = !revalidated_targets.is_empty();
+        for target in revalidated_targets {
+            changed_roots.insert(target);
+        }
+        let force_downstream =
+            reconciled_pruned_edges || had_topology_targets || had_revalidated_targets;
+        let changed_roots_vec: Vec<Url> = changed_roots.iter().cloned().collect();
+        self.recompute_and_push(&changed_roots_vec, force_downstream).await;
+        self.drain_notifications().await;
+        self.drain_widget_notifications().await;
+        for uri in &changed_sources {
+            self.publish_diagnostics(uri.clone()).await;
+            self.send_node_signature_updated(uri).await;
+        }
+
+        let mut affected_uris: Vec<String> = changed_roots.into_iter().map(|u| u.to_string()).collect();
+        affected_uris.sort();
+        affected_uris.dedup();
+        Ok(ApplyGraphPatchResponse {
+            applied_operations: params.operations.len(),
+            affected_uris,
+        })
+    }
+
+    pub async fn bootstrap_session(
+        &self,
+        _params: BootstrapSessionParams,
+    ) -> tower_lsp::jsonrpc::Result<BootstrapSessionResponse> {
+        let (canvas_id, open_documents) = {
+            let state = self.state.lock().await;
+            (state.active_canvas_id(), state.document_count())
+        };
+        let subscriptions = self.subscriptions.lock().await.len();
+        let widgets = self.widgets.lock().await.len();
+        let result_handles = self.result_handles.lock().await.len_handles();
+        let runtime_drained =
+            open_documents == 0 && subscriptions == 0 && widgets == 0 && result_handles == 0;
+        Ok(BootstrapSessionResponse {
+            canvas_id,
+            open_documents,
+            subscriptions,
+            widgets,
+            result_handles,
+            runtime_drained,
+        })
     }
 
     /// Handle snaqlite/graph/resetNamespace: clear graph/runtime state for matching URI prefix.
@@ -2119,7 +2771,8 @@ impl SnaqLiteBackend {
         &self,
         params: FetchResultSliceParams,
     ) -> tower_lsp::jsonrpc::Result<FetchResultSliceResponse> {
-        let (value, source_uri, source_handle) = if let Some(handle) = params.result_handle.clone() {
+        let (value, source_uri, source_handle, source_revision, handle_forward_only) =
+            if let Some(handle) = params.result_handle.clone() {
             let entry = {
                 let handles = self.result_handles.lock().await;
                 handles.get(&handle).cloned()
@@ -2127,7 +2780,13 @@ impl SnaqLiteBackend {
             let entry = entry.ok_or_else(|| {
                 tower_lsp::jsonrpc::Error::invalid_params("Result handle not found")
             })?;
-            (entry.value, entry.source_uri, Some(handle))
+            (
+                entry.value,
+                entry.source_uri,
+                Some(handle),
+                Some(entry.revision),
+                entry.forward_only,
+            )
         } else if let Some(widget_id) = params.widget_id.clone() {
             let (value, source_uri) = {
                 let w = self.widgets.lock().await;
@@ -2143,7 +2802,7 @@ impl SnaqLiteBackend {
                     "Widget not found or result not available",
                 )
             })?;
-            (value, source_uri, None)
+            (value, source_uri, None, None, false)
         } else {
             return Err(tower_lsp::jsonrpc::Error::invalid_params(
                 "must provide widgetId or resultHandle",
@@ -2188,6 +2847,11 @@ impl SnaqLiteBackend {
                 "non-replayable stream slice does not support nested paths",
             ));
         }
+        if source_handle.is_some() && handle_forward_only && params.cursor.is_none() && params.offset > 0 {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "forward-only handle requires cursor for offset > 0",
+            ));
+        }
         let path_json: Vec<serde_json::Value> = path_segments
             .iter()
             .map(|s| match s {
@@ -2208,11 +2872,6 @@ impl SnaqLiteBackend {
             let (elements, total_count, supports_cursor) = match &sub_value {
                 snaq_lite_lang::Value::Vector(v) => {
                     let non_replayable = matches!(v.inner, snaq_lite_lang::LazyVector::FromInput(_));
-                    if non_replayable && source_handle.is_some() && (params.cursor.is_some() || params.offset > 0) {
-                        return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                            "non-replayable stream slice only supports offset=0 without cursor",
-                        ));
-                    }
                     let offset = params.offset as usize;
                     let limit = params.limit as usize;
 
@@ -2222,6 +2881,30 @@ impl SnaqLiteBackend {
                             let start = offset.min(collected.len());
                             let end = (offset + limit).min(collected.len());
                             let slice_vec: Vec<_> = collected[start..end].to_vec();
+                            (total_count, slice_vec)
+                        }
+                        snaq_lite_lang::LazyVector::FromInput(_) if source_handle.is_some() => {
+                            // Non-replayable root: collect once, then upgrade handle to replayable cache.
+                            let collected = snaq_lite_lang::collect_vector_stream(&db, v.inner.clone());
+                            let total_count = collected.len() as u64;
+                            let start = offset.min(collected.len());
+                            let end = (offset + limit).min(collected.len());
+                            let slice_vec: Vec<_> = collected[start..end].to_vec();
+                            if let (Some(handle), Some(revision)) =
+                                (source_handle.as_deref(), source_revision)
+                            {
+                                let cached_value = snaq_lite_lang::Value::Vector(
+                                    snaq_lite_lang::VectorValue {
+                                        inner: snaq_lite_lang::LazyVector::FromEvaluated(collected),
+                                        orientation: v.orientation,
+                                    },
+                                );
+                                let _ = self
+                                    .result_handles
+                                    .lock()
+                                    .await
+                                    .update_handle_value(handle, revision, cached_value);
+                            }
                             (total_count, slice_vec)
                         }
                         _ => {
@@ -2251,7 +2934,8 @@ impl SnaqLiteBackend {
                             }),
                         })
                         .collect();
-                    (elements, total_count, !non_replayable)
+                    let supports_cursor = !non_replayable || source_handle.is_some();
+                    (elements, total_count, supports_cursor)
                 }
                 snaq_lite_lang::Value::Map(id) => {
                     use snaq_lite_lang::map_registry;
@@ -2958,6 +3642,14 @@ pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSo
         "snaqlite/graph/fetchResultSlice",
         SnaqLiteBackend::fetch_result_slice,
     )
+    .custom_method(
+        "snaqlite/graph/applyPatch",
+        SnaqLiteBackend::graph_apply_patch,
+    )
+    .custom_method(
+        "snaqlite/bootstrapSession",
+        SnaqLiteBackend::bootstrap_session,
+    )
     .finish();
     (service, socket)
 }
@@ -3490,6 +4182,15 @@ mod tests {
             SnaqLiteBackend::resolve_target_input_param_id(&decls, "x"),
             Some("x".to_string())
         );
+    }
+
+    #[test]
+    fn graph_type_compatibility_matrix() {
+        assert!(SnaqLiteBackend::are_graph_types_compatible("Numeric", "Numeric"));
+        assert!(SnaqLiteBackend::are_graph_types_compatible("Vector", "Undefined"));
+        assert!(SnaqLiteBackend::are_graph_types_compatible("Numeric", "Symbolic"));
+        assert!(SnaqLiteBackend::are_graph_types_compatible("FuzzyBool", "Symbolic"));
+        assert!(!SnaqLiteBackend::are_graph_types_compatible("Vector", "Numeric"));
     }
 
     #[test]

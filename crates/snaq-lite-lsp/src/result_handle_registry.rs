@@ -14,6 +14,9 @@ pub struct ResultHandleEntry {
     pub source_uri: Url,
     pub revision: u64,
     pub value: snaq_lite_lang::Value,
+    /// True when this handle originated from a non-replayable stream-backed vector.
+    /// Forward-only paging rules should continue to apply even after server-side cache upgrades.
+    pub forward_only: bool,
 }
 
 #[derive(Clone)]
@@ -31,6 +34,16 @@ pub struct ResultHandleRegistry {
 }
 
 impl ResultHandleRegistry {
+    fn is_forward_only_value(value: &snaq_lite_lang::Value) -> bool {
+        matches!(
+            value,
+            snaq_lite_lang::Value::Vector(snaq_lite_lang::VectorValue {
+                inner: snaq_lite_lang::LazyVector::FromInput(_),
+                ..
+            })
+        )
+    }
+
     fn uri_matches_prefix(uri: &str, prefix: &str) -> bool {
         if !uri.starts_with(prefix) {
             return false;
@@ -74,6 +87,7 @@ impl ResultHandleRegistry {
                 handle: handle.clone(),
                 source_uri,
                 revision,
+                forward_only: Self::is_forward_only_value(&value),
                 value,
             },
         );
@@ -96,6 +110,7 @@ impl ResultHandleRegistry {
         };
         entry.revision = revision;
         entry.value = value;
+        // Preserve forward-only contract once established for this handle lineage.
         self.invalidate_cursors_for_handle(handle);
         true
     }
@@ -168,6 +183,10 @@ impl ResultHandleRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.by_handle.is_empty() && self.by_uri.is_empty() && self.cursors.is_empty()
+    }
+
+    pub fn len_handles(&self) -> usize {
+        self.by_handle.len()
     }
 
     fn invalidate_cursors_for_handle(&mut self, handle: &str) {

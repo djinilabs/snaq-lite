@@ -94,6 +94,10 @@ impl LspState {
         !self.documents.is_empty()
     }
 
+    pub fn document_count(&self) -> usize {
+        self.documents.len()
+    }
+
     pub fn force_rebind_canvas_uri(&mut self, uri: &Url) {
         self.active_canvas_id = Some(Self::canvas_id_for_uri(uri));
     }

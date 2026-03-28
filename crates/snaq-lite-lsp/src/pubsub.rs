@@ -279,6 +279,67 @@ pub struct RemoveParamParams {
     pub param_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyGraphPatchParams {
+    pub operations: Vec<GraphPatchOperation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum GraphPatchOperation {
+    SetNodeSource {
+        uri: String,
+        source: String,
+    },
+    Connect {
+        source_uri: String,
+        target_uri: String,
+        target_input_name: String,
+    },
+    Disconnect {
+        target_uri: String,
+        target_input_name: String,
+    },
+    RenameParam {
+        uri: String,
+        param_id: String,
+        new_name: String,
+    },
+    AddParam {
+        uri: String,
+        param_id: String,
+        name: String,
+        type_name: String,
+    },
+    RemoveParam {
+        uri: String,
+        param_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyGraphPatchResponse {
+    pub applied_operations: usize,
+    pub affected_uris: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapSessionParams {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapSessionResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canvas_id: Option<String>,
+    pub open_documents: usize,
+    pub subscriptions: usize,
+    pub widgets: usize,
+    pub result_handles: usize,
+    pub runtime_drained: bool,
+}
+
 // ---- Result summary and fetchResultSlice ----
 
 /// Result type for Completed payload (resultType). Serialized as PascalCase to match frontend (Vector, Map, etc.).

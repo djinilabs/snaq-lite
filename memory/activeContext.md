@@ -2,6 +2,32 @@
 
 ## Just completed
 
+- **Fix graph/applyPatch stale-edge inconsistency after source mutations**
+  - Added integration test `graph_apply_patch_remove_param_prunes_stale_edges` proving `removeParam` via patch previously left stale edges in `exportCanvasDocument`.
+  - `crates/snaq-lite-lsp/src/lib.rs`: `graph_apply_patch` now prunes staged edges during source ops:
+    - `setNodeSource` / `renameParam` / `addParam` reconcile staged target inputs from updated source when parseable.
+    - `removeParam` explicitly disconnects the removed `paramId` in staged graph (even when edited source is temporarily invalid), then reconciles when parseable.
+  - `graph_apply_patch` commit path now also runs `reconcile_graph_for_uri` and `revalidate_related_edge_types` for changed sources before recompute wave.
+  - Follow-up maintainability pass: extracted shared staged reconciliation logic into helper `reconcile_staged_target_inputs_for_source` to remove duplicated parse/reconcile blocks inside `graph_apply_patch`.
+  - Verification green: `cargo test -p snaq-lite-lsp graph_apply_patch_ -- --nocapture`.
+  - Verification green (full): `pnpm check`.
+
+- **Bridge LSP canvas gaps (execution slice 2): wasm running batches + atomic patch API + bootstrap session**
+  - `crates/snaq-lite-lsp/src/lib.rs`: WASM vector subscriptions now emit progressive `Running` payload batches (not empty-only running), followed by `Completed`.
+  - `crates/snaq-lite-lsp/src/pubsub.rs` + `src/lib.rs`: added `snaqlite/graph/applyPatch` with atomic staged operations (`setNodeSource`, `connect`, `disconnect`, `renameParam`, `addParam`, `removeParam`) and one recompute wave per patch.
+  - `crates/snaq-lite-lsp/src/pubsub.rs` + `src/lib.rs`: added `snaqlite/bootstrapSession` to expose runtime snapshot (`canvasId`, open docs, subscriptions, widgets, handles, drained flag) for recovery bootstrap flows.
+  - `crates/snaq-lite-lsp/tests/lsp_integration.rs`: added acceptance tests for applyPatch success, applyPatch rollback-on-error, and bootstrap session state reporting.
+  - `docs/LSP.md`: documented `bootstrapSession`, `graph/applyPatch`, and updated vector subscription running semantics.
+  - Verification green: `cargo test -p snaq-lite-lsp`, `pnpm run lint`, `pnpm test`.
+
+- **Bridge LSP canvas gaps (execution slice 1): rename semantics + forward-only pagination + compatibility unification**
+  - `crates/snaq-lite-lsp/src/lib.rs`: `graph/renameParam` now rewrites safe in-scope input symbol usages in addition to the input declaration; shadowed bindings are preserved.
+  - `crates/snaq-lite-lsp/src/lib.rs` + `src/result_handle_registry.rs`: handle-based `fetchResultSlice` now enforces forward-only rules for non-replayable handle lineages (`offset > 0` requires cursor) and supports sequential continuation with cursor by upgrading first-page reads to replayable cached values.
+  - `crates/snaq-lite-lsp/src/lib.rs`: connect-time and revalidation-time type checks now share a centralized compatibility function (`are_graph_types_compatible`) so graph wiring decisions use one matrix.
+  - `crates/snaq-lite-lsp/tests/lsp_integration.rs`: added coverage for rename usage rewrite with shadowing preservation and forward-only sequential paging behavior.
+  - `docs/LSP.md`: updated `renameParam` semantics and documented forward-only non-replayable handle paging contract.
+  - Verification green: `cargo test -p snaq-lite-lsp`, `pnpm test`, `pnpm run lint`.
+
 - **Phase pass: runtime stream-first input binding + bounded multidimensional buffering**
   - `crates/snaq-lite-lang/src/queries.rs`: native scalar-friendly `InputDecl` binding no longer fully materializes multi-item streams; it now peeks first/second item, preserves scalar behavior for single-item streams, and forwards multi-item streams lazily via a new `FromInput` handle.
   - `crates/snaq-lite-lang/src/queries.rs`: added transpose and outer-product buffer guardrails with explicit fail-fast errors:

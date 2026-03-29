@@ -29,6 +29,8 @@ pub(crate) fn collect_vector_slice_window(
     let known_total = known_lazy_vector_len(&inner).map(|len| len as u64);
     let end = offset.saturating_add(limit);
     let mut stream = snaq_lite_lang::vector_into_stream(db, inner);
+    // Keep collection on the caller thread: deferred vector evaluation can depend on
+    // thread-local runtime state (e.g. closure env lookup for mapped user functions).
     futures::executor::block_on(async move {
         let mut total = 0u64;
         let mut out: Vec<Result<Option<Value>, RunError>> = Vec::with_capacity(limit);

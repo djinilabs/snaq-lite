@@ -3800,7 +3800,7 @@ async fn graph_runtime_recomputes_without_widget_subscriptions() {
 }
 
 #[tokio::test]
-async fn did_change_on_source_with_same_output_recomputes_descendants() {
+async fn did_change_on_source_with_same_output_does_not_recompute_descendants() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
     let server_handle =
@@ -3889,7 +3889,7 @@ async fn did_change_on_source_with_same_output_recomputes_descendants() {
         "expected downstream update after semantic source change to 3"
     );
 
-    // Then perform a non-semantic edit (same numeric output) and assert descendant recompute.
+    // Then perform a non-semantic edit (same numeric output) and assert no descendant recompute.
     let did_change_same_output = serde_json::json!({
         "jsonrpc":"2.0","method":"textDocument/didChange",
         "params":{"textDocument":{"uri":"snaq://graph/src-same.sl","version":3},"contentChanges":[{"text":"( 3 )"}]}
@@ -3916,8 +3916,8 @@ async fn did_change_on_source_with_same_output_recomputes_descendants() {
         }
     }
     assert!(
-        got_descendant_update,
-        "didChange with unchanged source output should recompute downstream widget for canvas URIs"
+        !got_descendant_update,
+        "didChange with unchanged source output must not recompute downstream widget"
     );
     server_handle.abort();
     let _ = server_handle.await;

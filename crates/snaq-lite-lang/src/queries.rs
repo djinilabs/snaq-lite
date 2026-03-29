@@ -3476,6 +3476,26 @@ fn cmp_op_to_binary_op(op: CmpOp) -> VectorBinaryOp {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VectorPairDispatch {
+    ElementWise(VectorOrientation),
+    Outer,
+    RowColumnReduce,
+}
+
+fn classify_vector_pair(left: &VectorValue, right: &VectorValue) -> VectorPairDispatch {
+    match (left.orientation, right.orientation) {
+        (VectorOrientation::Column, VectorOrientation::Column) => {
+            VectorPairDispatch::ElementWise(VectorOrientation::Column)
+        }
+        (VectorOrientation::Row, VectorOrientation::Row) => {
+            VectorPairDispatch::ElementWise(VectorOrientation::Row)
+        }
+        (VectorOrientation::Column, VectorOrientation::Row) => VectorPairDispatch::Outer,
+        (VectorOrientation::Row, VectorOrientation::Column) => VectorPairDispatch::RowColumnReduce,
+    }
+}
+
 /// Compare two values with the same dimension; returns `Value::FuzzyBool`.
 /// Vector×scalar → broadcast (Map); vector×vector → element-wise (ZipMap), outer (Outer), or
 /// row×column reduce-then-compare; scalar×scalar → Bool or Symbolic comparison expr.
@@ -3506,38 +3526,24 @@ fn cmp_values(
         (Value::Vector(left), Value::Vector(right)) => {
             let db = db.ok_or(err(RunErrorKind::UnsupportedVectorOperation))?;
             let bin_op = cmp_op_to_binary_op(op);
-            match (left.orientation, right.orientation) {
-                (VectorOrientation::Column, VectorOrientation::Column) => Ok(Value::Vector(
-                    VectorValue {
-                        inner: LazyVector::ZipMap {
-                            left: Box::new(left.inner.clone()),
-                            right: Box::new(right.inner.clone()),
-                            op: bin_op,
-                        },
-                        orientation: VectorOrientation::Column,
+            match classify_vector_pair(left, right) {
+                VectorPairDispatch::ElementWise(orientation) => Ok(Value::Vector(VectorValue {
+                    inner: LazyVector::ZipMap {
+                        left: Box::new(left.inner.clone()),
+                        right: Box::new(right.inner.clone()),
+                        op: bin_op,
                     },
-                )),
-                (VectorOrientation::Row, VectorOrientation::Row) => Ok(Value::Vector(
-                    VectorValue {
-                        inner: LazyVector::ZipMap {
-                            left: Box::new(left.inner.clone()),
-                            right: Box::new(right.inner.clone()),
-                            op: bin_op,
-                        },
-                        orientation: VectorOrientation::Row,
+                    orientation,
+                })),
+                VectorPairDispatch::Outer => Ok(Value::Vector(VectorValue {
+                    inner: LazyVector::Outer {
+                        left: Box::new(left.inner.clone()),
+                        right: Box::new(right.inner.clone()),
+                        op: bin_op,
                     },
-                )),
-                (VectorOrientation::Column, VectorOrientation::Row) => Ok(Value::Vector(
-                    VectorValue {
-                        inner: LazyVector::Outer {
-                            left: Box::new(left.inner.clone()),
-                            right: Box::new(right.inner.clone()),
-                            op: bin_op,
-                        },
-                        orientation: VectorOrientation::Column,
-                    },
-                )),
-                (VectorOrientation::Row, VectorOrientation::Column) => {
+                    orientation: VectorOrientation::Column,
+                })),
+                VectorPairDispatch::RowColumnReduce => {
                     let (sum_left, left_len) =
                         sum_and_count_vector_stream(db, left.inner.clone(), registry, span)?;
                     let (sum_right, right_len) =
@@ -3728,38 +3734,24 @@ fn add_values(
         }
         (Value::Vector(left), Value::Vector(right)) => {
             let db = db.ok_or(err(RunErrorKind::UnsupportedVectorOperation))?;
-            match (left.orientation, right.orientation) {
-                (VectorOrientation::Column, VectorOrientation::Column) => Ok(Value::Vector(
-                    VectorValue {
-                        inner: LazyVector::ZipMap {
-                            left: Box::new(left.inner.clone()),
-                            right: Box::new(right.inner.clone()),
-                            op: VectorBinaryOp::Add,
-                        },
-                        orientation: VectorOrientation::Column,
+            match classify_vector_pair(left, right) {
+                VectorPairDispatch::ElementWise(orientation) => Ok(Value::Vector(VectorValue {
+                    inner: LazyVector::ZipMap {
+                        left: Box::new(left.inner.clone()),
+                        right: Box::new(right.inner.clone()),
+                        op: VectorBinaryOp::Add,
                     },
-                )),
-                (VectorOrientation::Row, VectorOrientation::Row) => Ok(Value::Vector(
-                    VectorValue {
-                        inner: LazyVector::ZipMap {
-                            left: Box::new(left.inner.clone()),
-                            right: Box::new(right.inner.clone()),
-                            op: VectorBinaryOp::Add,
-                        },
-                        orientation: VectorOrientation::Row,
+                    orientation,
+                })),
+                VectorPairDispatch::Outer => Ok(Value::Vector(VectorValue {
+                    inner: LazyVector::Outer {
+                        left: Box::new(left.inner.clone()),
+                        right: Box::new(right.inner.clone()),
+                        op: VectorBinaryOp::Add,
                     },
-                )),
-                (VectorOrientation::Column, VectorOrientation::Row) => Ok(Value::Vector(
-                    VectorValue {
-                        inner: LazyVector::Outer {
-                            left: Box::new(left.inner.clone()),
-                            right: Box::new(right.inner.clone()),
-                            op: VectorBinaryOp::Add,
-                        },
-                        orientation: VectorOrientation::Column,
-                    },
-                )),
-                (VectorOrientation::Row, VectorOrientation::Column) => {
+                    orientation: VectorOrientation::Column,
+                })),
+                VectorPairDispatch::RowColumnReduce => {
                     let (sum_left, left_len) =
                         sum_and_count_vector_stream(db, left.inner.clone(), registry, span)?;
                     let (sum_right, right_len) =
@@ -3882,38 +3874,24 @@ fn sub_values(
         }
         (Value::Vector(left), Value::Vector(right)) => {
             let db = db.ok_or(err(RunErrorKind::UnsupportedVectorOperation))?;
-            match (left.orientation, right.orientation) {
-                (VectorOrientation::Column, VectorOrientation::Column) => Ok(Value::Vector(
-                    VectorValue {
-                        inner: LazyVector::ZipMap {
-                            left: Box::new(left.inner.clone()),
-                            right: Box::new(right.inner.clone()),
-                            op: VectorBinaryOp::Sub,
-                        },
-                        orientation: VectorOrientation::Column,
+            match classify_vector_pair(left, right) {
+                VectorPairDispatch::ElementWise(orientation) => Ok(Value::Vector(VectorValue {
+                    inner: LazyVector::ZipMap {
+                        left: Box::new(left.inner.clone()),
+                        right: Box::new(right.inner.clone()),
+                        op: VectorBinaryOp::Sub,
                     },
-                )),
-                (VectorOrientation::Row, VectorOrientation::Row) => Ok(Value::Vector(
-                    VectorValue {
-                        inner: LazyVector::ZipMap {
-                            left: Box::new(left.inner.clone()),
-                            right: Box::new(right.inner.clone()),
-                            op: VectorBinaryOp::Sub,
-                        },
-                        orientation: VectorOrientation::Row,
+                    orientation,
+                })),
+                VectorPairDispatch::Outer => Ok(Value::Vector(VectorValue {
+                    inner: LazyVector::Outer {
+                        left: Box::new(left.inner.clone()),
+                        right: Box::new(right.inner.clone()),
+                        op: VectorBinaryOp::Sub,
                     },
-                )),
-                (VectorOrientation::Column, VectorOrientation::Row) => Ok(Value::Vector(
-                    VectorValue {
-                        inner: LazyVector::Outer {
-                            left: Box::new(left.inner.clone()),
-                            right: Box::new(right.inner.clone()),
-                            op: VectorBinaryOp::Sub,
-                        },
-                        orientation: VectorOrientation::Column,
-                    },
-                )),
-                (VectorOrientation::Row, VectorOrientation::Column) => {
+                    orientation: VectorOrientation::Column,
+                })),
+                VectorPairDispatch::RowColumnReduce => {
                     let (sum_left, left_len) =
                         sum_and_count_vector_stream(db, left.inner.clone(), registry, span)?;
                     let (sum_right, right_len) =
@@ -4006,38 +3984,24 @@ fn mul_values(
         }
         (Value::Vector(left), Value::Vector(right)) => {
             let db = db.ok_or(err(RunErrorKind::UnsupportedVectorOperation))?;
-            match (left.orientation, right.orientation) {
-                (VectorOrientation::Column, VectorOrientation::Column) => Ok(Value::Vector(
-                    VectorValue {
-                        inner: LazyVector::ZipMap {
-                            left: Box::new(left.inner.clone()),
-                            right: Box::new(right.inner.clone()),
-                            op: VectorBinaryOp::Mul,
-                        },
-                        orientation: VectorOrientation::Column,
+            match classify_vector_pair(left, right) {
+                VectorPairDispatch::ElementWise(orientation) => Ok(Value::Vector(VectorValue {
+                    inner: LazyVector::ZipMap {
+                        left: Box::new(left.inner.clone()),
+                        right: Box::new(right.inner.clone()),
+                        op: VectorBinaryOp::Mul,
                     },
-                )),
-                (VectorOrientation::Row, VectorOrientation::Row) => Ok(Value::Vector(
-                    VectorValue {
-                        inner: LazyVector::ZipMap {
-                            left: Box::new(left.inner.clone()),
-                            right: Box::new(right.inner.clone()),
-                            op: VectorBinaryOp::Mul,
-                        },
-                        orientation: VectorOrientation::Row,
+                    orientation,
+                })),
+                VectorPairDispatch::Outer => Ok(Value::Vector(VectorValue {
+                    inner: LazyVector::Outer {
+                        left: Box::new(left.inner.clone()),
+                        right: Box::new(right.inner.clone()),
+                        op: VectorBinaryOp::Mul,
                     },
-                )),
-                (VectorOrientation::Column, VectorOrientation::Row) => Ok(Value::Vector(
-                    VectorValue {
-                        inner: LazyVector::Outer {
-                            left: Box::new(left.inner.clone()),
-                            right: Box::new(right.inner.clone()),
-                            op: VectorBinaryOp::Mul,
-                        },
-                        orientation: VectorOrientation::Column,
-                    },
-                )),
-                (VectorOrientation::Row, VectorOrientation::Column) => {
+                    orientation: VectorOrientation::Column,
+                })),
+                VectorPairDispatch::RowColumnReduce => {
                     dot_product_stream(db, left.inner.clone(), right.inner.clone(), registry, span)
                 }
             }
@@ -4116,38 +4080,24 @@ fn div_values(
         }
         (Value::Vector(left), Value::Vector(right)) => {
             let _db = db.ok_or(err(RunErrorKind::UnsupportedVectorOperation))?;
-            match (left.orientation, right.orientation) {
-                (VectorOrientation::Column, VectorOrientation::Column) => Ok(Value::Vector(
-                    VectorValue {
-                        inner: LazyVector::ZipMap {
-                            left: Box::new(left.inner.clone()),
-                            right: Box::new(right.inner.clone()),
-                            op: VectorBinaryOp::Div,
-                        },
-                        orientation: VectorOrientation::Column,
+            match classify_vector_pair(left, right) {
+                VectorPairDispatch::ElementWise(orientation) => Ok(Value::Vector(VectorValue {
+                    inner: LazyVector::ZipMap {
+                        left: Box::new(left.inner.clone()),
+                        right: Box::new(right.inner.clone()),
+                        op: VectorBinaryOp::Div,
                     },
-                )),
-                (VectorOrientation::Row, VectorOrientation::Row) => Ok(Value::Vector(
-                    VectorValue {
-                        inner: LazyVector::ZipMap {
-                            left: Box::new(left.inner.clone()),
-                            right: Box::new(right.inner.clone()),
-                            op: VectorBinaryOp::Div,
-                        },
-                        orientation: VectorOrientation::Row,
+                    orientation,
+                })),
+                VectorPairDispatch::Outer => Ok(Value::Vector(VectorValue {
+                    inner: LazyVector::Outer {
+                        left: Box::new(left.inner.clone()),
+                        right: Box::new(right.inner.clone()),
+                        op: VectorBinaryOp::Div,
                     },
-                )),
-                (VectorOrientation::Column, VectorOrientation::Row) => Ok(Value::Vector(
-                    VectorValue {
-                        inner: LazyVector::Outer {
-                            left: Box::new(left.inner.clone()),
-                            right: Box::new(right.inner.clone()),
-                            op: VectorBinaryOp::Div,
-                        },
-                        orientation: VectorOrientation::Column,
-                    },
-                )),
-                (VectorOrientation::Row, VectorOrientation::Column) => {
+                    orientation: VectorOrientation::Column,
+                })),
+                VectorPairDispatch::RowColumnReduce => {
                     let _ = registry;
                     Err(err(RunErrorKind::UnsupportedVectorOperation))
                 }

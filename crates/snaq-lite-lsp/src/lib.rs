@@ -205,7 +205,7 @@ impl LanguageServer for SnaqLiteBackend {
         drop(state);
         self.reconcile_graph_for_uri(&uri).await;
         let revalidated_targets = self.revalidate_related_edge_types(&uri).await;
-        let force_downstream = uri.scheme() == "snaq" || !revalidated_targets.is_empty();
+        let force_downstream = !revalidated_targets.is_empty();
         let changed_roots = Self::recompute_roots_for_change(&uri, revalidated_targets);
         self.recompute_and_push(&changed_roots, force_downstream).await;
         self.drain_notifications().await;
@@ -236,7 +236,7 @@ impl LanguageServer for SnaqLiteBackend {
         drop(state);
         self.reconcile_graph_for_uri(&uri).await;
         let revalidated_targets = self.revalidate_related_edge_types(&uri).await;
-        let force_downstream = uri.scheme() == "snaq" || !revalidated_targets.is_empty();
+        let force_downstream = !revalidated_targets.is_empty();
         let changed_roots = Self::recompute_roots_for_change(&uri, revalidated_targets);
         self.recompute_and_push(&changed_roots, force_downstream).await;
         self.drain_notifications().await;
@@ -2831,13 +2831,14 @@ impl SnaqLiteBackend {
                 PathSegment::Key(k) => serde_json::json!(k),
             })
             .collect();
+        let db_for_slice_work = {
+            let state = self.state.lock().await;
+            state.db().clone()
+        };
 
         let (elements, total_count, supports_cursor, explicit_has_more) = {
             let sub_value = {
-                let db_for_path = {
-                    let state = self.state.lock().await;
-                    state.db().clone()
-                };
+                let db_for_path = db_for_slice_work.clone();
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     let value_for_path = value.clone();
@@ -2890,12 +2891,8 @@ impl SnaqLiteBackend {
                             // Stream once to compute both total count and requested window.
                             // Intentionally evaluated on the current runtime thread: deferred
                             // vector elements can depend on thread-local evaluation/closure state.
-                            let db_for_collect = {
-                                let state = self.state.lock().await;
-                                state.db().clone()
-                            };
                             let (total_count, slice_vec) = vector_slice::collect_vector_slice_window(
-                                &db_for_collect,
+                                &db_for_slice_work,
                                 v.inner.clone(),
                                 offset,
                                 limit,
@@ -2904,10 +2901,7 @@ impl SnaqLiteBackend {
                         }
                     };
 
-                    let db_for_elements = {
-                        let state = self.state.lock().await;
-                        state.db().clone()
-                    };
+                    let db_for_elements = db_for_slice_work.clone();
                     let elements: Vec<serde_json::Value> = slice_vec
                         .into_iter()
                         .enumerate()
@@ -2934,10 +2928,7 @@ impl SnaqLiteBackend {
                     let offset = (params.offset as usize).min(entries.len());
                     let end = (offset + params.limit as usize).min(entries.len());
                     let slice_entries = &entries[offset..end];
-                    let db_for_elements = {
-                        let state = self.state.lock().await;
-                        state.db().clone()
-                    };
+                    let db_for_elements = db_for_slice_work.clone();
                     let elements: Vec<serde_json::Value> = slice_entries
                         .iter()
                         .map(|(k, val)| {
@@ -3087,7 +3078,6 @@ impl SnaqLiteBackend {
                 .collect();
             (projections, state.unit_registry().clone())
         };
-
         run_node_with_graph_inputs_impl(
             &projections,
             &unit_registry,
@@ -3916,8 +3906,13 @@ mod tests {
             input_name_by_param_id: std::collections::HashMap::new(),
         }];
 
-        let result =
-            run_node_with_graph_inputs_impl(&projections, &unit_registry, &sink_uri, None, None);
+        let result = run_node_with_graph_inputs_impl(
+            &projections,
+            &unit_registry,
+            &sink_uri,
+            None,
+            None,
+        );
         assert!(
             result.is_ok(),
             "expected source fallback to avoid unresolved-root panic"

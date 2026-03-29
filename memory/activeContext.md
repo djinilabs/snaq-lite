@@ -2,6 +2,37 @@
 
 ## Just completed
 
+- **Review-and-improve stabilization pass (LSP runtime cleanup):**
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - Removed incomplete session-cache plumbing from production paths (`SnaqLiteBackend` field, lifecycle cleanup hooks, graph-run parameters/flags, and service wiring).
+    - Removed session-cache-only unit tests tied to the partial runtime reuse attempt.
+    - Preserved resolved-root execution fallback behavior and all existing graph semantics.
+  - Why:
+    - The partial per-node session reuse path introduced unstable integration behavior and added accidental complexity without safe end-to-end enablement.
+    - Cleanup keeps runtime deterministic while retaining previously completed laziness/recompute improvements.
+  - Verification green:
+    - `cargo test -p snaq-lite-lsp`
+    - `cargo test -p snaq-lite-lang`
+    - `pnpm run lint`
+
+- **Lazy runtime gap-closure execution (plan phases 1/3/5/4 + verification):**
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - `didOpen`/`didChange` no longer force downstream traversal for all `snaq://` edits; forced waves now come from topology/type revalidation only (`force_downstream = !revalidated_targets.is_empty()`), with semantic-change gating preserved in `recompute_and_push`.
+    - `fetchResultSlice` now clones DB once per request and reuses it through path resolution/window collection/element formatting, reducing async lock hold time in hot slice paths.
+    - Added session-cache scaffolding for future per-node runtime reuse lifecycle (create/retain/cleanup hooks + regression helper test), while keeping current run semantics stable.
+  - `crates/snaq-lite-lsp/tests/lsp_integration.rs`:
+    - Updated recompute regression to `did_change_on_source_with_same_output_does_not_recompute_descendants`.
+  - `crates/snaq-lite-lang/src/queries.rs`:
+    - Added shared vector orientation dispatch helper (`classify_vector_pair`) and migrated `cmp/add/sub/mul/div` vector-vector branches to it, reducing duplicated orientation matching logic without changing lazy stream operators.
+  - `crates/snaq-lite-lsp/src/vector_slice.rs`:
+    - Documented required same-thread blocking rationale for slice window collection due thread-local runtime state constraints.
+  - Verification green:
+    - `cargo test -p snaq-lite-lang`
+    - `cargo test -p snaq-lite-lsp`
+    - `cargo test -p snaq-lite-lsp --test lsp_integration`
+    - `pnpm test`
+    - `pnpm run lint`
+
 - **Canvas runtime gap-closure execution (backend + frontend + tests + docs):**
   - `crates/snaq-lite-lsp/src/pubsub.rs`:
     - Extended `GraphPatchOperation` with lifecycle ops: `addNode { uri, source, version? }`, `removeNode { uri }`.

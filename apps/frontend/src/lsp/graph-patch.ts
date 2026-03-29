@@ -80,6 +80,8 @@ export function invertOperations(operations: GraphPatchOperation[]): GraphPatchO
           targetInputName: operation.targetInputName,
         })
         break
+      case 'addNode':
+      case 'removeNode':
       case 'disconnect':
         // Disconnect inversion needs source context; caller should provide explicit rollback for this case.
         break

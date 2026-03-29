@@ -2,6 +2,46 @@
 
 ## Just completed
 
+- **Canvas runtime gap-closure execution (backend + frontend + tests + docs):**
+  - `crates/snaq-lite-lsp/src/pubsub.rs`:
+    - Extended `GraphPatchOperation` with lifecycle ops: `addNode { uri, source, version? }`, `removeNode { uri }`.
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - `graph/applyPatch` now stages/commits node lifecycle mutations atomically, including:
+      - document insertion/removal,
+      - edge cleanup on remove,
+      - node-result/result-handle cleanup,
+      - cancellation fanout for subscriptions/widgets (`reason: "Node removed"`),
+      - affected URI reporting including removed nodes.
+    - Canvas-source mutation flows now force descendant recompute for `didOpen`/`didChange` on `snaq://` URIs and param helper source updates.
+    - `graph/applyPatch` mutation waves now force downstream recompute.
+  - `crates/snaq-lite-lsp/tests/lsp_integration.rs`:
+    - Added acceptance tests:
+      - `graph_apply_patch_add_node_commits_atomically`
+      - `graph_apply_patch_remove_node_cleans_edges_and_handles`
+      - `graph_apply_patch_remove_node_cancels_subscriptions_and_widgets`
+    - Updated descendant policy regression to:
+      - `did_change_on_source_with_same_output_recomputes_descendants`
+  - Frontend architecture extraction:
+    - Added `apps/frontend/src/canvas/document-state.ts` (+ tests) for node/edge domain mutations.
+    - Added `apps/frontend/src/lsp/subscription-manager.ts` (+ tests) for subscription URI/id mapping + per-handle cursor keys.
+    - Updated `apps/frontend/src/routes/index.tsx` to use extracted domain helpers and added arbitrary edge/node controls (`connect-selected`, `disconnect-selected`, `add-node`, `remove-node`).
+  - Frontend E2E coverage:
+    - `apps/frontend/e2e/home.spec.ts` now validates arbitrary edge controls and node lifecycle actions.
+  - Documentation:
+    - Updated `docs/LSP.md` for node lifecycle patch ops and node-removal cancellation semantics.
+    - Added `docs/CANVAS_RUNTIME.md` orchestration guide.
+  - Verification green:
+    - `cargo test -p snaq-lite-lsp --test lsp_integration`
+    - `cargo test -p snaq-lite-lsp`
+    - `pnpm -C apps/frontend run test`
+    - `pnpm -C apps/frontend run lint`
+    - `pnpm -C apps/frontend run build`
+    - `pnpm -C apps/frontend run smoketest`
+    - `pnpm test`
+    - `pnpm run lint`
+    - `pnpm build`
+    - `pnpm smoketest`
+
 - **Post-implementation review + stabilization pass (lazy-streaming closure):**
   - `crates/snaq-lite-lsp/src/lib.rs`:
     - Added explicit inline rationale around intentional same-thread blocking in `resolve_path_blocking` and slice-window collection path, documenting thread-local closure/eval-state constraints that make naive cross-thread offloading unsafe.
@@ -761,3 +801,35 @@
     - `pnpm -C apps/frontend test`
     - `pnpm -C apps/frontend lint`
     - `pnpm -C apps/frontend build`
+
+- **Review-and-improve closure pass (canvas runtime UI):**
+  - Replaced hard-coded param mutation target (`nodes[1]`) with selected-node targeting for rename/add/remove param actions in `apps/frontend/src/routes/index.tsx`.
+  - Updated subscribe flow from downstream-only chain logic to visible-node subscriptions (`subscribeVisibleNodes`) so result routing is node-centric across arbitrary topologies.
+  - Tightened Playwright regression in `apps/frontend/e2e/home.spec.ts`:
+    - disconnect assertion now requires successful `Disconnected snaq://` status,
+    - arbitrary topology scenario now verifies add-param action on a selected non-primary node.
+  - Verification green:
+    - `pnpm -C apps/frontend test`
+    - `pnpm -C apps/frontend run lint`
+    - `pnpm -C apps/frontend run build`
+    - `pnpm test`
+    - `pnpm run lint`
+    - `pnpm smoketest`
+
+- **Fix: removeSelectedNode subscription cleanup parity**
+  - Verified issue in `apps/frontend/src/routes/index.tsx`: `removeSelectedNode` unsubscribed and removed only `subscriptionUriByIdRef` entry, leaving stale `nodeSubscriptionsRef` + `nodeSubscriptionsByUri` entries for the removed URI.
+  - Fixed `removeSelectedNode` to use `removeNodeSubscriptionByUri` and atomically update all three stores (`subscriptionUriByIdRef.current`, `nodeSubscriptionsRef.current`, `setNodeSubscriptionsByUri`), matching other subscription cleanup paths.
+  - Verification green:
+    - `pnpm -C apps/frontend test`
+    - `pnpm -C apps/frontend run lint`
+    - `pnpm check`
+
+- **Fix: removeSelectedNode edge cleanup URI mismatch**
+  - Verified issue in `apps/frontend/src/routes/index.tsx`: `removeSelectedNode` removed local graph state using `selectedNodeUri` (template URI), while edges can be stored with canvas-qualified URIs (`canvasUri(...)`) causing orphaned edges when canvas host differs from `canvas-a`.
+  - Updated `removeSelectedNode` to perform node/edge cleanup in two passes:
+    - remove by template URI (keeps node deletion behavior),
+    - remove by canvas-qualified URI (cleans canvas-scoped edges).
+  - Verification green:
+    - `pnpm -C apps/frontend test`
+    - `pnpm -C apps/frontend run lint`
+    - `pnpm check`

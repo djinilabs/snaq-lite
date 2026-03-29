@@ -100,9 +100,10 @@ Notifications can include metadata fields:
 
 ### Reactive updates and lifecycle
 
-- **Document change** — On `didChange` / `didOpen` for a URI, the server reconciles graph inputs, recomputes impacted nodes, and pushes fresh `Completed` / `Error` updates to active subscriptions/widgets for affected nodes. Descendants are reevaluated during the mutation wave so dependent subscriptions/widgets observe consistent updates.
+- **Document change** — On `didChange` / `didOpen` for canvas URIs, the server reconciles graph inputs, recomputes impacted nodes, and pushes fresh `Completed` / `Error` updates to active subscriptions/widgets for affected nodes. Descendants are always reevaluated during the mutation wave so dependent subscriptions/widgets observe consistent updates, even when source edits preserve the same semantic output.
 - **Document close** — On `didClose` for a URI, the server removes the document from state, removes graph edges where the URI is source/target, clears cached node result, cancels subscriptions/widgets bound to that URI (`Cancelled` with reason `"Document closed"`), and recomputes downstream dependents.
 - **Edge removal** — When `snaqlite/graph/disconnect` is called, the server removes the edge and invalidates all widget subscriptions for the target URI (cancel and send `widgetDataUpdate` Cancelled). The UI triggers disconnect when the user deletes an edge (e.g. select edge and Backspace).
+- **Node removal (patch lifecycle)** — When `snaqlite/graph/applyPatch` includes `removeNode`, the server removes the node document and all attached edges, clears node-result/handle state, cancels affected subscriptions/widgets (`reason: "Node removed"`), and recomputes remaining dependents in the same mutation wave.
 - Connect failure (type mismatch) does not add an edge, so no invalidation is needed.
 
 ### Namespace reset (soft canvas isolation)
@@ -132,7 +133,9 @@ Optional helpers for UI ergonomics while keeping source text canonical:
 - `snaqlite/graph/renameParam` with `{ uri, paramId, newName }`
 - `snaqlite/graph/addParam` with `{ uri, paramId, name, typeName }`
 - `snaqlite/graph/removeParam` with `{ uri, paramId }`
-- `snaqlite/graph/applyPatch` with `{ operations[] }` for atomic multi-op graph/source updates in one recompute wave
+- `snaqlite/graph/applyPatch` with `{ operations[] }` for atomic multi-op graph/source updates in one recompute wave:
+  - node lifecycle ops: `addNode { uri, source, version? }`, `removeNode { uri }`
+  - graph/source ops: `setNodeSource`, `connect`, `disconnect`, `renameParam`, `addParam`, `removeParam`
 
 `renameParam` updates the input declaration and also rewrites safe in-scope identifier usages in the same block body. Shadowed bindings are not rewritten.
 

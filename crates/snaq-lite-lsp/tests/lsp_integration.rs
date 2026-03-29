@@ -3800,7 +3800,7 @@ async fn graph_runtime_recomputes_without_widget_subscriptions() {
 }
 
 #[tokio::test]
-async fn did_change_on_source_with_same_output_does_not_recompute_descendants() {
+async fn did_change_on_source_with_same_output_recomputes_descendants() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
     let server_handle =
@@ -3889,7 +3889,7 @@ async fn did_change_on_source_with_same_output_does_not_recompute_descendants() 
         "expected downstream update after semantic source change to 3"
     );
 
-    // Then perform a non-semantic edit (same numeric output) and assert no descendant recompute.
+    // Then perform a non-semantic edit (same numeric output) and assert descendant recompute.
     let did_change_same_output = serde_json::json!({
         "jsonrpc":"2.0","method":"textDocument/didChange",
         "params":{"textDocument":{"uri":"snaq://graph/src-same.sl","version":3},"contentChanges":[{"text":"( 3 )"}]}
@@ -3916,8 +3916,8 @@ async fn did_change_on_source_with_same_output_does_not_recompute_descendants() 
         }
     }
     assert!(
-        !got_descendant_update,
-        "didChange with unchanged source output should not recompute downstream widget"
+        got_descendant_update,
+        "didChange with unchanged source output should recompute downstream widget for canvas URIs"
     );
     server_handle.abort();
     let _ = server_handle.await;
@@ -7002,6 +7002,290 @@ async fn canvas_revision_and_layout_roundtrip_and_patch_bump_contract() {
     assert_eq!(
         v["result"]["canvasDocument"]["layout"]["viewport"]["x"].as_i64(),
         Some(10)
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn graph_apply_patch_add_node_commits_atomically() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://patch-add/source.sl", "1", 1).await;
+
+    let apply_req = serde_json::json!({
+        "jsonrpc":"2.0","id":901,"method":"snaqlite/graph/applyPatch",
+        "params":{"operations":[
+            {"op":"addNode","uri":"snaq://patch-add/target.sl","source":"input x@p1: Numeric\n$x + 1","version":1},
+            {"op":"connect","sourceUri":"snaq://patch-add/source.sl","targetUri":"snaq://patch-add/target.sl","targetInputName":"p1"}
+        ]}
+    });
+    client_w
+        .write_all(&lsp_message(&apply_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 901).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "applyPatch should succeed: {v}");
+
+    let export_req = serde_json::json!({
+        "jsonrpc":"2.0","id":902,"method":"snaqlite/graph/exportCanvasDocument","params":{}
+    });
+    client_w
+        .write_all(&lsp_message(&export_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 902).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "export should succeed: {v}");
+    let nodes = v["result"]["canvasDocument"]["nodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let edges = v["result"]["canvasDocument"]["edges"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        nodes.iter().any(|n| n["uri"].as_str() == Some("snaq://patch-add/target.sl")),
+        "added node should exist in exported snapshot"
+    );
+    assert!(
+        edges.iter().any(|e| {
+            e["sourceUri"].as_str() == Some("snaq://patch-add/source.sl")
+                && e["targetUri"].as_str() == Some("snaq://patch-add/target.sl")
+                && e["targetParamId"].as_str() == Some("p1")
+        }),
+        "connect operation should be committed atomically with addNode"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn graph_apply_patch_remove_node_cleans_edges_and_handles() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://patch-remove/source.sl", "[1,2,3]", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://patch-remove/target.sl",
+        "input x@p1: Vector\n$x",
+        1,
+    )
+    .await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":903,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://patch-remove/source.sl","targetUri":"snaq://patch-remove/target.sl","targetInputName":"p1"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 903).await;
+
+    let subscribe_req = serde_json::json!({
+        "jsonrpc":"2.0","id":904,"method":"snaqlite/subscribeNode",
+        "params":{"sourceUri":"snaq://patch-remove/source.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&subscribe_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 904).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let handle = v["result"]["resultHandle"]
+        .as_str()
+        .expect("subscribeNode should return resultHandle")
+        .to_string();
+
+    let remove_req = serde_json::json!({
+        "jsonrpc":"2.0","id":905,"method":"snaqlite/graph/applyPatch",
+        "params":{"operations":[{"op":"removeNode","uri":"snaq://patch-remove/source.sl"}]}
+    });
+    client_w
+        .write_all(&lsp_message(&remove_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 905).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "removeNode patch should succeed: {v}");
+
+    let export_req = serde_json::json!({
+        "jsonrpc":"2.0","id":906,"method":"snaqlite/graph/exportCanvasDocument","params":{}
+    });
+    client_w
+        .write_all(&lsp_message(&export_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 906).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let nodes = v["result"]["canvasDocument"]["nodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let edges = v["result"]["canvasDocument"]["edges"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !nodes.iter().any(|n| n["uri"].as_str() == Some("snaq://patch-remove/source.sl")),
+        "removed node should not appear in exported snapshot"
+    );
+    assert!(
+        !edges.iter().any(|e| {
+            e["sourceUri"].as_str() == Some("snaq://patch-remove/source.sl")
+                || e["targetUri"].as_str() == Some("snaq://patch-remove/source.sl")
+        }),
+        "all edges for removed node should be dropped"
+    );
+
+    let slice_req = serde_json::json!({
+        "jsonrpc":"2.0","id":907,"method":"snaqlite/graph/fetchResultSlice",
+        "params":{"resultHandle":handle,"path":[],"offset":0,"limit":2}
+    });
+    client_w
+        .write_all(&lsp_message(&slice_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 907).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        v.get("error").is_some(),
+        "fetchResultSlice should fail after removed node handle cleanup: {v}"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn graph_apply_patch_remove_node_cancels_subscriptions_and_widgets() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://patch-cancel/node.sl", "[1,2,3]", 1).await;
+
+    let subscribe_node_req = serde_json::json!({
+        "jsonrpc":"2.0","id":908,"method":"snaqlite/subscribeNode",
+        "params":{"sourceUri":"snaq://patch-cancel/node.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&subscribe_node_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 908).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let subscription_id = v["result"]["subscriptionId"]
+        .as_str()
+        .expect("subscription id")
+        .to_string();
+
+    let subscribe_widget_req = serde_json::json!({
+        "jsonrpc":"2.0","id":909,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"widget-remove","sourceUri":"snaq://patch-cancel/node.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&subscribe_widget_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 909).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "subscribeWidget should succeed: {v}");
+
+    let remove_req = serde_json::json!({
+        "jsonrpc":"2.0","id":910,"method":"snaqlite/graph/applyPatch",
+        "params":{"operations":[{"op":"removeNode","uri":"snaq://patch-cancel/node.sl"}]}
+    });
+    client_w
+        .write_all(&lsp_message(&remove_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let mut saw_sub_cancelled = false;
+    let mut saw_widget_cancelled = false;
+    loop {
+        let body = timeout(Duration::from_secs(5), read_one_lsp_message_async(&mut client_r))
+            .await
+            .expect("timeout waiting for removeNode response/notifications")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/publishNodeResult")
+            && v["params"]["subscriptionId"].as_str() == Some(subscription_id.as_str())
+            && v["params"]["status"].as_str() == Some("Cancelled")
+            && v["params"]["data"]["reason"].as_str() == Some("Node removed")
+        {
+            saw_sub_cancelled = true;
+        }
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["widgetId"].as_str() == Some("widget-remove")
+            && v["params"]["status"].as_str() == Some("Cancelled")
+            && v["params"]["payload"]["reason"].as_str() == Some("Node removed")
+        {
+            saw_widget_cancelled = true;
+        }
+        if v.get("id").and_then(|id| id.as_u64()) == Some(910) {
+            assert!(
+                v.get("error").is_none(),
+                "removeNode patch should succeed: {v}"
+            );
+            break;
+        }
+    }
+
+    let wait_result = timeout(Duration::from_secs(5), async {
+        while !saw_sub_cancelled || !saw_widget_cancelled {
+            let body = read_one_lsp_message_async(&mut client_r).await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/publishNodeResult")
+                && v["params"]["subscriptionId"].as_str() == Some(subscription_id.as_str())
+                && v["params"]["status"].as_str() == Some("Cancelled")
+                && v["params"]["data"]["reason"].as_str() == Some("Node removed")
+            {
+                saw_sub_cancelled = true;
+            }
+            if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+                && v["params"]["widgetId"].as_str() == Some("widget-remove")
+                && v["params"]["status"].as_str() == Some("Cancelled")
+                && v["params"]["payload"]["reason"].as_str() == Some("Node removed")
+            {
+                saw_widget_cancelled = true;
+            }
+        }
+    })
+    .await;
+    assert!(
+        wait_result.is_ok(),
+        "should receive Cancelled notifications for removed node subscriptions/widgets"
     );
 
     server_handle.abort();

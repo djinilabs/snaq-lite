@@ -254,6 +254,15 @@ pub struct ApplyGraphPatchParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum GraphPatchOperation {
+    AddNode {
+        uri: String,
+        source: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        version: Option<i32>,
+    },
+    RemoveNode {
+        uri: String,
+    },
     SetNodeSource {
         uri: String,
         source: String,

@@ -91,6 +91,8 @@ export interface WidgetDataUpdateParams {
 }
 
 export type GraphPatchOperation =
+  | { op: 'addNode'; uri: string; source: string; version?: number }
+  | { op: 'removeNode'; uri: string }
   | { op: 'setNodeSource'; uri: string; source: string }
   | {
       op: 'connect'

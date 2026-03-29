@@ -19,6 +19,13 @@ import {
   patchCanvasNodeSource,
   toCanvasUri,
 } from '../lsp/canvas-runtime'
+import {
+  addCanvasNode,
+  removeCanvasEdge,
+  removeCanvasNode,
+  upsertCanvasEdge,
+  type CanvasDocumentState,
+} from '../canvas/document-state'
 import type {
   NodeSignatureUpdatedParams,
   PublishNodeResultParams,
@@ -30,6 +37,11 @@ import {
   resolveNodeUriFromPublish,
   upsertNodeSubscription,
 } from '../lsp/node-runtime-state'
+import {
+  cursorKey,
+  registerNodeSubscription,
+  removeNodeSubscriptionByUri,
+} from '../lsp/subscription-manager'
 
 export const Route = createFileRoute('/')({
   component: HomePage,
@@ -57,6 +69,10 @@ function HomePage() {
     },
   ])
   const [edges, setEdges] = useState<CanvasEdge[]>([])
+  const [selectedNodeUri, setSelectedNodeUri] = useState('snaq://canvas-a/node-1.sl')
+  const [selectedSourceUri, setSelectedSourceUri] = useState('snaq://canvas-a/node-1.sl')
+  const [selectedTargetUri, setSelectedTargetUri] = useState('snaq://canvas-a/node-2.sl')
+  const [selectedTargetParamId, setSelectedTargetParamId] = useState('p1')
   const [resultHandle, setResultHandle] = useState<string>()
   const [slice, setSlice] = useState<string>('[]')
   const [newParamName, setNewParamName] = useState('x2')
@@ -123,9 +139,28 @@ function HomePage() {
     nodesRef.current = nodes
   }, [nodes])
 
-  function pathKey(resultHandleValue: string, path: Array<number | string> = []): string {
-    return `${resultHandleValue}:${JSON.stringify(path)}`
-  }
+  useEffect(() => {
+    if (!nodes.some((node) => node.uri === selectedNodeUri) && nodes[0]) {
+      setSelectedNodeUri(nodes[0].uri)
+    }
+    if (!nodes.some((node) => node.uri === selectedSourceUri) && nodes[0]) {
+      setSelectedSourceUri(nodes[0].uri)
+    }
+    if (!nodes.some((node) => node.uri === selectedTargetUri) && nodes[1]) {
+      setSelectedTargetUri(nodes[1].uri)
+    }
+  }, [nodes, selectedNodeUri, selectedSourceUri, selectedTargetUri])
+
+  useEffect(() => {
+    const params = nodes.find((node) => node.uri === selectedTargetUri)?.params ?? []
+    if (params.length === 0) {
+      setSelectedTargetParamId('p1')
+      return
+    }
+    if (!params.some((param) => param.paramId === selectedTargetParamId)) {
+      setSelectedTargetParamId(params[0].paramId)
+    }
+  }, [nodes, selectedTargetUri, selectedTargetParamId])
 
   function handlePublishNodeResult(notificationParams: unknown): void {
     const params = (notificationParams ?? {}) as PublishNodeResultParams
@@ -244,12 +279,20 @@ function HomePage() {
     setStatus(message)
   }
 
+  function selectedNodeInfo(currentNodes: CanvasNode[]): { index: number; node: CanvasNode } | undefined {
+    const index = currentNodes.findIndex((node) => node.uri === selectedNodeUri)
+    if (index < 0) {
+      return undefined
+    }
+    return { index, node: currentNodes[index] }
+  }
+
   async function connectNodes(targetCanvasId = canvasId) {
     const client = clientRef.current
     if (!client || nodes.length < 2) {
       return
     }
-    const nextEdges: CanvasEdge[] = []
+    let nextDocument: CanvasDocumentState = { nodes, edges: [] }
     for (let index = 1; index < nodes.length; index += 1) {
       const sourceUri = canvasUri(nodes[index - 1].uri, targetCanvasId)
       const targetUri = canvasUri(nodes[index].uri, targetCanvasId)
@@ -259,15 +302,17 @@ function HomePage() {
         targetUri,
         targetParamId,
       })
-      nextEdges.push({
+      nextDocument = upsertCanvasEdge(nextDocument, {
         sourceUri,
         targetUri,
         targetParamId,
       })
       await refreshSubscriptionForUri(targetUri)
     }
-    setEdges(nextEdges)
-    safeSetStatus(`Connected ${nextEdges.length} edge(s) across ${nodes.length} node(s) (${targetCanvasId})`)
+    setEdges(nextDocument.edges)
+    safeSetStatus(
+      `Connected ${nextDocument.edges.length} edge(s) across ${nodes.length} node(s) (${targetCanvasId})`,
+    )
   }
 
   async function disconnectNodes(targetCanvasId = canvasId) {
@@ -282,7 +327,17 @@ function HomePage() {
         targetParamId: nodes[index].params[0]?.paramId ?? 'p1',
       })
     }
-    setEdges([])
+    setEdges((current) => {
+      let next: CanvasDocumentState = { nodes, edges: current }
+      for (let index = 1; index < nodes.length; index += 1) {
+        next = removeCanvasEdge(
+          next,
+          canvasUri(nodes[index].uri, targetCanvasId),
+          nodes[index].params[0]?.paramId ?? 'p1',
+        )
+      }
+      return next.edges
+    })
     try {
       for (let index = 1; index < nodes.length; index += 1) {
         const targetUri = canvasUri(nodes[index].uri, targetCanvasId)
@@ -296,20 +351,21 @@ function HomePage() {
     safeSetStatus(`Disconnected downstream inputs (${targetCanvasId})`)
   }
 
-  async function renamePrimaryParam() {
+  async function renameSelectedParam() {
     const client = clientRef.current
-    if (!client || nodes.length < 2 || nodes[1].params.length === 0) {
+    const selected = selectedNodeInfo(nodes)
+    if (!client || !selected || selected.node.params.length === 0) {
       return
     }
-    const targetUri = canvasUri(nodes[1].uri, canvasId)
-    const primary = nodes[1].params[0]
+    const targetUri = canvasUri(selected.node.uri, canvasId)
+    const primary = selected.node.params[0]
     const renamed = `renamed_${Date.now().toString().slice(-3)}`
     const { rollback } = optimisticParamUpdate(
       (current) => {
         const updated = [...current]
-        updated[1] = {
-          ...updated[1],
-          params: updated[1].params.map((param, index) =>
+        updated[selected.index] = {
+          ...updated[selected.index],
+          params: updated[selected.index].params.map((param, index) =>
             index === 0 ? { ...param, name: renamed } : param,
           ),
         }
@@ -317,9 +373,9 @@ function HomePage() {
       },
       (current) => {
         const updated = [...current]
-        updated[1] = {
-          ...updated[1],
-          params: updated[1].params.map((param) =>
+        updated[selected.index] = {
+          ...updated[selected.index],
+          params: updated[selected.index].params.map((param) =>
             param.paramId === primary.paramId && param.name === renamed
               ? { ...param, name: primary.name }
               : param,
@@ -340,30 +396,31 @@ function HomePage() {
 
   async function addParam() {
     const client = clientRef.current
-    if (!client || nodes.length < 2) {
+    const selected = selectedNodeInfo(nodes)
+    if (!client || !selected) {
       return
     }
-    const targetUri = canvasUri(nodes[1].uri, canvasId)
-    const paramId = `p${nodes[1].params.length + 1}`
+    const targetUri = canvasUri(selected.node.uri, canvasId)
+    const paramId = `p${selected.node.params.length + 1}`
     const name = newParamName.trim() || `param_${paramId}`
     const { rollback } = optimisticParamUpdate(
       (current) => {
         const updated = [...current]
-        const alreadyExists = updated[1].params.some((param) => param.paramId === paramId)
+        const alreadyExists = updated[selected.index].params.some((param) => param.paramId === paramId)
         if (alreadyExists) {
           return updated
         }
-        updated[1] = {
-          ...updated[1],
-          params: [...updated[1].params, { name, paramId, typeName: 'Undefined' }],
+        updated[selected.index] = {
+          ...updated[selected.index],
+          params: [...updated[selected.index].params, { name, paramId, typeName: 'Undefined' }],
         }
         return updated
       },
       (current) => {
         const updated = [...current]
-        updated[1] = {
-          ...updated[1],
-          params: updated[1].params.filter((param) => param.paramId !== paramId),
+        updated[selected.index] = {
+          ...updated[selected.index],
+          params: updated[selected.index].params.filter((param) => param.paramId !== paramId),
         }
         return updated
       },
@@ -380,35 +437,36 @@ function HomePage() {
 
   async function removeParam() {
     const client = clientRef.current
-    if (!client || nodes.length < 2 || nodes[1].params.length === 0) {
+    const selected = selectedNodeInfo(nodes)
+    if (!client || !selected || selected.node.params.length === 0) {
       return
     }
-    const targetUri = canvasUri(nodes[1].uri, canvasId)
-    const removed = nodes[1].params[nodes[1].params.length - 1]
-    const removedParamIndex = nodes[1].params.length - 1
+    const targetUri = canvasUri(selected.node.uri, canvasId)
+    const removed = selected.node.params[selected.node.params.length - 1]
+    const removedParamIndex = selected.node.params.length - 1
     const { rollback } = optimisticParamUpdate(
       (current) => {
         const updated = [...current]
-        updated[1] = {
-          ...updated[1],
-          params: updated[1].params.filter((param) => param.paramId !== removed.paramId),
+        updated[selected.index] = {
+          ...updated[selected.index],
+          params: updated[selected.index].params.filter((param) => param.paramId !== removed.paramId),
         }
         return updated
       },
       (current, optimisticBase) => {
         const updated = [...current]
-        const alreadyPresent = updated[1].params.some((param) => param.paramId === removed.paramId)
+        const alreadyPresent = updated[selected.index].params.some((param) => param.paramId === removed.paramId)
         if (alreadyPresent) {
           return updated
         }
-        const baseNode = optimisticBase[1]
+        const baseNode = optimisticBase[selected.index]
         const restoredParam =
           baseNode.params.find((param) => param.paramId === removed.paramId) ?? removed
-        const insertIndex = Math.min(Math.max(removedParamIndex, 0), updated[1].params.length)
-        const nextParams = [...updated[1].params]
+        const insertIndex = Math.min(Math.max(removedParamIndex, 0), updated[selected.index].params.length)
+        const nextParams = [...updated[selected.index].params]
         nextParams.splice(insertIndex, 0, restoredParam)
-        updated[1] = {
-          ...updated[1],
+        updated[selected.index] = {
+          ...updated[selected.index],
           params: nextParams,
         }
         return updated
@@ -422,6 +480,114 @@ function HomePage() {
       rollback()
       throw error
     }
+  }
+
+  async function addNode() {
+    const client = clientRef.current
+    if (!client) {
+      return
+    }
+    const index = nodes.length + 1
+    const node: CanvasNode = {
+      uri: `snaq://canvas-a/node-${index}.sl`,
+      source: '0',
+      params: [],
+    }
+    const uri = canvasUri(node.uri, canvasId)
+    await client.applyPatch([{ op: 'addNode', uri, source: buildNodeSource({ ...node, uri }), version: 1 }])
+    setNodes((current) => addCanvasNode({ nodes: current, edges }, node).nodes)
+    setSelectedNodeUri(node.uri)
+    setSelectedSourceUri(node.uri)
+    safeSetStatus(`Added node ${uri}`)
+  }
+
+  async function removeSelectedNode() {
+    const client = clientRef.current
+    if (!client || !selectedNodeUri) {
+      return
+    }
+    const removeUri = canvasUri(selectedNodeUri, canvasId)
+    await client.applyPatch([{ op: 'removeNode', uri: removeUri }])
+    const existing = nodeSubscriptionsRef.current[removeUri]
+    if (existing) {
+      await client.unsubscribeNode(existing.subscriptionId)
+      setNodeSubscriptionsByUri((current) => {
+        const removed = removeNodeSubscriptionByUri(
+          { byUri: current, uriById: subscriptionUriByIdRef.current },
+          removeUri,
+        )
+        subscriptionUriByIdRef.current = removed.uriById
+        nodeSubscriptionsRef.current = removed.byUri
+        return removed.byUri
+      })
+    }
+    const withoutTemplateEdges = removeCanvasNode({ nodes, edges }, selectedNodeUri)
+    const next = removeCanvasNode(withoutTemplateEdges, removeUri)
+    setNodes(next.nodes)
+    setEdges(next.edges)
+    safeSetStatus(`Removed node ${removeUri}`)
+  }
+
+  async function connectSelectedEdge() {
+    const client = clientRef.current
+    if (!client || !selectedSourceUri || !selectedTargetUri || !selectedTargetParamId) {
+      return
+    }
+    const sourceUri = canvasUri(selectedSourceUri, canvasId)
+    const targetUri = canvasUri(selectedTargetUri, canvasId)
+    await connectCanvasNodes(client, {
+      sourceUri,
+      targetUri,
+      targetParamId: selectedTargetParamId,
+    })
+    setEdges((current) =>
+      upsertCanvasEdge(
+        {
+          nodes,
+          edges: current,
+        },
+        { sourceUri, targetUri, targetParamId: selectedTargetParamId },
+      ).edges,
+    )
+    await refreshSubscriptionForUri(targetUri)
+    safeSetStatus(`Connected ${sourceUri} -> ${targetUri}@${selectedTargetParamId}`)
+  }
+
+  async function disconnectSelectedEdge() {
+    const client = clientRef.current
+    if (!client || !selectedTargetUri || !selectedTargetParamId) {
+      return
+    }
+    const targetUri = canvasUri(selectedTargetUri, canvasId)
+    try {
+      await disconnectCanvasNodeInput(client, {
+        targetUri,
+        targetParamId: selectedTargetParamId,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error'
+      if (!message.includes('unbound stream input')) {
+        throw error
+      }
+    }
+    setEdges((current) =>
+      removeCanvasEdge(
+        {
+          nodes,
+          edges: current,
+        },
+        targetUri,
+        selectedTargetParamId,
+      ).edges,
+    )
+    try {
+      await refreshSubscriptionForUri(targetUri)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error'
+      safeSetStatus(`Disconnected ${targetUri}@${selectedTargetParamId}; refresh failed: ${message}`)
+      return
+    }
+    safeSetStatus(`Disconnected ${targetUri}@${selectedTargetParamId}`)
   }
 
   async function unsubscribeAllNodes() {
@@ -448,46 +614,74 @@ function HomePage() {
       return
     }
     await client.unsubscribeNode(existing.subscriptionId)
-    delete subscriptionUriByIdRef.current[existing.subscriptionId]
+    const removed = removeNodeSubscriptionByUri(
+      { byUri: nodeSubscriptionsRef.current, uriById: subscriptionUriByIdRef.current },
+      uri,
+    )
+    subscriptionUriByIdRef.current = removed.uriById
+    nodeSubscriptionsRef.current = removed.byUri
     const response = await client.subscribeNode(uri)
-    subscriptionUriByIdRef.current[response.subscriptionId] = uri
-    setNodeSubscriptionsByUri((current) =>
-      upsertNodeSubscription(current, uri, {
+    setNodeSubscriptionsByUri((current) => {
+      const merged = registerNodeSubscription(
+        { byUri: current, uriById: subscriptionUriByIdRef.current },
+        uri,
+        {
+          subscriptionId: response.subscriptionId,
+          resultHandle: response.resultHandle,
+        },
+      )
+      subscriptionUriByIdRef.current = merged.uriById
+      nodeSubscriptionsRef.current = merged.byUri
+      return upsertNodeSubscription(merged.byUri, uri, {
         subscriptionId: response.subscriptionId,
         resultHandle: response.resultHandle,
-      }),
-    )
+      })
+    })
   }
 
-  async function subscribeDownstreamNodes(targetCanvasId = canvasId): Promise<string | undefined> {
+  async function subscribeVisibleNodes(targetCanvasId = canvasId): Promise<string | undefined> {
     const client = clientRef.current
-    if (!client || nodes.length < 2) {
+    if (!client || nodes.length === 0) {
       return undefined
     }
     let latestHandle: string | undefined
-    for (let index = 1; index < nodes.length; index += 1) {
-      const sourceUri = canvasUri(nodes[index].uri, targetCanvasId)
+    for (const node of nodes) {
+      const sourceUri = canvasUri(node.uri, targetCanvasId)
       const existing = nodeSubscriptionsRef.current[sourceUri]
       if (existing) {
         await client.unsubscribeNode(existing.subscriptionId)
-        delete subscriptionUriByIdRef.current[existing.subscriptionId]
+        const removed = removeNodeSubscriptionByUri(
+          { byUri: nodeSubscriptionsRef.current, uriById: subscriptionUriByIdRef.current },
+          sourceUri,
+        )
+        subscriptionUriByIdRef.current = removed.uriById
+        nodeSubscriptionsRef.current = removed.byUri
       }
       const response = await client.subscribeNode(sourceUri)
-      subscriptionUriByIdRef.current[response.subscriptionId] = sourceUri
-      setNodeSubscriptionsByUri((current) =>
-        upsertNodeSubscription(current, sourceUri, {
+      setNodeSubscriptionsByUri((current) => {
+        const merged = registerNodeSubscription(
+          { byUri: current, uriById: subscriptionUriByIdRef.current },
+          sourceUri,
+          {
+            subscriptionId: response.subscriptionId,
+            resultHandle: response.resultHandle,
+          },
+        )
+        subscriptionUriByIdRef.current = merged.uriById
+        nodeSubscriptionsRef.current = merged.byUri
+        return upsertNodeSubscription(merged.byUri, sourceUri, {
           subscriptionId: response.subscriptionId,
           resultHandle: response.resultHandle,
-        }),
-      )
+        })
+      })
       latestHandle = response.resultHandle
     }
     setResultHandle(latestHandle)
     paginationRef.current = { offset: 0 }
     if (latestHandle) {
-      paginationByHandlePathRef.current[pathKey(latestHandle)] = { offset: 0 }
+      paginationByHandlePathRef.current[cursorKey(latestHandle)] = { offset: 0 }
     }
-    safeSetStatus(`Subscribed to ${Math.max(nodes.length - 1, 0)} downstream node(s) (${targetCanvasId})`)
+    safeSetStatus(`Subscribed to ${nodes.length} node(s) (${targetCanvasId})`)
     return latestHandle
   }
 
@@ -500,7 +694,7 @@ function HomePage() {
     try {
       const page = await fetchFirstPage(client, { resultHandle: activeResultHandle, limit: 2 })
       paginationRef.current = page.cursor
-      paginationByHandlePathRef.current[pathKey(activeResultHandle)] = page.cursor
+      paginationByHandlePathRef.current[cursorKey(activeResultHandle)] = page.cursor
       setSlice(JSON.stringify(page.response.elements))
       setStatus('Fetched first page')
     } catch (error) {
@@ -517,14 +711,14 @@ function HomePage() {
     }
     try {
       const currentCursor =
-        paginationByHandlePathRef.current[pathKey(activeResultHandle)] ?? paginationRef.current
+        paginationByHandlePathRef.current[cursorKey(activeResultHandle)] ?? paginationRef.current
       const page = await fetchNextPage(client, {
         resultHandle: activeResultHandle,
         limit: 2,
         cursor: currentCursor,
       })
       paginationRef.current = page.cursor
-      paginationByHandlePathRef.current[pathKey(activeResultHandle)] = page.cursor
+      paginationByHandlePathRef.current[cursorKey(activeResultHandle)] = page.cursor
       setSlice(JSON.stringify(page.response.elements))
       setStatus('Fetched next page')
     } catch (error) {
@@ -593,7 +787,7 @@ function HomePage() {
         primaryCanvas,
       )
       await connectNodes(primaryCanvas)
-      await subscribeDownstreamNodes(primaryCanvas)
+      await subscribeVisibleNodes(primaryCanvas)
       await switchCanvas(recoveryCanvas)
       await openNodesInLsp(recoveryCanvas)
       await patchCanvasNodeSource(
@@ -602,7 +796,7 @@ function HomePage() {
         recoveryCanvas,
       )
       await connectNodes(recoveryCanvas)
-      await subscribeDownstreamNodes(recoveryCanvas)
+      await subscribeVisibleNodes(recoveryCanvas)
       safeSetStatus(`Bridge scenario completed (${primaryCanvas} -> ${recoveryCanvas})`)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown error'
@@ -646,7 +840,7 @@ function HomePage() {
         <button data-testid="disconnect-nodes-btn" onClick={() => void runAction(disconnectNodes)}>
           Disconnect
         </button>
-        <button data-testid="rename-param-btn" onClick={() => void runAction(renamePrimaryParam)}>
+        <button data-testid="rename-param-btn" onClick={() => void runAction(renameSelectedParam)}>
           Rename Param
         </button>
         <button data-testid="add-param-btn" onClick={() => void runAction(addParam)}>
@@ -655,9 +849,21 @@ function HomePage() {
         <button data-testid="remove-param-btn" onClick={() => void runAction(removeParam)}>
           Remove Param
         </button>
+        <button data-testid="add-node-btn" onClick={() => void runAction(addNode)}>
+          Add Node
+        </button>
+        <button data-testid="remove-node-btn" onClick={() => void runAction(removeSelectedNode)}>
+          Remove Selected Node
+        </button>
+        <button data-testid="connect-selected-btn" onClick={() => void runAction(connectSelectedEdge)}>
+          Connect Selected
+        </button>
+        <button data-testid="disconnect-selected-btn" onClick={() => void runAction(disconnectSelectedEdge)}>
+          Disconnect Selected
+        </button>
         <button
           data-testid="subscribe-node-btn"
-          onClick={() => void runAction(async () => void (await subscribeDownstreamNodes()))}
+          onClick={() => void runAction(async () => void (await subscribeVisibleNodes()))}
         >
           Subscribe
         </button>
@@ -668,6 +874,73 @@ function HomePage() {
           Fetch Next Slice
         </button>
       </div>
+      <section style={{ marginTop: 12 }}>
+        <h2>Edge Controls</h2>
+        <label htmlFor="selected-node-select">
+          Node
+          <select
+            id="selected-node-select"
+            data-testid="selected-node-select"
+            value={selectedNodeUri}
+            onChange={(event) => setSelectedNodeUri(event.target.value)}
+            style={{ marginLeft: 8, marginRight: 8 }}
+          >
+            {nodes.map((node) => (
+              <option key={node.uri} value={node.uri}>
+                {node.uri}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label htmlFor="edge-source-select">
+          Source
+          <select
+            id="edge-source-select"
+            data-testid="edge-source-select"
+            value={selectedSourceUri}
+            onChange={(event) => setSelectedSourceUri(event.target.value)}
+            style={{ marginLeft: 8, marginRight: 8 }}
+          >
+            {nodes.map((node) => (
+              <option key={node.uri} value={node.uri}>
+                {node.uri}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label htmlFor="edge-target-select">
+          Target
+          <select
+            id="edge-target-select"
+            data-testid="edge-target-select"
+            value={selectedTargetUri}
+            onChange={(event) => setSelectedTargetUri(event.target.value)}
+            style={{ marginLeft: 8, marginRight: 8 }}
+          >
+            {nodes.map((node) => (
+              <option key={node.uri} value={node.uri}>
+                {node.uri}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label htmlFor="edge-target-param-select">
+          Target Param
+          <select
+            id="edge-target-param-select"
+            data-testid="edge-target-param-select"
+            value={selectedTargetParamId}
+            onChange={(event) => setSelectedTargetParamId(event.target.value)}
+            style={{ marginLeft: 8, marginRight: 8 }}
+          >
+            {(nodes.find((node) => node.uri === selectedTargetUri)?.params ?? []).map((param) => (
+              <option key={param.paramId} value={param.paramId}>
+                {param.name}@{param.paramId}
+              </option>
+            ))}
+          </select>
+        </label>
+      </section>
       <section style={{ marginTop: 16 }}>
         <h2>Node Sources</h2>
         <label htmlFor="new-param-name-input">
@@ -704,7 +977,9 @@ function HomePage() {
           </label>
         ))}
         <div data-testid="param-summary">
-          {nodes[1].params.map((param) => `${param.name}@${param.paramId}:${param.typeName}`).join(', ')}
+          {(nodes.find((node) => node.uri === selectedNodeUri)?.params ?? [])
+            .map((param) => `${param.name}@${param.paramId}:${param.typeName}`)
+            .join(', ')}
         </div>
       </section>
       <section style={{ marginTop: 16 }}>

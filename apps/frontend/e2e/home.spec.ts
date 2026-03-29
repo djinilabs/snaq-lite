@@ -10,6 +10,10 @@ test('bridge scenario controls are available', async ({ page }) => {
   await expect(page.getByTestId('init-worker-btn')).toBeVisible()
   await expect(page.getByTestId('run-scenario-btn')).toBeVisible()
   await expect(page.getByTestId('connect-nodes-btn')).toBeVisible()
+  await expect(page.getByTestId('connect-selected-btn')).toBeVisible()
+  await expect(page.getByTestId('disconnect-selected-btn')).toBeVisible()
+  await expect(page.getByTestId('add-node-btn')).toBeVisible()
+  await expect(page.getByTestId('remove-node-btn')).toBeVisible()
   await expect(page.getByTestId('subscribe-node-btn')).toBeVisible()
   await expect(page.getByTestId('fetch-first-slice-btn')).toBeVisible()
   await expect(page.getByTestId('fetch-next-slice-btn')).toBeVisible()
@@ -53,6 +57,36 @@ test('connect and disconnect drive node result status transitions', async ({ pag
   await page.getByTestId('disconnect-nodes-btn').click()
   await expect(page.getByTestId('status-text')).not.toContainText('canvas mismatch')
   await expect(page.getByTestId('notification-log')).toContainText('snaqlite/publishNodeResult')
+})
+
+test('arbitrary edge controls and node lifecycle actions work', async ({ page }) => {
+  await page.goto('/')
+  await page.getByTestId('canvas-id-input').fill('canvas-e2e-arbitrary')
+  await page.getByTestId('run-scenario-btn').click()
+  await expect(page.getByTestId('status-text')).toContainText('Bridge scenario completed', {
+    timeout: 30_000,
+  })
+
+  await page.getByTestId('edge-source-select').selectOption('snaq://canvas-a/node-1.sl')
+  await page.getByTestId('edge-target-select').selectOption('snaq://canvas-a/node-3.sl')
+  await page.getByTestId('edge-target-param-select').selectOption('p1')
+  await page.getByTestId('connect-selected-btn').click()
+  await expect(page.getByTestId('status-text')).toContainText('Connected snaq://')
+
+  await page.getByTestId('disconnect-selected-btn').click()
+  await expect(page.getByTestId('status-text')).toContainText('Disconnected snaq://')
+
+  await page.getByTestId('add-node-btn').click()
+  await expect(page.getByTestId('status-text')).toContainText('Added node')
+
+  await page.getByTestId('selected-node-select').selectOption('snaq://canvas-a/node-3.sl')
+  await page.getByTestId('new-param-name-input').fill('z')
+  await page.getByTestId('add-param-btn').click()
+  await expect(page.getByTestId('status-text')).toContainText('Added param z@')
+
+  await page.getByTestId('selected-node-select').selectOption('snaq://canvas-a/node-4.sl')
+  await page.getByTestId('remove-node-btn').click()
+  await expect(page.getByTestId('status-text')).toContainText('Removed node')
 })
 
 test('slice pagination uses continuation flow', async ({ page }) => {

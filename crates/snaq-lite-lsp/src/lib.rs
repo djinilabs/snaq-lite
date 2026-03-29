@@ -205,7 +205,7 @@ impl LanguageServer for SnaqLiteBackend {
         drop(state);
         self.reconcile_graph_for_uri(&uri).await;
         let revalidated_targets = self.revalidate_related_edge_types(&uri).await;
-        let force_downstream = !revalidated_targets.is_empty();
+        let force_downstream = uri.scheme() == "snaq" || !revalidated_targets.is_empty();
         let changed_roots = Self::recompute_roots_for_change(&uri, revalidated_targets);
         self.recompute_and_push(&changed_roots, force_downstream).await;
         self.drain_notifications().await;
@@ -236,7 +236,7 @@ impl LanguageServer for SnaqLiteBackend {
         drop(state);
         self.reconcile_graph_for_uri(&uri).await;
         let revalidated_targets = self.revalidate_related_edge_types(&uri).await;
-        let force_downstream = !revalidated_targets.is_empty();
+        let force_downstream = uri.scheme() == "snaq" || !revalidated_targets.is_empty();
         let changed_roots = Self::recompute_roots_for_change(&uri, revalidated_targets);
         self.recompute_and_push(&changed_roots, force_downstream).await;
         self.drain_notifications().await;
@@ -1851,7 +1851,7 @@ impl SnaqLiteBackend {
         let _ = next_version;
         self.reconcile_graph_for_uri(uri).await;
         let revalidated_targets = self.revalidate_related_edge_types(uri).await;
-        let force_downstream = !revalidated_targets.is_empty();
+        let force_downstream = true;
         let changed_roots = Self::recompute_roots_for_change(uri, revalidated_targets);
         self.recompute_and_push(&changed_roots, force_downstream).await;
         self.drain_notifications().await;
@@ -1950,10 +1950,43 @@ impl SnaqLiteBackend {
             g
         };
         let mut changed_sources: std::collections::HashSet<Url> = std::collections::HashSet::new();
+        let mut removed_nodes: std::collections::HashSet<Url> = std::collections::HashSet::new();
         let mut topology_targets: std::collections::HashSet<Url> = std::collections::HashSet::new();
 
         for operation in &params.operations {
             match operation {
+                GraphPatchOperation::AddNode { uri, source, version } => {
+                    let uri = Url::parse(uri)
+                        .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid uri"))?;
+                    self.ensure_graph_canvas_uri_request(&uri).await?;
+                    if source_by_uri.contains_key(&uri) {
+                        return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                            "node already exists",
+                        ));
+                    }
+                    source_by_uri.insert(uri.clone(), source.clone());
+                    changed_sources.insert(uri.clone());
+                    next_version_by_uri.insert(uri, version.unwrap_or(0));
+                }
+                GraphPatchOperation::RemoveNode { uri } => {
+                    let uri = Url::parse(uri)
+                        .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid uri"))?;
+                    self.ensure_graph_canvas_uri_request(&uri).await?;
+                    if !source_by_uri.contains_key(&uri) {
+                        return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                            "document not open",
+                        ));
+                    }
+                    let docs: std::collections::HashSet<Url> = source_by_uri.keys().cloned().collect();
+                    for target in staged_graph.descendants_from_source(&uri, &docs) {
+                        topology_targets.insert(target);
+                    }
+                    source_by_uri.remove(&uri);
+                    next_version_by_uri.remove(&uri);
+                    changed_sources.remove(&uri);
+                    removed_nodes.insert(uri.clone());
+                    let _ = staged_graph.remove_edges_for_uri(&uri);
+                }
                 GraphPatchOperation::SetNodeSource { uri, source } => {
                     let uri = Url::parse(uri)
                         .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("invalid uri"))?;
@@ -2150,13 +2183,18 @@ impl SnaqLiteBackend {
 
         {
             let mut state = self.state.lock().await;
+            for uri in &removed_nodes {
+                let _ = state.remove_document(uri);
+            }
             for uri in &changed_sources {
                 if let Some(new_source) = source_by_uri.get(uri) {
-                    let next_version = next_version_by_uri
-                        .get(uri)
-                        .copied()
-                        .unwrap_or(0)
-                        .saturating_add(1);
+                    let current_version = state.document_version(uri).unwrap_or(0);
+                    let staged_version = next_version_by_uri.get(uri).copied().unwrap_or(0);
+                    let next_version = if current_version > 0 || staged_version == 0 {
+                        current_version.saturating_add(1)
+                    } else {
+                        staged_version
+                    };
                     state.update_document(uri.clone(), next_version, new_source);
                 }
             }
@@ -2165,32 +2203,62 @@ impl SnaqLiteBackend {
             let mut graph = self.graph_state.lock().await;
             graph.replace_edges(staged_graph.edges_snapshot());
         }
+        if !removed_nodes.is_empty() {
+            let removed_subscriptions = {
+                let mut subs = self.subscriptions.lock().await;
+                let mut out = Vec::new();
+                for uri in &removed_nodes {
+                    out.extend(subs.remove_uri_all(uri));
+                }
+                out
+            };
+            self.cancel_subscription_entries(removed_subscriptions, "Node removed")
+                .await;
+            let removed_widgets = {
+                let mut widgets = self.widgets.lock().await;
+                let mut out = Vec::new();
+                for uri in &removed_nodes {
+                    out.extend(widgets.invalidate_uri(uri));
+                }
+                out
+            };
+            self.cancel_widget_entries(removed_widgets, "Node removed").await;
+            {
+                let mut results = self.node_results.lock().await;
+                for uri in &removed_nodes {
+                    let _ = results.remove(uri);
+                }
+            }
+            {
+                let mut handles = self.result_handles.lock().await;
+                for uri in &removed_nodes {
+                    let _ = handles.remove_for_uri(uri);
+                }
+            }
+            for uri in &removed_nodes {
+                self.client.publish_diagnostics(uri.clone(), Vec::new(), None).await;
+            }
+        }
 
         let mut revalidated_targets: std::collections::HashSet<Url> = std::collections::HashSet::new();
-        let mut reconciled_pruned_edges = false;
         for uri in &changed_sources {
             let edges_before = { self.graph_state.lock().await.edges_snapshot().len() };
             self.reconcile_graph_for_uri(uri).await;
             let edges_after = { self.graph_state.lock().await.edges_snapshot().len() };
-            if edges_after < edges_before {
-                reconciled_pruned_edges = true;
-            }
+            let _pruned_edges = edges_after < edges_before;
             for target in self.revalidate_related_edge_types(uri).await {
                 revalidated_targets.insert(target);
             }
         }
 
         let mut changed_roots: std::collections::HashSet<Url> = changed_sources.clone();
-        let had_topology_targets = !topology_targets.is_empty();
         for target in topology_targets {
             changed_roots.insert(target);
         }
-        let had_revalidated_targets = !revalidated_targets.is_empty();
         for target in revalidated_targets {
             changed_roots.insert(target);
         }
-        let force_downstream =
-            reconciled_pruned_edges || had_topology_targets || had_revalidated_targets;
+        let force_downstream = true;
         let changed_roots_vec: Vec<Url> = changed_roots.iter().cloned().collect();
         {
             let mut state = self.state.lock().await;
@@ -2208,6 +2276,7 @@ impl SnaqLiteBackend {
         }
 
         let mut affected_uris: Vec<String> = changed_roots.into_iter().map(|u| u.to_string()).collect();
+        affected_uris.extend(removed_nodes.into_iter().map(|u| u.to_string()));
         affected_uris.sort();
         affected_uris.dedup();
         Ok(ApplyGraphPatchResponse {

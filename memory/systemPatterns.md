@@ -1,6 +1,13 @@
 # System patterns
 
 - **Frontend subscription-state mutation safety:** async subscription lifecycle helpers should read from `nodeSubscriptionsRef.current` (not captured React state) to avoid stale-closure races during rapid subscribe/unsubscribe/canvas-switch sequences.
+- **Frontend node-removal URI parity:** local node removal flows must clean state by both template node URI and canvas-qualified URI to avoid orphaned edges when `canvasId` host differs from template host.
+- **Frontend param-action targeting contract:** UI param mutations (`renameParam`, `addParam`, `removeParam`) must operate on the actively selected node URI, never on positional assumptions like `nodes[1]`.
+- **Frontend subscription coverage policy:** manual subscribe actions should subscribe all visible canvas nodes, not only downstream chain indices, so arbitrary topology nodes receive publish updates deterministically.
+- **E2E disconnect assertion strictness:** UI disconnect flows should assert explicit disconnect success status (not broad error-tolerant regex) to avoid masking regressions in edge mutation handling.
+- **Graph patch node lifecycle contract:** `snaqlite/graph/applyPatch` supports `addNode`/`removeNode` as atomic staged mutations. `removeNode` must clean attached edges, drop node result handles/cursors, and emit terminal cancellation for affected subscriptions/widgets with reason `"Node removed"`.
+- **Canvas mutation recompute policy:** canvas-originated source mutation waves (`didOpen`/`didChange` on `snaq://` URIs, param helper source edits, and `graph/applyPatch`) force descendant reevaluation even when semantic fingerprints are unchanged.
+- **Frontend canvas domain split pattern:** route-level orchestration should delegate graph document mutations to pure canvas state helpers (`apps/frontend/src/canvas/document-state.ts`) and subscription/cursor bookkeeping helpers (`apps/frontend/src/lsp/subscription-manager.ts`) to avoid hard-coded chain assumptions.
 - **Frontend node-signature notification hardening:** `nodeSignatureUpdated` handlers should validate minimal payload shape (`uri` + array `inputs`) before reconciliation to prevent malformed-notification crashes.
 - **Frontend downstream-handle targeting:** when multiple downstream nodes are subscribed, result-handle updates should target the current downstream sink (last node in chain for bridge flow), not a fixed node index.
 - **Frontend smoke scenario topology baseline:** bridge/smoketest flows should exercise a multi-hop chain (at least 3 nodes, 2 edges) and subscribe downstream nodes so upstream edits validate transitive recompute behavior, not only a 2-node bridge path.

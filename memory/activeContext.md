@@ -2,6 +2,21 @@
 
 ## Just completed
 
+- **WASM forward-only receiver preservation fix (review hardening):**
+  - Verified `send_wasm_vector_progress_notifications` consumed `LazyVector::FromInput` receivers via `vector_into_stream` (`take_receiver`), which made subsequent handle-scoped `fetchResultSlice` reads observe `StreamInputNotAvailable`.
+  - `crates/snaq-lite-lsp/src/lib.rs`: `send_wasm_vector_progress_notifications` now short-circuits for `LazyVector::FromInput` and does not consume the stream receiver; forward-only consumption remains owned by `fetchResultSlice` handle paging.
+  - Verification green: `pnpm check`.
+
+- **Strict lazy streaming + incremental runtime pass (execution):**
+  - `crates/snaq-lite-lsp/src/lib.rs` + `src/result_handle_registry.rs`: removed implicit `FromInput -> FromEvaluated` upgrade in `fetchResultSlice`; forward-only handle paging now uses per-handle continuation state (single-consumer stream + cursor-gated offsets) without full-vector materialization.
+  - `crates/snaq-lite-lang/src/lib.rs`: added long-lived `Session` API (`Session::new`, `eval`, `eval_with_stream_inputs`, `db`) and refactored `run_with_registry` / `run_with_stream_inputs` through session-backed evaluation.
+  - `crates/snaq-lite-lang/src/queries.rs`: added streaming order-stat alternatives `median_approx()` and `quantile_approx(p)` using reservoir-sampled single-pass quantile estimation; kept exact `median`/`quantile` materialization contract and non-replayable rejection.
+  - `crates/snaq-lite-lsp/src/lib.rs`: native fanout path now avoids cloning every batch for every subscriber (move-last batch dispatch helper), preserving bounded chunk fanout semantics.
+  - Tests added/updated:
+    - `crates/snaq-lite-lsp/src/result_handle_registry.rs`: forward-only sequential paging unit coverage.
+    - `crates/snaq-lite-lang/src/lib.rs`: session reuse tests and approximate reducer coverage on replayable + non-replayable streams.
+  - Docs updated: `docs/LSP.md` (forward-only cursor contract/no implicit replay upgrade), `docs/EXTERNAL_STREAMS.md` (exact vs approx reducer contracts, session API guidance).
+
 - **Fix graph/applyPatch stale-edge inconsistency after source mutations**
   - Added integration test `graph_apply_patch_remove_param_prunes_stale_edges` proving `removeParam` via patch previously left stale edges in `exportCanvasDocument`.
   - `crates/snaq-lite-lsp/src/lib.rs`: `graph_apply_patch` now prunes staged edges during source ops:

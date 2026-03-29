@@ -1885,6 +1885,34 @@ fn value_inner<'db>(
                     quantile_from_collected(&collected, p, registry)
                         .map_err(|e| with_span_if_missing(e, expr.span(db)))
                 }
+                "median_approx" => {
+                    if !args.is_empty() {
+                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
+                            "median_approx takes no arguments".to_string(),
+                        )));
+                    }
+                    quantile_approx_from_stream(db, inner, 0.5, registry, "median_approx")
+                        .map_err(|e| with_span_if_missing(e, expr.span(db)))
+                }
+                "quantile_approx" => {
+                    if args.len() != 1 {
+                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(format!(
+                            "quantile_approx requires 1 argument (p in [0,1]), got {}",
+                            args.len()
+                        ))));
+                    }
+                    let (_, p_expr) = &args[0];
+                    let p_val = value_inner(db, scope, *p_expr, registry)?;
+                    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+                    let p_q = p_val.to_quantity(&sym_reg).map_err(|_| {
+                        RunError::new(RunErrorKind::InvalidArgument(
+                            "quantile_approx: p must be numeric".to_string(),
+                        ))
+                    })?;
+                    let p = p_q.value();
+                    quantile_approx_from_stream(db, inner, p, registry, "quantile_approx")
+                        .map_err(|e| with_span_if_missing(e, expr.span(db)))
+                }
                 "min" => {
                     if !args.is_empty() {
                         return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
@@ -3263,6 +3291,81 @@ fn quantile_from_collected(
     let frac = idx - lo as f64;
     let val = (1.0 - frac) * qs[lo].value() + frac * qs[hi].value();
     Ok(Value::Numeric(Quantity::new(val, qs[0].unit().clone())))
+}
+
+fn quantile_approx_from_stream(
+    db: &dyn salsa::Database,
+    inner: LazyVector,
+    p: f64,
+    registry: &UnitRegistry,
+    method_name: &str,
+) -> Result<Value, RunError> {
+    if !(0.0..=1.0).contains(&p) {
+        return Err(RunError::new(RunErrorKind::InvalidArgument(format!(
+            "{method_name}: p must be in [0, 1]"
+        ))));
+    }
+    use futures::stream::StreamExt;
+    const RESERVOIR_SIZE: usize = 1024;
+    let mut stream = vector_into_stream(db, inner);
+    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+    let mut count: u64 = 0;
+    let mut rng_state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut ref_unit: Option<Unit> = None;
+    let mut sample: Vec<Quantity> = Vec::with_capacity(RESERVOIR_SIZE);
+    futures::executor::block_on(async {
+        while let Some(item) = stream.next().await {
+            let opt = item?;
+            let Some(v) = opt else { continue };
+            let mut q = v.to_quantity(&sym_reg).map_err(|_| {
+                RunError::new(RunErrorKind::UnknownMethod(format!(
+                    "{method_name}: elements must be numeric (same dimension)"
+                )))
+            })?;
+            if let Some(unit) = &ref_unit {
+                q = q.convert_to(registry, unit).map_err(|_| {
+                    RunError::new(RunErrorKind::DimensionMismatch {
+                        left: q.unit().clone(),
+                        right: unit.clone(),
+                    })
+                })?;
+            } else {
+                ref_unit = Some(q.unit().clone());
+            }
+            count = count.saturating_add(1);
+            if sample.len() < RESERVOIR_SIZE {
+                sample.push(q);
+            } else {
+                // Deterministic xorshift-based reservoir sampling.
+                rng_state ^= rng_state << 13;
+                rng_state ^= rng_state >> 7;
+                rng_state ^= rng_state << 17;
+                let j = (rng_state % count.max(1)) as usize;
+                if j < RESERVOIR_SIZE {
+                    sample[j] = q;
+                }
+            }
+        }
+        Ok::<(), RunError>(())
+    })?;
+    if sample.is_empty() {
+        return Err(RunError::new(RunErrorKind::EmptyVectorReduction(
+            method_name.to_string(),
+        )));
+    }
+    sample.sort_by(|a, b| a.value().partial_cmp(&b.value()).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sample.len();
+    let idx = p * (n.saturating_sub(1)) as f64;
+    let lo = idx.floor() as usize;
+    let hi = idx.ceil() as usize;
+    let lo = lo.min(n - 1);
+    let hi = hi.min(n - 1);
+    let frac = idx - lo as f64;
+    let val = (1.0 - frac) * sample[lo].value() + frac * sample[hi].value();
+    Ok(Value::Numeric(Quantity::new(
+        val,
+        sample[0].unit().clone(),
+    )))
 }
 
 /// Min or max over collected vector elements (numeric only). Empty → EmptyVectorReduction.

@@ -1,5 +1,7 @@
 //! snaq-lite: reactive arithmetic language (Salsa-based).
 
+use salsa::Setter;
+
 pub mod cas;
 pub mod date;
 pub mod dimension;
@@ -58,6 +60,71 @@ pub use graph::{
     GraphInputDecl,
 };
 
+/// Long-lived runtime session that reuses one Salsa database across evaluations.
+///
+/// Use this when you need incremental dependency-driven recompute across multiple
+/// source updates instead of rebuilding a fresh database every call.
+pub struct Session {
+    db: salsa::DatabaseImpl,
+    unit_registry: UnitRegistry,
+    program_def: Option<ProgramDef>,
+    stream_input_registry: Option<StreamInputRegistry>,
+}
+
+impl Session {
+    /// Create a session with a custom unit registry.
+    pub fn new(unit_registry: UnitRegistry) -> Self {
+        Self {
+            db: salsa::DatabaseImpl::new(),
+            unit_registry,
+            program_def: None,
+            stream_input_registry: None,
+        }
+    }
+
+    /// Borrow the backing database (useful for vector stream consumption).
+    pub fn db(&self) -> &salsa::DatabaseImpl {
+        &self.db
+    }
+
+    /// Evaluate source using this session with no external streams.
+    pub fn eval(&mut self, input: &str) -> Result<Value, RunError> {
+        self.eval_with_stream_inputs(input, std::collections::HashMap::new())
+    }
+
+    /// Evaluate source using this session with `$name` stream bindings.
+    pub fn eval_with_stream_inputs(
+        &mut self,
+        input: &str,
+        stream_inputs: std::collections::HashMap<String, StreamHandleId>,
+    ) -> Result<Value, RunError> {
+        let resolved = resolve::resolve(parse(input).map_err(RunError::from)?, &self.unit_registry)?;
+        let root_spanned = cas::simplify_symbolic(resolved, &self.unit_registry)?;
+        let root_def = root_spanned.to_expr_def();
+        set_eval_registry(self.unit_registry.clone());
+        let stream_registry = if let Some(existing) = self.stream_input_registry {
+            existing.set_inputs(&mut self.db).to(stream_inputs);
+            existing
+        } else {
+            let created = StreamInputRegistry::new(&self.db, stream_inputs);
+            self.stream_input_registry = Some(created);
+            created
+        };
+        set_stream_input_registry(stream_registry);
+        let program_def = if let Some(existing) = self.program_def {
+            existing.set_root(&mut self.db).to(root_def);
+            existing.set_spanned_root(&mut self.db).to(Some(root_spanned));
+            existing
+        } else {
+            let created = ProgramDef::new(&self.db, root_def, Some(root_spanned));
+            self.program_def = Some(created);
+            created
+        };
+        let root = program(&self.db, program_def);
+        value(&self.db, empty_scope(&self.db), root)
+    }
+}
+
 /// Parse and evaluate the expression, returning a Value (symbolic by default, e.g. "6 + π").
 ///
 /// Input can be multiple expressions (newline- or `;`-separated) and blocks `{ ... }`; the result
@@ -76,16 +143,8 @@ pub fn run(input: &str) -> Result<Value, RunError> {
 
 /// Like [run], but with a custom unit registry.
 pub fn run_with_registry(input: &str, registry: &UnitRegistry) -> Result<Value, RunError> {
-    let resolved = resolve::resolve(parse(input).map_err(RunError::from)?, registry)?;
-    let root_spanned = cas::simplify_symbolic(resolved, registry)?;
-    let root_def = root_spanned.to_expr_def();
-    set_eval_registry(registry.clone());
-    let db = salsa::DatabaseImpl::new();
-    let stream_input_registry = StreamInputRegistry::new(&db, std::collections::HashMap::new());
-    set_stream_input_registry(stream_input_registry);
-    let program_def = ProgramDef::new(&db, root_def, Some(root_spanned));
-    let root = program(&db, program_def);
-    value(&db, empty_scope(&db), root)
+    let mut session = Session::new(registry.clone());
+    session.eval(input)
 }
 
 /// Format a vector for display: `[e1, e2, ...]`. Used by [format_value_for_display].
@@ -189,17 +248,9 @@ pub fn run_with_stream_inputs(
     registry: &UnitRegistry,
     stream_inputs: std::collections::HashMap<String, StreamHandleId>,
 ) -> Result<(Value, salsa::DatabaseImpl), RunError> {
-    let resolved = resolve::resolve(parse(input).map_err(RunError::from)?, registry)?;
-    let root_spanned = cas::simplify_symbolic(resolved, registry)?;
-    let root_def = root_spanned.to_expr_def();
-    set_eval_registry(registry.clone());
-    let db = salsa::DatabaseImpl::new();
-    let stream_input_registry = StreamInputRegistry::new(&db, stream_inputs);
-    set_stream_input_registry(stream_input_registry);
-    let program_def = ProgramDef::new(&db, root_def, Some(root_spanned));
-    let root = program(&db, program_def);
-    let val = value(&db, empty_scope(&db), root)?;
-    Ok((val, db))
+    let mut session = Session::new(registry.clone());
+    let val = session.eval_with_stream_inputs(input, stream_inputs)?;
+    Ok((val, session.db))
 }
 
 /// Evaluate and substitute all symbols with their numeric values; returns a single Quantity.
@@ -2998,6 +3049,8 @@ mod tests {
     fn run_stem_vector_median_quantile_corr() {
         assert!((run_numeric("[1, 2, 3, 4, 5].median()").unwrap().value() - 3.0).abs() < 1e-10);
         assert!((run_numeric("[1, 2, 3, 4, 5].quantile(0.5)").unwrap().value() - 3.0).abs() < 1e-10);
+        assert!((run_numeric("[1, 2, 3, 4, 5].median_approx()").unwrap().value() - 3.0).abs() < 1e-10);
+        assert!((run_numeric("[1, 2, 3, 4, 5].quantile_approx(0.5)").unwrap().value() - 3.0).abs() < 1e-10);
         let r = run_numeric("corr([1, 2, 3], [2, 4, 6])").unwrap().value();
         assert!((r - 1.0).abs() < 1e-10, "perfect positive correlation");
     }
@@ -3014,6 +3067,8 @@ mod tests {
         assert!(matches!(e.kind, RunErrorKind::InvalidArgument(msg) if msg.contains("quantile") && msg.contains("[0, 1]")));
         let e = run("[1, 2, 3].quantile(-0.1)").unwrap_err();
         assert!(matches!(e.kind, RunErrorKind::InvalidArgument(msg) if msg.contains("quantile")));
+        let e = run("[1, 2, 3].quantile_approx(1.5)").unwrap_err();
+        assert!(matches!(e.kind, RunErrorKind::InvalidArgument(msg) if msg.contains("quantile_approx")));
         // corr length mismatch
         let e = run("corr([1, 2], [1, 2, 3])").unwrap_err();
         assert!(matches!(e.kind, RunErrorKind::VectorLengthMismatch { .. }));
@@ -3904,6 +3959,46 @@ mod tests {
             err.to_string().contains("quantile on non-replayable stream"),
             "unexpected quantile error: {err}"
         );
+
+        let (mut tx_ma, rx_ma) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let handle_ma = register(rx_ma);
+        futures::executor::block_on(tx_ma.send(vec![
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(1.0)))),
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(2.0)))),
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(3.0)))),
+        ]))
+        .expect("send stream chunk");
+        drop(tx_ma);
+        let (v_ma, _) = run_with_stream_inputs(
+            "input x: Vector\nx.median_approx()",
+            &registry,
+            std::collections::HashMap::from([("x".to_string(), handle_ma)]),
+        )
+        .expect("median_approx should stream on non-replayable input");
+        let q_ma = v_ma
+            .to_quantity(&SymbolRegistry::default_registry())
+            .expect("median_approx returns numeric");
+        assert!((q_ma.value() - 2.0).abs() < 1e-10);
+
+        let (mut tx_qa, rx_qa) = futures::channel::mpsc::channel(STREAM_CHANNEL_CAPACITY);
+        let handle_qa = register(rx_qa);
+        futures::executor::block_on(tx_qa.send(vec![
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(1.0)))),
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(2.0)))),
+            Ok(Some(Value::Numeric(Quantity::from_exact_scalar(3.0)))),
+        ]))
+        .expect("send stream chunk");
+        drop(tx_qa);
+        let (v_qa, _) = run_with_stream_inputs(
+            "input x: Vector\nx.quantile_approx(0.5)",
+            &registry,
+            std::collections::HashMap::from([("x".to_string(), handle_qa)]),
+        )
+        .expect("quantile_approx should stream on non-replayable input");
+        let q_qa = v_qa
+            .to_quantity(&SymbolRegistry::default_registry())
+            .expect("quantile_approx returns numeric");
+        assert!((q_qa.value() - 2.0).abs() < 1e-10);
     }
 
     #[test]
@@ -4453,5 +4548,57 @@ mod tests {
             value(&db, empty_scope(&db), root2).unwrap().to_quantity(&sym).unwrap().value(),
             12.0
         );
+    }
+
+    #[test]
+    fn session_reuses_single_database_across_evals() {
+        let mut session = Session::new(default_si_registry());
+        let db_ptr_1 = session.db() as *const salsa::DatabaseImpl as usize;
+        let v1 = session.eval("1 + 2").unwrap();
+        let q1 = v1
+            .to_quantity(&SymbolRegistry::default_registry())
+            .unwrap()
+            .value();
+        assert!((q1 - 3.0).abs() < 1e-12);
+        let db_ptr_2 = session.db() as *const salsa::DatabaseImpl as usize;
+        let v2 = session.eval("10 + 2").unwrap();
+        let q2 = v2
+            .to_quantity(&SymbolRegistry::default_registry())
+            .unwrap()
+            .value();
+        assert!((q2 - 12.0).abs() < 1e-12);
+        assert_eq!(db_ptr_1, db_ptr_2, "session should keep one database");
+    }
+
+    #[test]
+    fn session_eval_with_stream_inputs_supports_declared_vector_inputs() {
+        use futures::sink::SinkExt;
+        use futures::stream::StreamExt;
+
+        let mut session = Session::new(default_si_registry());
+        let (stream_id, mut sender) = create_stream_input();
+        let value = session
+            .eval_with_stream_inputs(
+                "input x: Vector\nx",
+                std::collections::HashMap::from([("x".to_string(), stream_id)]),
+            )
+            .unwrap();
+        futures::executor::block_on(async {
+            sender
+                .send(vec![
+                    Ok(Some(Value::Numeric(Quantity::from_scalar(1.0)))),
+                    Ok(Some(Value::Numeric(Quantity::from_scalar(2.0)))),
+                ])
+                .await
+                .unwrap();
+        });
+        drop(sender);
+        let inner = match value {
+            Value::Vector(v) => v.inner,
+            _ => panic!("expected vector"),
+        };
+        let stream = vector_into_stream(session.db(), inner);
+        let out: Vec<_> = futures::executor::block_on(stream.collect());
+        assert_eq!(out.len(), 2);
     }
 }

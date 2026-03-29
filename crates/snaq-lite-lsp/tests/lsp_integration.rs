@@ -3680,6 +3680,53 @@ async fn fetch_result_slice_invalid_path_returns_invalid_params() {
 }
 
 #[tokio::test]
+async fn fetch_result_slice_rejects_zero_limit() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/limit0.sl", "[1,2,3]", 1).await;
+    let sub = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 540,
+        "method": "snaqlite/graph/subscribeWidget",
+        "params": { "widgetId": "w-limit0", "sourceUri": "snaq://graph/limit0.sl" }
+    });
+    client_w
+        .write_all(&lsp_message(&sub.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 540).await;
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 541,
+        "method": "snaqlite/graph/fetchResultSlice",
+        "params": { "widgetId": "w-limit0", "path": [], "offset": 0, "limit": 0 }
+    });
+    client_w
+        .write_all(&lsp_message(&req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 541).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"]["code"].as_i64(), Some(-32602));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("limit must be greater than 0"),
+        "expected explicit limit validation error: {v}"
+    );
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
 async fn graph_runtime_recomputes_without_widget_subscriptions() {
     // Headless recompute path: no widget subscribed during mutation, later subscribe sees latest value.
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);

@@ -444,6 +444,11 @@ impl SnaqLiteBackend {
         )
     }
 
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    fn should_stream_wasm_vector_progress(inner: &snaq_lite_lang::LazyVector) -> bool {
+        !matches!(inner, snaq_lite_lang::LazyVector::FromInput(_))
+    }
+
     fn resolve_target_input_param_id(
         input_decls: &[snaq_lite_lang::GraphInputDecl],
         target_input_name: &str,
@@ -620,6 +625,11 @@ impl SnaqLiteBackend {
     ) {
         use futures::stream::StreamExt;
         const BATCH_SIZE: usize = 100;
+        // Do not consume non-replayable input receivers here.
+        // `fetchResultSlice` owns forward-only consumption for handle-scoped `FromInput` values.
+        if !Self::should_stream_wasm_vector_progress(&inner) {
+            return;
+        }
         let mut stream = snaq_lite_lang::vector_into_stream(db, inner);
         let mut batch: Vec<serde_json::Value> = Vec::with_capacity(BATCH_SIZE);
         let mut offset: u64 = 0;
@@ -2771,7 +2781,7 @@ impl SnaqLiteBackend {
         &self,
         params: FetchResultSliceParams,
     ) -> tower_lsp::jsonrpc::Result<FetchResultSliceResponse> {
-        let (value, source_uri, source_handle, source_revision, handle_forward_only) =
+        let (value, source_uri, source_handle, handle_forward_only) =
             if let Some(handle) = params.result_handle.clone() {
             let entry = {
                 let handles = self.result_handles.lock().await;
@@ -2784,7 +2794,6 @@ impl SnaqLiteBackend {
                 entry.value,
                 entry.source_uri,
                 Some(handle),
-                Some(entry.revision),
                 entry.forward_only,
             )
         } else if let Some(widget_id) = params.widget_id.clone() {
@@ -2802,13 +2811,18 @@ impl SnaqLiteBackend {
                     "Widget not found or result not available",
                 )
             })?;
-            (value, source_uri, None, None, false)
+            (value, source_uri, None, false)
         } else {
             return Err(tower_lsp::jsonrpc::Error::invalid_params(
                 "must provide widgetId or resultHandle",
             ));
         };
         self.ensure_graph_canvas_uri_request(&source_uri).await?;
+        if params.limit == 0 {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "limit must be greater than 0",
+            ));
+        }
         let path_segments: Vec<PathSegment> = params.path;
         if let Some(handle) = source_handle.as_deref() {
             if let Some(cursor) = params.cursor.as_deref() {
@@ -2864,57 +2878,46 @@ impl SnaqLiteBackend {
             let state = self.state.lock().await;
             state.db().clone()
         };
-        let (elements, total_count, supports_cursor) = {
+        let (elements, total_count, supports_cursor, explicit_has_more) = {
             let sub_value = Self::resolve_path(&value, &path_segments, &db).ok_or_else(|| {
                 tower_lsp::jsonrpc::Error::invalid_params("Invalid path or value not found")
             })?;
 
-            let (elements, total_count, supports_cursor) = match &sub_value {
+            let (elements, total_count, supports_cursor, explicit_has_more) = match &sub_value {
                 snaq_lite_lang::Value::Vector(v) => {
                     let non_replayable = matches!(v.inner, snaq_lite_lang::LazyVector::FromInput(_));
                     let offset = params.offset as usize;
                     let limit = params.limit as usize;
 
-                    let (total_count, slice_vec) = match &v.inner {
+                    let (total_count, slice_vec, has_more_override) = match &v.inner {
                         snaq_lite_lang::LazyVector::FromEvaluated(collected) => {
                             let total_count = collected.len() as u64;
                             let start = offset.min(collected.len());
                             let end = (offset + limit).min(collected.len());
                             let slice_vec: Vec<_> = collected[start..end].to_vec();
-                            (total_count, slice_vec)
+                            (total_count, slice_vec, None)
                         }
                         snaq_lite_lang::LazyVector::FromInput(_) if source_handle.is_some() => {
-                            // Non-replayable root: collect once, then upgrade handle to replayable cache.
-                            let collected = snaq_lite_lang::collect_vector_stream(&db, v.inner.clone());
-                            let total_count = collected.len() as u64;
-                            let start = offset.min(collected.len());
-                            let end = (offset + limit).min(collected.len());
-                            let slice_vec: Vec<_> = collected[start..end].to_vec();
-                            if let (Some(handle), Some(revision)) =
-                                (source_handle.as_deref(), source_revision)
-                            {
-                                let cached_value = snaq_lite_lang::Value::Vector(
-                                    snaq_lite_lang::VectorValue {
-                                        inner: snaq_lite_lang::LazyVector::FromEvaluated(collected),
-                                        orientation: v.orientation,
-                                    },
-                                );
-                                let _ = self
-                                    .result_handles
-                                    .lock()
-                                    .await
-                                    .update_handle_value(handle, revision, cached_value);
-                            }
-                            (total_count, slice_vec)
+                            let handle = source_handle
+                                .as_deref()
+                                .expect("checked source_handle.is_some()");
+                            let page = self
+                                .result_handles
+                                .lock()
+                                .await
+                                .read_forward_only_page(handle, params.offset, limit)
+                                .map_err(tower_lsp::jsonrpc::Error::invalid_params)?;
+                            (page.total_count, page.items, Some(page.has_more))
                         }
                         _ => {
                             // Stream once to compute both total count and requested window.
-                            collect_vector_slice_window(
+                            let (total_count, slice_vec) = collect_vector_slice_window(
                                 &db,
                                 v.inner.clone(),
                                 offset,
                                 limit,
-                            )
+                            );
+                            (total_count, slice_vec, None)
                         }
                     };
 
@@ -2935,7 +2938,7 @@ impl SnaqLiteBackend {
                         })
                         .collect();
                     let supports_cursor = !non_replayable || source_handle.is_some();
-                    (elements, total_count, supports_cursor)
+                    (elements, total_count, supports_cursor, has_more_override)
                 }
                 snaq_lite_lang::Value::Map(id) => {
                     use snaq_lite_lang::map_registry;
@@ -2955,7 +2958,7 @@ impl SnaqLiteBackend {
                             })
                         })
                         .collect();
-                    (elements, total_count, true)
+                    (elements, total_count, true, None)
                 }
                 _ => {
                     return Err(tower_lsp::jsonrpc::Error::invalid_params(
@@ -2963,10 +2966,11 @@ impl SnaqLiteBackend {
                     ));
                 }
             };
-            (elements, total_count, supports_cursor)
+            (elements, total_count, supports_cursor, explicit_has_more)
         };
 
-        let has_more = params.offset + (elements.len() as u64) < total_count;
+        let has_more = explicit_has_more
+            .unwrap_or_else(|| params.offset + (elements.len() as u64) < total_count);
         let next_cursor = if has_more && supports_cursor {
             if let Some(handle) = source_handle.as_deref() {
                 Some(
@@ -3259,6 +3263,26 @@ where
     pool.run_until(future)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn send_batch_native(
+    senders: &mut [snaq_lite_lang::StreamChunkSender],
+    mut batch: Vec<Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>>,
+) {
+    use futures::sink::SinkExt;
+    if senders.is_empty() {
+        return;
+    }
+    let last_idx = senders.len().saturating_sub(1);
+    for (idx, sender) in senders.iter_mut().enumerate() {
+        if idx == last_idx {
+            let payload = std::mem::take(&mut batch);
+            let _ = run_local_future(sender.send(payload));
+        } else {
+            let _ = run_local_future(sender.send(batch.clone()));
+        }
+    }
+}
+
 /// Feed one upstream value to multiple Chunk senders (one handle per edge when one source feeds multiple inputs).
 /// Uses bounded send (block_on on native, spawn_local on WASM) for back-pressure.
 fn feed_value_to_senders(
@@ -3284,19 +3308,14 @@ fn feed_value_to_senders(
                         Some(item) => {
                             batch.push(item);
                             if batch.len() >= FANOUT_CHUNK_SIZE {
-                                for sender in &mut senders {
-                                    let _ = run_local_future(sender.send(batch.clone()));
-                                }
-                                batch.clear();
+                                send_batch_native(&mut senders, std::mem::take(&mut batch));
                             }
                         }
                         None => break,
                     }
                 }
                 if !batch.is_empty() {
-                    for sender in &mut senders {
-                        let _ = run_local_future(sender.send(batch.clone()));
-                    }
+                    send_batch_native(&mut senders, batch);
                 }
             }
             #[cfg(target_arch = "wasm32")]
@@ -4000,6 +4019,21 @@ mod tests {
             display.contains("3"),
             "display should show result: {}",
             display
+        );
+    }
+
+    #[test]
+    fn wasm_progress_guard_skips_from_input_vectors() {
+        let (handle_id, _sender) = snaq_lite_lang::create_stream_input();
+        let from_input = snaq_lite_lang::LazyVector::FromInput(handle_id);
+        let replayable = snaq_lite_lang::LazyVector::FromEvaluated(vec![]);
+        assert!(
+            !SnaqLiteBackend::should_stream_wasm_vector_progress(&from_input),
+            "FromInput must be excluded to preserve handle receiver for fetchResultSlice"
+        );
+        assert!(
+            SnaqLiteBackend::should_stream_wasm_vector_progress(&replayable),
+            "Replayable vectors should still support progress streaming"
         );
     }
 

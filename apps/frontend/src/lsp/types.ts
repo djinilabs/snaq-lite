@@ -33,6 +33,7 @@ export type JsonRpcInbound = JsonRpcSuccess | JsonRpcFailure | JsonRpcNotificati
 
 export interface BootstrapSessionResponse {
   canvasId?: string
+  canvasRevision: number
   openDocuments: number
   subscriptions: number
   widgets: number
@@ -66,6 +67,18 @@ export interface PublishNodeResultParams {
   canvasId?: string
   uri?: string
   data?: Record<string, unknown>
+}
+
+export interface NodeSignatureInput {
+  name: string
+  paramId: string
+  type: string
+}
+
+export interface NodeSignatureUpdatedParams {
+  uri: string
+  inputs: NodeSignatureInput[]
+  outputType?: string | null
 }
 
 export interface WidgetDataUpdateParams {

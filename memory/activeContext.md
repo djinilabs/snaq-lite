@@ -2,6 +2,92 @@
 
 ## Just completed
 
+- **Post-implementation review + hardening pass (frontend canvas bridge):**
+  - Performed a code review focused on recently landed canvas/LSP bridge changes and improved robustness in `apps/frontend/src/routes/index.tsx`.
+  - Improvements implemented:
+    - Removed residual 2-node assumption when applying `publishNodeResult` handles: active handle updates now target the last downstream node in the current chain.
+    - Hardened `nodeSignatureUpdated` notification handling with defensive shape checks (`uri` present and `inputs` is an array) to avoid runtime exceptions on malformed payloads.
+    - Replaced stale state reads with ref-backed reads for subscription mutations (`unsubscribeAllNodes`, `refreshSubscriptionForUri`, and `subscribeDownstreamNodes`) to reduce async closure drift risks during rapid updates/canvas switches.
+    - Kept `nodeSubscriptionsRef` in sync immediately after mass unsubscribe.
+  - Verification green:
+    - `pnpm -C apps/frontend run test`
+    - `pnpm -C apps/frontend run lint`
+    - `pnpm -C apps/frontend run build`
+    - `pnpm -C apps/frontend run smoketest`
+
+- **Plan-closure audit + frontend smoke-flow generalization (3-node chain):**
+  - Reviewed `bridge_canvas_runtime_gaps_aff8ef23.plan.md` against implementation and acceptance criteria.
+  - Closed remaining Priority 4 gap in `apps/frontend/src/routes/index.tsx` by removing 2-node bridge-only behavior:
+    - Default canvas nodes now include `node-3`.
+    - `connectNodes` now wires a sequential chain across all nodes (`node-1 -> node-2 -> node-3` for default state).
+    - `disconnectNodes` now disconnects all downstream inputs in that chain.
+    - `subscribeDownstreamNodes` now subscribes all downstream node URIs (not only node-2), with latest handle retained for paging controls.
+    - `runBridgeScenario` now uses downstream-wide subscriptions in both primary and recovery canvases.
+  - Tightened smoke assertions in `apps/frontend/e2e/home.spec.ts`:
+    - Verifies third node UI is present.
+    - Verifies downstream status list includes both node-2 and node-3.
+    - Verifies upstream source edits still drive downstream completed updates.
+  - Verification green (frontend required gates):
+    - `pnpm -C apps/frontend run test`
+    - `pnpm -C apps/frontend run lint`
+    - `pnpm -C apps/frontend run build`
+    - `pnpm -C apps/frontend run smoketest`
+
+- **Canvas-LSP critical gap closure pass (URI invariants + canvas revision metadata + strict downstream recompute + frontend signature reconciliation + transport hardening):**
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - `ensure_canvas_uri_request` now rejects malformed `snaq` document URIs without host (`snaq://<canvasId>/...` required).
+    - `didClose` now uses the same rebind-aware guard path as `didOpen`/`didChange`.
+    - Added canvas metadata support to snapshot/session surfaces:
+      - `bootstrapSession` includes `canvasRevision`.
+      - `exportCanvasDocument` includes `revision` + optional `layout`.
+      - `importCanvasDocument` consumes `revision` + optional `layout` and applies them as canonical runtime metadata.
+    - `graph/applyPatch` now bumps canvas revision exactly once per successful patch wave.
+    - Recompute propagation now reevaluates downstream targets during mutation waves (no semantic-change skip gate).
+    - Map `Completed` payload summaries no longer include eager key previews (`resultSummary.keyCount` only).
+  - `crates/snaq-lite-lsp/src/state.rs`:
+    - Added `canvas_revision` and `canvas_layout` state with getters/setters and monotonic bump helper.
+  - `crates/snaq-lite-lsp/src/pubsub.rs`:
+    - Extended `CanvasDocumentPayload` with `revision` + optional `layout`.
+    - Extended `BootstrapSessionResponse` with `canvasRevision`.
+  - `crates/snaq-lite-lsp/tests/lsp_integration.rs`:
+    - Added `did_open_rejects_snaq_uri_without_canvas_host`.
+    - Added `canvas_revision_and_layout_roundtrip_and_patch_bump_contract`.
+    - Updated descendant recompute assertion to `did_change_on_source_with_same_output_recomputes_descendants`.
+  - `apps/frontend/src/lsp/types.ts`:
+    - Added `canvasRevision` to bootstrap response type.
+    - Added typed `nodeSignatureUpdated` payload (`NodeSignatureUpdatedParams`).
+  - `apps/frontend/src/lsp/node-runtime-state.ts` (+ test):
+    - Added `applyNodeSignatureUpdated` to reconcile node params from backend signature notifications.
+  - `apps/frontend/src/routes/index.tsx`:
+    - Wired `snaqlite/graph/nodeSignatureUpdated` notification handling to canonicalize node param state.
+  - `apps/frontend/src/lsp/canvas-runtime.test.ts`:
+    - Added empty-canvas-id rejection coverage for `toCanvasUri`.
+  - `apps/frontend/src/lsp/session-orchestrator.ts` (+ test):
+    - Extended snapshot type with optional `revision`/`layout`; updated mocks for new bootstrap contract.
+  - `docs/LSP.md`:
+    - Documented `canvasRevision` in bootstrap.
+    - Documented `revision` + optional `layout` in canvas snapshot export/import.
+    - Updated document-change propagation text to descendant reevaluation.
+    - Updated map completed-summary docs to keyCount-only lightweight metadata.
+  - Verification green:
+    - Targeted RED/GREEN cycles:
+      - `cargo test -p snaq-lite-lsp did_open_rejects_snaq_uri_without_canvas_host -- --nocapture`
+      - `cargo test -p snaq-lite-lsp canvas_revision_and_layout_roundtrip_and_patch_bump_contract -- --nocapture`
+      - `cargo test -p snaq-lite-lsp did_change_on_source_with_same_output_recomputes_descendants -- --nocapture`
+      - `cargo test -p snaq-lite-lsp build_completed_payload_map_omits_eager_keys_preview -- --nocapture`
+      - `pnpm -C apps/frontend run test -- src/lsp/canvas-runtime.test.ts`
+      - `pnpm -C apps/frontend run test -- src/lsp/node-runtime-state.test.ts`
+    - Full verification:
+      - `cargo test -p snaq-lite-lsp`
+      - `pnpm -C apps/frontend run lint`
+      - `pnpm -C apps/frontend run typecheck`
+      - `pnpm -C apps/frontend run build`
+      - `pnpm -C apps/frontend run smoketest`
+      - `pnpm test`
+      - `pnpm run lint`
+      - `pnpm build`
+      - `pnpm smoketest`
+
 - **LSP precompiled-root panic guard:**
   - `crates/snaq-lite-lsp/src/lib.rs`:
     - Added `root_def_is_resolved(...)` and gated `run_resolved_with_stream_inputs(...)` behind it.

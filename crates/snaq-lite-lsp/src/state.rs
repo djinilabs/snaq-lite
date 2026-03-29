@@ -32,6 +32,8 @@ pub struct LspState {
     documents: HashMap<Url, DocumentEntry>,
     unit_registry: UnitRegistry,
     active_canvas_id: Option<String>,
+    canvas_revision: u64,
+    canvas_layout: Option<serde_json::Value>,
 }
 
 fn empty_block_def() -> ExprDef {
@@ -58,6 +60,8 @@ impl LspState {
             documents: HashMap::new(),
             unit_registry: default_si_registry(),
             active_canvas_id: None,
+            canvas_revision: 0,
+            canvas_layout: None,
         }
     }
 
@@ -100,6 +104,29 @@ impl LspState {
 
     pub fn force_rebind_canvas_uri(&mut self, uri: &Url) {
         self.active_canvas_id = Some(Self::canvas_id_for_uri(uri));
+        self.canvas_revision = 0;
+        self.canvas_layout = None;
+    }
+
+    pub fn canvas_revision(&self) -> u64 {
+        self.canvas_revision
+    }
+
+    pub fn bump_canvas_revision(&mut self) -> u64 {
+        self.canvas_revision = self.canvas_revision.saturating_add(1);
+        self.canvas_revision
+    }
+
+    pub fn set_canvas_revision(&mut self, revision: u64) {
+        self.canvas_revision = revision;
+    }
+
+    pub fn canvas_layout(&self) -> Option<serde_json::Value> {
+        self.canvas_layout.clone()
+    }
+
+    pub fn set_canvas_layout(&mut self, layout: Option<serde_json::Value>) {
+        self.canvas_layout = layout;
     }
 
     /// Update document content and re-parse/resolve/simplify; update diagnostics for this URI.

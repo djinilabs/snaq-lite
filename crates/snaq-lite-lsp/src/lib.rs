@@ -247,18 +247,17 @@ impl LanguageServer for SnaqLiteBackend {
 
     async fn did_close(&self, params: tower_lsp::lsp_types::DidCloseTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        {
-            let mut state = self.state.lock().await;
-            if let Err(msg) = state.ensure_canvas_uri(&uri) {
-                drop(state);
-                self.client
-                    .log_message(
-                        MessageType::ERROR,
-                        format!("didClose rejected due to canvas isolation: {msg}"),
-                    )
-                    .await;
-                return;
-            }
+        if let Err(err) = self.ensure_canvas_uri_request(&uri).await {
+            self.client
+                .log_message(
+                    MessageType::ERROR,
+                    format!(
+                        "didClose rejected due to canvas isolation: {}",
+                        err.message
+                    ),
+                )
+                .await;
+            return;
         }
         let changed_roots = self.cleanup_for_closed_uri(&uri).await;
         self.client.publish_diagnostics(uri.clone(), Vec::new(), None).await;
@@ -475,6 +474,11 @@ impl SnaqLiteBackend {
     }
 
     async fn ensure_canvas_uri_request(&self, uri: &Url) -> tower_lsp::jsonrpc::Result<()> {
+        if uri.scheme() == "snaq" && uri.host_str().is_none() {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "canvas document URIs require snaq://<canvasId>/... form",
+            ));
+        }
         {
             let mut state = self.state.lock().await;
             if state.ensure_canvas_uri(uri).is_ok() {
@@ -552,9 +556,13 @@ impl SnaqLiteBackend {
 
     fn canvas_payload_from_model(
         model: snaq_lite_lang::CanvasDocument,
+        revision: u64,
+        layout: Option<serde_json::Value>,
     ) -> crate::pubsub::CanvasDocumentPayload {
         crate::pubsub::CanvasDocumentPayload {
             canvas_id: model.canvas_id,
+            revision,
+            layout,
             nodes: model
                 .nodes
                 .into_iter()
@@ -578,8 +586,12 @@ impl SnaqLiteBackend {
 
     fn canvas_model_from_payload(
         payload: crate::pubsub::CanvasDocumentPayload,
-    ) -> snaq_lite_lang::CanvasDocument {
-        snaq_lite_lang::CanvasDocument {
+    ) -> (
+        snaq_lite_lang::CanvasDocument,
+        u64,
+        Option<serde_json::Value>,
+    ) {
+        let model = snaq_lite_lang::CanvasDocument {
             canvas_id: payload.canvas_id,
             nodes: payload
                 .nodes
@@ -599,7 +611,8 @@ impl SnaqLiteBackend {
                     target_param_id: e.target_param_id,
                 })
                 .collect(),
-        }
+        };
+        (model, payload.revision, payload.layout)
     }
 
     async fn send_publish_result_notifications(&self, params: PublishResultParams) {
@@ -1077,7 +1090,7 @@ impl SnaqLiteBackend {
             let result = self
                 .run_node_with_graph_inputs_cached(&uri, None, &mut shared_cache)
                 .await;
-            let (revision, semantic_changed, result_handle) = {
+            let (revision, _semantic_changed, result_handle) = {
                 let mut store = self.node_results.lock().await;
                 match &result {
                     Ok((value, _)) => {
@@ -1107,15 +1120,14 @@ impl SnaqLiteBackend {
             .await;
             self.update_document_subscribers_for_uri(&uri, result, revision, result_handle.as_deref())
                 .await;
-            if force_downstream || semantic_changed {
-                let downstream = { self.graph_state.lock().await.targets_from_source(&uri) };
-                for target in downstream {
-                    if !docs.contains(&target) || !queued.insert(target.clone()) {
-                        continue;
-                    }
-                    shared_cache.remove(&target);
-                    queue.push_back(target);
+            let _ = force_downstream;
+            let downstream = { self.graph_state.lock().await.targets_from_source(&uri) };
+            for target in downstream {
+                if !docs.contains(&target) || !queued.insert(target.clone()) {
+                    continue;
                 }
+                shared_cache.remove(&target);
+                queue.push_back(target);
             }
         }
         let mut cache = self.run_cache.lock().await;
@@ -2173,6 +2185,10 @@ impl SnaqLiteBackend {
         let force_downstream =
             reconciled_pruned_edges || had_topology_targets || had_revalidated_targets;
         let changed_roots_vec: Vec<Url> = changed_roots.iter().cloned().collect();
+        {
+            let mut state = self.state.lock().await;
+            let _ = state.bump_canvas_revision();
+        }
         self.recompute_and_push(&changed_roots_vec, force_downstream).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
@@ -2197,9 +2213,13 @@ impl SnaqLiteBackend {
         &self,
         _params: BootstrapSessionParams,
     ) -> tower_lsp::jsonrpc::Result<BootstrapSessionResponse> {
-        let (canvas_id, open_documents) = {
+        let (canvas_id, canvas_revision, open_documents) = {
             let state = self.state.lock().await;
-            (state.active_canvas_id(), state.document_count())
+            (
+                state.active_canvas_id(),
+                state.canvas_revision(),
+                state.document_count(),
+            )
         };
         let subscriptions = self.subscriptions.lock().await.len();
         let widgets = self.widgets.lock().await.len();
@@ -2208,6 +2228,7 @@ impl SnaqLiteBackend {
             open_documents == 0 && subscriptions == 0 && widgets == 0 && result_handles == 0;
         Ok(BootstrapSessionResponse {
             canvas_id,
+            canvas_revision,
             open_documents,
             subscriptions,
             widgets,
@@ -2302,12 +2323,14 @@ impl SnaqLiteBackend {
         &self,
         _params: ExportCanvasDocumentParams,
     ) -> tower_lsp::jsonrpc::Result<ExportCanvasDocumentResponse> {
-        let (canvas_id, docs, edges) = {
+        let (canvas_id, canvas_revision, canvas_layout, docs, edges) = {
             let state = self.state.lock().await;
             let canvas_id = state.active_canvas_id();
+            let canvas_revision = state.canvas_revision();
+            let canvas_layout = state.canvas_layout();
             let docs = state.snapshot_documents();
             let edges = self.graph_state.lock().await.edges_snapshot();
-            (canvas_id, docs, edges)
+            (canvas_id, canvas_revision, canvas_layout, docs, edges)
         };
         let model = snaq_lite_lang::CanvasDocument {
             canvas_id,
@@ -2329,7 +2352,11 @@ impl SnaqLiteBackend {
                 .collect(),
         };
         Ok(ExportCanvasDocumentResponse {
-            canvas_document: Self::canvas_payload_from_model(model),
+            canvas_document: Self::canvas_payload_from_model(
+                model,
+                canvas_revision,
+                canvas_layout,
+            ),
         })
     }
 
@@ -2338,7 +2365,8 @@ impl SnaqLiteBackend {
         &self,
         params: ImportCanvasDocumentParams,
     ) -> tower_lsp::jsonrpc::Result<ImportCanvasDocumentResponse> {
-        let model = Self::canvas_model_from_payload(params.canvas_document);
+        let (model, requested_revision, requested_layout) =
+            Self::canvas_model_from_payload(params.canvas_document);
         let mut node_entries: Vec<(Url, String, i32)> = Vec::new();
         for (idx, node) in model.nodes.iter().enumerate() {
             let uri = Url::parse(&node.uri)
@@ -2405,6 +2433,8 @@ impl SnaqLiteBackend {
             for (uri, source, version) in &node_entries {
                 state.update_document(uri.clone(), *version, source);
             }
+            state.set_canvas_revision(requested_revision);
+            state.set_canvas_layout(requested_layout);
         }
 
         let uris: Vec<Url> = node_entries.iter().map(|(u, _, _)| u.clone()).collect();
@@ -2457,16 +2487,11 @@ impl SnaqLiteBackend {
             snaq_lite_lang::Value::Map(id) => {
                 let entries = map_registry::get(*id).unwrap_or_default();
                 let key_count = entries.len();
-                let keys = if key_count <= 20 {
-                    Some(entries.into_iter().map(|(k, _)| k).collect::<Vec<_>>())
-                } else {
-                    None
-                };
                 (
                     ResultType::Map,
                     Some(ResultSummary {
                         length: None,
-                        keys,
+                        keys: None,
                         key_count: Some(key_count),
                     }),
                     Some("<map>".to_string()),
@@ -4097,6 +4122,32 @@ mod tests {
         assert!(
             payload.get("resultSummary").is_some() || payload.get("totalElements").is_some(),
             "vector payload should include summary metadata when available"
+        );
+    }
+
+    #[test]
+    fn build_completed_payload_map_omits_eager_keys_preview() {
+        let (value, db) = snaq_lite_lang::run_with_stream_inputs(
+            "{ a: 1, b: 2 }",
+            &snaq_lite_lang::default_si_registry(),
+            std::collections::HashMap::new(),
+        )
+        .expect("map run");
+        let payload = SnaqLiteBackend::build_completed_payload(&value, &db, Some("handle-map"));
+        assert_eq!(payload["resultType"].as_str(), Some("Map"));
+        assert_eq!(payload["resultHandle"].as_str(), Some("handle-map"));
+        assert!(payload.get("display").is_some(), "map summary may include lightweight display");
+        let summary = payload
+            .get("resultSummary")
+            .and_then(|s| s.as_object())
+            .expect("map payload should include summary");
+        assert!(
+            !summary.contains_key("keys"),
+            "map completed payload should not eagerly include keys preview"
+        );
+        assert!(
+            summary.contains_key("keyCount"),
+            "map completed payload should include keyCount for lightweight summary"
         );
     }
 

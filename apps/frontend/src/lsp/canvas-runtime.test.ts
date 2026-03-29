@@ -37,6 +37,12 @@ describe('canvas runtime helpers', () => {
     )
   })
 
+  it('rejects empty canvas id for canvas mapping', () => {
+    expect(() => toCanvasUri('snaq://canvas-a/node-1.sl', '   ')).toThrow(
+      'canvasId must not be empty',
+    )
+  })
+
   it('opens all nodes as deterministic didOpen payloads', async () => {
     const client = createClientMock()
     await openCanvasNodes(

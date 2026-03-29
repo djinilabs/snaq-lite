@@ -127,6 +127,10 @@ pub struct CanvasEdgePayload {
 pub struct CanvasDocumentPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canvas_id: Option<String>,
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<serde_json::Value>,
     pub nodes: Vec<CanvasNodeDocumentPayload>,
     pub edges: Vec<CanvasEdgePayload>,
 }
@@ -295,6 +299,7 @@ pub struct BootstrapSessionParams {}
 pub struct BootstrapSessionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canvas_id: Option<String>,
+    pub canvas_revision: u64,
     pub open_documents: usize,
     pub subscriptions: usize,
     pub widgets: usize,
@@ -469,6 +474,8 @@ mod tests {
     fn canvas_document_payload_roundtrip_json() {
         let payload = CanvasDocumentPayload {
             canvas_id: Some("canvas-a".to_string()),
+            revision: 5,
+            layout: Some(serde_json::json!({"viewport":{"x":1,"y":2,"zoom":1.0}})),
             nodes: vec![CanvasNodeDocumentPayload {
                 uri: "snaq://canvas-a/n1.sl".to_string(),
                 source: "1 + 2".to_string(),
@@ -483,6 +490,11 @@ mod tests {
         let json = serde_json::to_value(&payload).expect("serialize");
         let decoded: CanvasDocumentPayload = serde_json::from_value(json).expect("deserialize");
         assert_eq!(decoded.canvas_id.as_deref(), Some("canvas-a"));
+        assert_eq!(decoded.revision, 5);
+        assert_eq!(
+            decoded.layout.as_ref().and_then(|v| v.get("viewport")),
+            Some(&serde_json::json!({"x":1,"y":2,"zoom":1.0}))
+        );
         assert_eq!(decoded.nodes.len(), 1);
         assert_eq!(decoded.edges.len(), 1);
     }

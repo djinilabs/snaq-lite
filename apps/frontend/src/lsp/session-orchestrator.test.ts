@@ -19,6 +19,7 @@ function createClientMock(overrides?: Partial<LspClient>): LspClient {
     unsubscribeNode: vi.fn(async () => undefined),
     bootstrapSession: vi.fn(async () => ({
       canvasId: 'canvas-a',
+      canvasRevision: 0,
       openDocuments: 0,
       subscriptions: 0,
       widgets: 0,
@@ -38,6 +39,7 @@ describe('ensureCanvasSession', () => {
     const client = createClientMock({
       bootstrapSession: vi.fn(async () => ({
         canvasId: 'canvas-a',
+        canvasRevision: 3,
         openDocuments: 1,
         subscriptions: 1,
         widgets: 0,
@@ -64,6 +66,7 @@ describe('ensureCanvasSession', () => {
       .fn()
       .mockResolvedValueOnce({
         canvasId: 'canvas-a',
+        canvasRevision: 4,
         openDocuments: 2,
         subscriptions: 1,
         widgets: 0,
@@ -72,6 +75,7 @@ describe('ensureCanvasSession', () => {
       })
       .mockResolvedValueOnce({
         canvasId: 'canvas-b',
+        canvasRevision: 0,
         openDocuments: 0,
         subscriptions: 0,
         widgets: 0,

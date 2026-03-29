@@ -25,7 +25,7 @@ When a subscribed result is a vector (e.g. from a literal or from `$name`), the 
 | `snaqlite/subscribeNode` | Request | `{ sourceUri }` | `{ subscriptionId: string, resultHandle?: string }` or error |
 | `snaqlite/unsubscribeNode` | Request | `{ subscriptionId: string }` | `null` or error |
 | `snaqlite/publishNodeResult` | Notification (server → client) | `{ subscriptionId, status, data? }` | — |
-| `snaqlite/bootstrapSession` | Request | `{}` | `{ canvasId?, openDocuments, subscriptions, widgets, resultHandles, runtimeDrained }` |
+| `snaqlite/bootstrapSession` | Request | `{}` | `{ canvasId?, canvasRevision, openDocuments, subscriptions, widgets, resultHandles, runtimeDrained }` |
 
 **Status:** `"Running"` \| `"Completed"` \| `"Error"` \| `"Cancelled"`.
 
@@ -45,7 +45,7 @@ When a subscribed result is a vector (e.g. from a literal or from `$name`), the 
   - `subscribeNode` evaluates with graph inputs (upstream wiring applied).
   - If the result is a vector, the server returns a `subscriptionId` and emits `Running` updates followed by `Completed` or `Error`.
 - **Unsubscribe:** Client sends `snaqlite/unsubscribeNode` with `subscriptionId`. The server cancels the consumer and stops sending for that subscription.
-- **Document change:** On `textDocument/didChange` (or open), the server recomputes impacted nodes and pushes fresh `Completed` / `Error` updates for active subscriptions/widgets on affected URIs. Descendant propagation is **semantic-change gated**: downstream nodes are reevaluated only when an upstream node’s value/error state changes. Topology mutations (connect/disconnect/edge pruning) still force downstream reevaluation.
+- **Document change:** On `textDocument/didChange` (or open), the server recomputes impacted nodes and pushes fresh `Completed` / `Error` updates for active subscriptions/widgets on affected URIs. Descendants are reevaluated during the mutation wave so downstream consumers do not retain stale values after no-op textual edits.
 
 Clients should send `snaqlite/unsubscribeNode` when closing a subscribed node view.
 
@@ -82,7 +82,7 @@ Running a node with graph inputs: when the server needs a node’s result (for `
   - **`display`** (optional) — Formatted value for scalars or when a single value is shown.
   - **`totalElements`** (optional) — Number of elements (vectors) or keys (maps) **only when known without draining lazy streams**.
   - **`resultType`** (optional) — `"Scalar"` | `"Vector"` | `"Map"` | `"Undefined"` so the client can show a type-aware summary and open a detail modal.
-  - **`resultSummary`** (optional) — For vectors: `{ length?: number }` (length may be omitted for lazy/non-materialized vectors). For maps: `{ keys?: string[], keyCount?: number }` (keys only if small).
+- **`resultSummary`** (optional) — For vectors: `{ length?: number }` (length may be omitted for lazy/non-materialized vectors). For maps: `{ keyCount?: number }` (lightweight summary only; key lists are fetched on demand via slice APIs).
 - **Request `snaqlite/graph/unsubscribeWidget`** — Params: `widgetId`. Removes the widget and clears its cached result; sends a final `widgetDataUpdate` with status `Cancelled`.
 - **Request `snaqlite/graph/fetchResultSlice`** — Fetches a paginated slice of a result at an optional **path** (for nested vectors/maps).  
   - **Params:** either `widgetId` (compatibility flow) or `resultHandle` (canonical node flow), `path` (array of path segments: **0-based** numbers for vector indices, strings for map keys; empty array = root), `offset` (number), `limit` (number), optional `cursor` (string).  
@@ -100,7 +100,7 @@ Notifications can include metadata fields:
 
 ### Reactive updates and lifecycle
 
-- **Document change** — On `didChange` / `didOpen` for a URI, the server reconciles graph inputs, recomputes impacted nodes, and pushes fresh `Completed` / `Error` updates to active subscriptions/widgets for affected nodes. Downstream recompute is skipped when upstream output/error is unchanged; topology changes still force propagation.
+- **Document change** — On `didChange` / `didOpen` for a URI, the server reconciles graph inputs, recomputes impacted nodes, and pushes fresh `Completed` / `Error` updates to active subscriptions/widgets for affected nodes. Descendants are reevaluated during the mutation wave so dependent subscriptions/widgets observe consistent updates.
 - **Document close** — On `didClose` for a URI, the server removes the document from state, removes graph edges where the URI is source/target, clears cached node result, cancels subscriptions/widgets bound to that URI (`Cancelled` with reason `"Document closed"`), and recomputes downstream dependents.
 - **Edge removal** — When `snaqlite/graph/disconnect` is called, the server removes the edge and invalidates all widget subscriptions for the target URI (cancel and send `widgetDataUpdate` Cancelled). The UI triggers disconnect when the user deletes an edge (e.g. select edge and Backspace).
 - Connect failure (type mismatch) does not add an edge, so no invalidation is needed.
@@ -141,10 +141,13 @@ Optional helpers for UI ergonomics while keeping source text canonical:
 - **Request `snaqlite/graph/exportCanvasDocument`** — Params: `{}`.
   - Response: `{ canvasDocument }`, where `canvasDocument` contains:
     - `canvasId` (optional),
+    - `revision` (number; canvas-level monotonic revision),
+    - `layout` (optional object; canvas UI metadata such as viewport),
     - `nodes[]`: `{ uri, source, version? }`,
     - `edges[]`: `{ sourceUri, targetUri, targetParamId }`.
 - **Request `snaqlite/graph/importCanvasDocument`** — Params: `{ canvasDocument }`.
   - Replaces in-memory runtime state with the supplied snapshot.
+  - Imports `canvasDocument.revision` and optional `layout` as canonical canvas metadata.
   - Cancels active subscriptions/widgets (`reason: "Canvas import"`), clears node-result cache, imports documents/edges, recomputes imported nodes, and republishes diagnostics/signatures.
   - Response: `{ importedNodes, importedEdges }`.
 

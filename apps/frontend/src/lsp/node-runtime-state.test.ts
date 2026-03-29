@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyNodeSignatureUpdated,
   applyPublishNodeResult,
   resolveNodeUriFromPublish,
   upsertNodeSubscription,
@@ -57,5 +58,43 @@ describe('node runtime state helpers', () => {
       resultHandle: 'h-2',
     })
     expect(result.resultHandle).toBe('h-2')
+  })
+
+  it('reconciles node params from nodeSignatureUpdated as canonical source', () => {
+    const currentNodes = [
+      {
+        uri: 'snaq://canvas-a/node-1.sl',
+        source: '1 + 2',
+        params: [],
+      },
+      {
+        uri: 'snaq://canvas-a/node-2.sl',
+        source: '$x',
+        params: [{ name: 'x_old', paramId: 'p1', typeName: 'Undefined' }],
+      },
+    ]
+    const next = applyNodeSignatureUpdated(currentNodes, {
+      uri: 'snaq://canvas-a/node-2.sl',
+      inputs: [
+        { name: 'x', paramId: 'p1', type: 'Vector' },
+        { name: 'y', paramId: 'p2', type: 'Numeric' },
+      ],
+      outputType: 'Vector',
+    })
+    expect(next[0].params).toEqual([])
+    expect(next[1].params).toEqual([
+      { name: 'x', paramId: 'p1', typeName: 'Vector' },
+      { name: 'y', paramId: 'p2', typeName: 'Numeric' },
+    ])
+  })
+
+  it('prefers payload uri over stale subscription map after canvas switch', () => {
+    const staleMap = { 'sub-1': 'snaq://canvas-a/node-2.sl' }
+    const publish: PublishNodeResultParams = {
+      subscriptionId: 'sub-1',
+      status: 'Completed',
+      uri: 'snaq://canvas-b/node-2.sl',
+    }
+    expect(resolveNodeUriFromPublish(publish, staleMap)).toBe('snaq://canvas-b/node-2.sl')
   })
 })

@@ -18,6 +18,7 @@ test('bridge scenario controls are available', async ({ page }) => {
 test('bridge scenario runs end-to-end', async ({ page }) => {
   await page.goto('/')
   await page.getByTestId('canvas-id-input').fill('canvas-e2e')
+  await expect(page.getByTestId('node-source-3')).toBeVisible()
   await page.getByTestId('run-scenario-btn').click()
   await expect(page.getByTestId('status-text')).toContainText('Bridge scenario completed', {
     timeout: 30_000,
@@ -34,9 +35,12 @@ test('editing node source pushes dependent updates without manual resubscribe', 
   await expect(page.getByTestId('status-text')).toContainText('Bridge scenario completed', {
     timeout: 30_000,
   })
+  await expect(page.getByTestId('node-result-status')).toContainText('snaq://canvas-e2e-edit-recovered/node-2.sl')
+  await expect(page.getByTestId('node-result-status')).toContainText('snaq://canvas-e2e-edit-recovered/node-3.sl')
   await page.getByTestId('node-source-1').fill('[9, 10, 11, 12]')
   await expect(page.getByTestId('subscription-id')).not.toContainText('none')
   await expect(page.getByTestId('notification-log')).toContainText('snaqlite/publishNodeResult')
+  await expect(page.getByTestId('node-result-status')).toContainText('node-3.sl: Completed')
 })
 
 test('connect and disconnect drive node result status transitions', async ({ page }) => {

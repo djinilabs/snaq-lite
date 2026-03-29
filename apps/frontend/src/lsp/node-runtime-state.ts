@@ -1,4 +1,6 @@
 import type { PublishNodeResultParams } from './types'
+import type { CanvasNode } from './graph-patch'
+import type { NodeSignatureUpdatedParams } from './types'
 
 export type NodeSubscriptionEntry = {
   subscriptionId: string
@@ -63,4 +65,29 @@ export function applyPublishNodeResult(
     return { nextResults, nextSubscriptions, resultHandle: maybeHandle }
   }
   return { nextResults, nextSubscriptions }
+}
+
+export function applyNodeSignatureUpdated(
+  currentNodes: CanvasNode[],
+  params: NodeSignatureUpdatedParams,
+): CanvasNode[] {
+  if (!params.uri) {
+    return currentNodes
+  }
+  let changed = false
+  const next = currentNodes.map((node) => {
+    if (node.uri !== params.uri) {
+      return node
+    }
+    changed = true
+    return {
+      ...node,
+      params: params.inputs.map((input) => ({
+        name: input.name,
+        paramId: input.paramId,
+        typeName: input.type,
+      })),
+    }
+  })
+  return changed ? next : currentNodes
 }

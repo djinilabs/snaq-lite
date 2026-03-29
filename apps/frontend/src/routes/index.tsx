@@ -19,8 +19,13 @@ import {
   patchCanvasNodeSource,
   toCanvasUri,
 } from '../lsp/canvas-runtime'
-import type { PublishNodeResultParams, WidgetDataUpdateParams } from '../lsp/types'
+import type {
+  NodeSignatureUpdatedParams,
+  PublishNodeResultParams,
+  WidgetDataUpdateParams,
+} from '../lsp/types'
 import {
+  applyNodeSignatureUpdated,
   applyPublishNodeResult,
   resolveNodeUriFromPublish,
   upsertNodeSubscription,
@@ -44,6 +49,11 @@ function HomePage() {
       uri: 'snaq://canvas-a/node-2.sl',
       source: '$x',
       params: [{ name: 'x', paramId: 'p1', typeName: 'Vector' }],
+    },
+    {
+      uri: 'snaq://canvas-a/node-3.sl',
+      source: '$y',
+      params: [{ name: 'y', paramId: 'p1', typeName: 'Vector' }],
     },
   ])
   const [edges, setEdges] = useState<CanvasEdge[]>([])
@@ -137,7 +147,7 @@ function HomePage() {
     setNodeResultsByUri(publishUpdate.nextResults)
     setNodeSubscriptionsByUri(publishUpdate.nextSubscriptions)
     if (publishUpdate.resultHandle) {
-      const activeTargetNode = nodesRef.current[1]
+      const activeTargetNode = nodesRef.current[nodesRef.current.length - 1]
       if (!activeTargetNode) {
         return
       }
@@ -161,6 +171,18 @@ function HomePage() {
     }))
   }
 
+  function handleNodeSignatureUpdated(notificationParams: unknown): void {
+    const params = (notificationParams ?? {}) as NodeSignatureUpdatedParams
+    if (!params.uri || !Array.isArray(params.inputs)) {
+      return
+    }
+    setNodes((current) => {
+      const next = applyNodeSignatureUpdated(current, params)
+      nodesRef.current = next
+      return next
+    })
+  }
+
   async function initClient() {
     if (clientRef.current) {
       return
@@ -176,6 +198,9 @@ function HomePage() {
       }
       if (notification.method === 'snaqlite/graph/widgetDataUpdate') {
         handleWidgetDataUpdate(notification.params)
+      }
+      if (notification.method === 'snaqlite/graph/nodeSignatureUpdated') {
+        handleNodeSignatureUpdated(notification.params)
       }
     })
     await client.initialize()
@@ -224,22 +249,25 @@ function HomePage() {
     if (!client || nodes.length < 2) {
       return
     }
-    const sourceUri = canvasUri(nodes[0].uri, targetCanvasId)
-    const targetUri = canvasUri(nodes[1].uri, targetCanvasId)
-    await connectCanvasNodes(client, {
-      sourceUri,
-      targetUri,
-      targetParamId: nodes[1].params[0]?.paramId ?? 'p1',
-    })
-    setEdges([
-      {
+    const nextEdges: CanvasEdge[] = []
+    for (let index = 1; index < nodes.length; index += 1) {
+      const sourceUri = canvasUri(nodes[index - 1].uri, targetCanvasId)
+      const targetUri = canvasUri(nodes[index].uri, targetCanvasId)
+      const targetParamId = nodes[index].params[0]?.paramId ?? 'p1'
+      await connectCanvasNodes(client, {
         sourceUri,
         targetUri,
-        targetParamId: nodes[1].params[0]?.paramId ?? 'p1',
-      },
-    ])
-    await refreshSubscriptionForUri(targetUri)
-    safeSetStatus(`Connected node-1 -> node-2 (${targetCanvasId})`)
+        targetParamId,
+      })
+      nextEdges.push({
+        sourceUri,
+        targetUri,
+        targetParamId,
+      })
+      await refreshSubscriptionForUri(targetUri)
+    }
+    setEdges(nextEdges)
+    safeSetStatus(`Connected ${nextEdges.length} edge(s) across ${nodes.length} node(s) (${targetCanvasId})`)
   }
 
   async function disconnectNodes(targetCanvasId = canvasId) {
@@ -247,20 +275,25 @@ function HomePage() {
     if (!client || nodes.length < 2) {
       return
     }
-    const targetUri = canvasUri(nodes[1].uri, targetCanvasId)
-    await disconnectCanvasNodeInput(client, {
-      targetUri,
-      targetParamId: nodes[1].params[0]?.paramId ?? 'p1',
-    })
+    for (let index = 1; index < nodes.length; index += 1) {
+      const targetUri = canvasUri(nodes[index].uri, targetCanvasId)
+      await disconnectCanvasNodeInput(client, {
+        targetUri,
+        targetParamId: nodes[index].params[0]?.paramId ?? 'p1',
+      })
+    }
     setEdges([])
     try {
-      await refreshSubscriptionForUri(targetUri)
+      for (let index = 1; index < nodes.length; index += 1) {
+        const targetUri = canvasUri(nodes[index].uri, targetCanvasId)
+        await refreshSubscriptionForUri(targetUri)
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown error'
-      safeSetStatus(`Disconnected node-2 input (${targetCanvasId}); refresh failed: ${message}`)
+      safeSetStatus(`Disconnected downstream inputs (${targetCanvasId}); refresh failed: ${message}`)
       return
     }
-    safeSetStatus(`Disconnected node-2 input (${targetCanvasId})`)
+    safeSetStatus(`Disconnected downstream inputs (${targetCanvasId})`)
   }
 
   async function renamePrimaryParam() {
@@ -396,11 +429,12 @@ function HomePage() {
     if (!client) {
       return
     }
-    const subscriptions = Object.values(nodeSubscriptionsByUri)
+    const subscriptions = Object.values(nodeSubscriptionsRef.current)
     for (const subscription of subscriptions) {
       await client.unsubscribeNode(subscription.subscriptionId)
       delete subscriptionUriByIdRef.current[subscription.subscriptionId]
     }
+    nodeSubscriptionsRef.current = {}
     setNodeSubscriptionsByUri({})
   }
 
@@ -409,7 +443,7 @@ function HomePage() {
     if (!client) {
       return
     }
-    const existing = nodeSubscriptionsByUri[uri]
+    const existing = nodeSubscriptionsRef.current[uri]
     if (!existing) {
       return
     }
@@ -425,32 +459,36 @@ function HomePage() {
     )
   }
 
-  async function subscribeSecondNode(targetCanvasId = canvasId): Promise<string | undefined> {
+  async function subscribeDownstreamNodes(targetCanvasId = canvasId): Promise<string | undefined> {
     const client = clientRef.current
     if (!client || nodes.length < 2) {
       return undefined
     }
-    const sourceUri = canvasUri(nodes[1].uri, targetCanvasId)
-    const existing = nodeSubscriptionsByUri[sourceUri]
-    if (existing) {
-      await client.unsubscribeNode(existing.subscriptionId)
-      delete subscriptionUriByIdRef.current[existing.subscriptionId]
+    let latestHandle: string | undefined
+    for (let index = 1; index < nodes.length; index += 1) {
+      const sourceUri = canvasUri(nodes[index].uri, targetCanvasId)
+      const existing = nodeSubscriptionsRef.current[sourceUri]
+      if (existing) {
+        await client.unsubscribeNode(existing.subscriptionId)
+        delete subscriptionUriByIdRef.current[existing.subscriptionId]
+      }
+      const response = await client.subscribeNode(sourceUri)
+      subscriptionUriByIdRef.current[response.subscriptionId] = sourceUri
+      setNodeSubscriptionsByUri((current) =>
+        upsertNodeSubscription(current, sourceUri, {
+          subscriptionId: response.subscriptionId,
+          resultHandle: response.resultHandle,
+        }),
+      )
+      latestHandle = response.resultHandle
     }
-    const response = await client.subscribeNode(sourceUri)
-    subscriptionUriByIdRef.current[response.subscriptionId] = sourceUri
-    setNodeSubscriptionsByUri((current) =>
-      upsertNodeSubscription(current, sourceUri, {
-        subscriptionId: response.subscriptionId,
-        resultHandle: response.resultHandle,
-      }),
-    )
-    setResultHandle(response.resultHandle)
+    setResultHandle(latestHandle)
     paginationRef.current = { offset: 0 }
-    if (response.resultHandle) {
-      paginationByHandlePathRef.current[pathKey(response.resultHandle)] = { offset: 0 }
+    if (latestHandle) {
+      paginationByHandlePathRef.current[pathKey(latestHandle)] = { offset: 0 }
     }
-    safeSetStatus(`Subscribed to node-2 (${targetCanvasId})`)
-    return response.resultHandle
+    safeSetStatus(`Subscribed to ${Math.max(nodes.length - 1, 0)} downstream node(s) (${targetCanvasId})`)
+    return latestHandle
   }
 
   async function loadFirstSlice(handleOverride?: string) {
@@ -555,7 +593,7 @@ function HomePage() {
         primaryCanvas,
       )
       await connectNodes(primaryCanvas)
-      await subscribeSecondNode(primaryCanvas)
+      await subscribeDownstreamNodes(primaryCanvas)
       await switchCanvas(recoveryCanvas)
       await openNodesInLsp(recoveryCanvas)
       await patchCanvasNodeSource(
@@ -564,7 +602,7 @@ function HomePage() {
         recoveryCanvas,
       )
       await connectNodes(recoveryCanvas)
-      await subscribeSecondNode(recoveryCanvas)
+      await subscribeDownstreamNodes(recoveryCanvas)
       safeSetStatus(`Bridge scenario completed (${primaryCanvas} -> ${recoveryCanvas})`)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown error'
@@ -619,7 +657,7 @@ function HomePage() {
         </button>
         <button
           data-testid="subscribe-node-btn"
-          onClick={() => void runAction(async () => void (await subscribeSecondNode()))}
+          onClick={() => void runAction(async () => void (await subscribeDownstreamNodes()))}
         >
           Subscribe
         </button>

@@ -3800,7 +3800,7 @@ async fn graph_runtime_recomputes_without_widget_subscriptions() {
 }
 
 #[tokio::test]
-async fn did_change_on_source_with_same_output_does_not_recompute_descendants() {
+async fn did_change_on_source_with_same_output_recomputes_descendants() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
     let server_handle =
@@ -3889,7 +3889,7 @@ async fn did_change_on_source_with_same_output_does_not_recompute_descendants() 
         "expected downstream update after semantic source change to 3"
     );
 
-    // Then perform a non-semantic edit (same numeric output) and assert no descendant update.
+    // Then perform a non-semantic edit (same numeric output) and assert descendant recompute.
     let did_change_same_output = serde_json::json!({
         "jsonrpc":"2.0","method":"textDocument/didChange",
         "params":{"textDocument":{"uri":"snaq://graph/src-same.sl","version":3},"contentChanges":[{"text":"( 3 )"}]}
@@ -3916,8 +3916,8 @@ async fn did_change_on_source_with_same_output_does_not_recompute_descendants() 
         }
     }
     assert!(
-        !got_descendant_update,
-        "didChange with unchanged source output should not recompute downstream widget"
+        got_descendant_update,
+        "didChange with unchanged source output should still recompute downstream widget"
     );
     server_handle.abort();
     let _ = server_handle.await;
@@ -5440,6 +5440,56 @@ async fn graph_operations_require_snaq_canvas_uris() {
 }
 
 #[tokio::test]
+async fn did_open_rejects_snaq_uri_without_canvas_host() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+
+    let did_open = serde_json::json!({
+        "jsonrpc":"2.0",
+        "method":"textDocument/didOpen",
+        "params":{
+            "textDocument":{
+                "uri":"snaq:///missing-host.sl",
+                "languageId":"snaq",
+                "version":1,
+                "text":"1 + 2"
+            }
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&did_open.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let bootstrap_req = serde_json::json!({
+        "jsonrpc":"2.0","id":398,"method":"snaqlite/bootstrapSession","params":{}
+    });
+    client_w
+        .write_all(&lsp_message(&bootstrap_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 398).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "bootstrapSession should succeed: {v}");
+    assert_eq!(
+        v["result"]["openDocuments"].as_u64(),
+        Some(0),
+        "didOpen with missing snaq host should be rejected and not create document: {v}"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
 async fn graph_param_helpers_rename_add_remove_apply_source_updates() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
@@ -6693,6 +6743,146 @@ async fn bootstrap_returns_canvas_and_runtime_state() {
     assert_eq!(v["result"]["openDocuments"].as_u64(), Some(1));
     assert_eq!(v["result"]["subscriptions"].as_u64(), Some(1));
     assert_eq!(v["result"]["runtimeDrained"].as_bool(), Some(false));
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn canvas_revision_and_layout_roundtrip_and_patch_bump_contract() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://canvas-rev/node-a.sl", "1 + 2", 1).await;
+
+    let bootstrap0 = serde_json::json!({
+        "jsonrpc":"2.0","id":811,"method":"snaqlite/bootstrapSession","params":{}
+    });
+    client_w
+        .write_all(&lsp_message(&bootstrap0.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 811).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "bootstrapSession should succeed: {v}");
+    assert_eq!(v["result"]["canvasRevision"].as_u64(), Some(0));
+
+    let patch_ok = serde_json::json!({
+        "jsonrpc":"2.0","id":812,"method":"snaqlite/graph/applyPatch",
+        "params":{"operations":[{"op":"setNodeSource","uri":"snaq://canvas-rev/node-a.sl","source":"3 + 4"}]}
+    });
+    client_w
+        .write_all(&lsp_message(&patch_ok.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 812).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "applyPatch should succeed: {v}");
+
+    let bootstrap1 = serde_json::json!({
+        "jsonrpc":"2.0","id":813,"method":"snaqlite/bootstrapSession","params":{}
+    });
+    client_w
+        .write_all(&lsp_message(&bootstrap1.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 813).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "bootstrapSession should succeed: {v}");
+    assert_eq!(v["result"]["canvasRevision"].as_u64(), Some(1));
+
+    let patch_fail = serde_json::json!({
+        "jsonrpc":"2.0","id":814,"method":"snaqlite/graph/applyPatch",
+        "params":{"operations":[{"op":"connect","sourceUri":"snaq://canvas-rev/missing.sl","targetUri":"snaq://canvas-rev/node-a.sl","targetInputName":"p1"}]}
+    });
+    client_w
+        .write_all(&lsp_message(&patch_fail.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 814).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        v.get("error").is_some(),
+        "invalid staged patch should fail and not mutate revision: {v}"
+    );
+
+    let bootstrap2 = serde_json::json!({
+        "jsonrpc":"2.0","id":815,"method":"snaqlite/bootstrapSession","params":{}
+    });
+    client_w
+        .write_all(&lsp_message(&bootstrap2.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 815).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "bootstrapSession should succeed: {v}");
+    assert_eq!(
+        v["result"]["canvasRevision"].as_u64(),
+        Some(1),
+        "failed staged patch must not bump revision: {v}"
+    );
+
+    let export_req = serde_json::json!({
+        "jsonrpc":"2.0","id":816,"method":"snaqlite/graph/exportCanvasDocument","params":{}
+    });
+    client_w
+        .write_all(&lsp_message(&export_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 816).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "exportCanvasDocument should succeed: {v}");
+    assert_eq!(
+        v["result"]["canvasDocument"]["revision"].as_u64(),
+        Some(1),
+        "exported canvas revision should match runtime revision"
+    );
+    let mut canvas_document = v["result"]["canvasDocument"].clone();
+    canvas_document["revision"] = serde_json::json!(77_u64);
+    canvas_document["layout"] = serde_json::json!({
+        "viewport": {"x": 10, "y": 20, "zoom": 1.25}
+    });
+
+    let import_req = serde_json::json!({
+        "jsonrpc":"2.0","id":817,"method":"snaqlite/graph/importCanvasDocument",
+        "params":{"canvasDocument":canvas_document}
+    });
+    client_w
+        .write_all(&lsp_message(&import_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 817).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "importCanvasDocument should succeed: {v}");
+
+    let export_after_import = serde_json::json!({
+        "jsonrpc":"2.0","id":818,"method":"snaqlite/graph/exportCanvasDocument","params":{}
+    });
+    client_w
+        .write_all(&lsp_message(&export_after_import.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 818).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "export after import should succeed: {v}");
+    assert_eq!(v["result"]["canvasDocument"]["revision"].as_u64(), Some(77));
+    assert_eq!(
+        v["result"]["canvasDocument"]["layout"]["viewport"]["x"].as_i64(),
+        Some(10)
+    );
 
     server_handle.abort();
     let _ = server_handle.await;

@@ -15,6 +15,8 @@ export type CanvasEdgeDocument = {
 
 export type CanvasDocument = {
   canvasId?: string
+  revision?: number
+  layout?: Record<string, unknown>
   nodes: CanvasNodeDocument[]
   edges: CanvasEdgeDocument[]
 }

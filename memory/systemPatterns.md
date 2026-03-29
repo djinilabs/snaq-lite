@@ -1,5 +1,8 @@
 # System patterns
 
+- **Precompiled graph execution path:** LSP graph runtime should prefer cached node artifacts via `snaq-lite-lang::run_resolved_with_stream_inputs` only when `root_def` is fully resolved; parse-only roots (e.g. resolve/CAS failures despite parse success) must fall back to source-text execution to preserve graceful `RunError` propagation and avoid unresolved-node panics.
+- **Native forward-only subscription non-consumption:** native `subscribeNode` must not start stream consumer for `LazyVector::FromInput`; emit summary `Completed` payload directly so forward-only `resultHandle` paging remains available to `fetchResultSlice`.
+- **LSP slice helper modularization:** vector slice windowing logic lives in `crates/snaq-lite-lsp/src/vector_slice.rs`; `lib.rs` should call this helper to keep request handlers focused and reduce accidental complexity.
 - **Input declarations:** `input` declarations are function-like scoped bindings. Duplicate input names inside the same block are rejected at runtime with `RunError::InvalidArgument("duplicate input declaration: <name>")` to keep graph param wiring deterministic.
 - **Graph rename refactor policy:** `snaqlite/graph/renameParam` updates both the declaration and safe in-scope identifier usages that resolve to that input; usages under shadowing bindings/params are intentionally preserved.
 - **Stable graph input identity:** input declarations support `input name@paramId: Type`. Runtime scope binding still uses `name`; graph wiring and reconciliation use stable `paramId` so UI renames do not force disconnect/reconnect.

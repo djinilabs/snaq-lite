@@ -101,6 +101,18 @@ impl Session {
         let resolved = resolve::resolve(parse(input).map_err(RunError::from)?, &self.unit_registry)?;
         let root_spanned = cas::simplify_symbolic(resolved, &self.unit_registry)?;
         let root_def = root_spanned.to_expr_def();
+        self.eval_resolved_with_stream_inputs(root_def, Some(root_spanned), stream_inputs)
+    }
+
+    /// Evaluate an already-resolved root using this session with `$name` stream bindings.
+    ///
+    /// This avoids parse/resolve/CAS when callers already hold compiled root artifacts.
+    pub fn eval_resolved_with_stream_inputs(
+        &mut self,
+        root_def: ExprDef,
+        root_spanned: Option<SpannedExprDef>,
+        stream_inputs: std::collections::HashMap<String, StreamHandleId>,
+    ) -> Result<Value, RunError> {
         set_eval_registry(self.unit_registry.clone());
         let stream_registry = if let Some(existing) = self.stream_input_registry {
             existing.set_inputs(&mut self.db).to(stream_inputs);
@@ -113,10 +125,10 @@ impl Session {
         set_stream_input_registry(stream_registry);
         let program_def = if let Some(existing) = self.program_def {
             existing.set_root(&mut self.db).to(root_def);
-            existing.set_spanned_root(&mut self.db).to(Some(root_spanned));
+            existing.set_spanned_root(&mut self.db).to(root_spanned);
             existing
         } else {
-            let created = ProgramDef::new(&self.db, root_def, Some(root_spanned));
+            let created = ProgramDef::new(&self.db, root_def, root_spanned);
             self.program_def = Some(created);
             created
         };
@@ -258,6 +270,21 @@ pub fn run_with_stream_inputs(
 ) -> Result<(Value, salsa::DatabaseImpl), RunError> {
     let mut session = Session::new(registry.clone());
     let val = session.eval_with_stream_inputs(input, stream_inputs)?;
+    Ok((val, session.db))
+}
+
+/// Evaluate a precompiled root with external stream inputs.
+///
+/// This is used by graph runtimes that already hold parsed/resolved node artifacts and
+/// need to avoid reparsing source text on each execution wave.
+pub fn run_resolved_with_stream_inputs(
+    root_def: ExprDef,
+    root_spanned: Option<SpannedExprDef>,
+    registry: &UnitRegistry,
+    stream_inputs: std::collections::HashMap<String, StreamHandleId>,
+) -> Result<(Value, salsa::DatabaseImpl), RunError> {
+    let mut session = Session::new(registry.clone());
+    let val = session.eval_resolved_with_stream_inputs(root_def, root_spanned, stream_inputs)?;
     Ok((val, session.db))
 }
 
@@ -4657,5 +4684,74 @@ mod tests {
     fn vector_transform_and_order_stats_still_work_after_dispatch_refactor() {
         let q = run_numeric("[1, 2, 3, 4].take(1, 2).map(fn (x) => (x * 2)).mean()").unwrap();
         assert!((q.value() - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn run_resolved_with_stream_inputs_matches_parsed_path_for_scalar() {
+        let registry = default_si_registry();
+        let script = "a = 2\nb = 3\na + b";
+        let expected = run_with_stream_inputs(script, &registry, std::collections::HashMap::new())
+            .expect("parsed path should run")
+            .0;
+
+        let parsed = parse(script).expect("parse");
+        let resolved = resolve::resolve(parsed, &registry).expect("resolve");
+        let simplified = cas::simplify_symbolic(resolved, &registry).expect("simplify");
+        let root_def = simplified.to_expr_def();
+        let actual = run_resolved_with_stream_inputs(
+            root_def,
+            Some(simplified),
+            &registry,
+            std::collections::HashMap::new(),
+        )
+        .expect("resolved path should run")
+        .0;
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn run_resolved_with_stream_inputs_supports_declared_vector_inputs() {
+        let registry = default_si_registry();
+        let (id, mut tx) = create_stream_input();
+        futures::executor::block_on(async {
+            use futures::SinkExt;
+            tx.send(vec![
+                Ok(Some(Value::Numeric(Quantity::from_exact_scalar(1.0)))),
+                Ok(Some(Value::Numeric(Quantity::from_exact_scalar(2.0)))),
+                Ok(Some(Value::Numeric(Quantity::from_exact_scalar(3.0)))),
+            ])
+            .await
+        })
+        .expect("send stream chunk");
+        drop(tx);
+
+        let parsed = parse("input x: Vector\nx.map(fn (v) => (v * 2))").expect("parse");
+        let resolved = resolve::resolve(parsed, &registry).expect("resolve");
+        let simplified = cas::simplify_symbolic(resolved, &registry).expect("simplify");
+        let (value, db) = run_resolved_with_stream_inputs(
+            simplified.to_expr_def(),
+            Some(simplified),
+            &registry,
+            std::collections::HashMap::from([("x".to_string(), id)]),
+        )
+        .expect("resolved vector input path should run");
+
+        let Value::Vector(v) = value else {
+            panic!("expected vector result");
+        };
+        let out: Vec<_> = futures::executor::block_on(async {
+            use futures::stream::StreamExt;
+            vector_into_stream(&db, v.inner).collect::<Vec<_>>().await
+        });
+        let displays: Vec<String> = out
+            .into_iter()
+            .map(|item| match item {
+                Ok(Some(v)) => format_value_for_display(&db, &v).expect("format display"),
+                Ok(None) => "?".to_string(),
+                Err(e) => panic!("unexpected stream error: {e}"),
+            })
+            .collect();
+        assert_eq!(displays, vec!["2", "4", "6"]);
     }
 }

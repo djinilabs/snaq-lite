@@ -2,6 +2,36 @@
 
 ## Just completed
 
+- **LSP precompiled-root panic guard:**
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - Added `root_def_is_resolved(...)` and gated `run_resolved_with_stream_inputs(...)` behind it.
+    - Added source-text fallback when `parse_succeeded` is true but cached `root_def` is still parse-only/unresolved.
+    - Added regression tests:
+      - `run_node_with_graph_inputs_impl_falls_back_for_unresolved_root_def`
+      - `root_def_is_resolved_rejects_parse_only_nodes`
+  - Verification green:
+    - `cargo test -p snaq-lite-lsp run_node_with_graph_inputs_impl_falls_back_for_unresolved_root_def`
+    - `cargo test -p snaq-lite-lsp root_def_is_resolved_rejects_parse_only_nodes`
+    - `pnpm check`
+
+- **Close lazy streaming gaps (revised execution pass):**
+  - `crates/snaq-lite-lang/src/lib.rs`:
+    - Added `Session::eval_resolved_with_stream_inputs(...)` for evaluating precompiled roots without parse/resolve/CAS.
+    - Added `run_resolved_with_stream_inputs(...)` compatibility wrapper for graph runtimes that already hold resolved artifacts.
+    - Added regression tests validating resolved-path parity and declared vector-input support.
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - `run_node_with_graph_inputs_impl` now consumes `WiredNodeProjection` entries carrying cached document artifacts (`root_def`, `root_spanned`, `parse_succeeded`) and prefers resolved execution path when parse succeeded.
+    - Kept source-text fallback for parse-failed documents to preserve parse-error semantics.
+    - Native `subscribeNode` now avoids consuming `LazyVector::FromInput` via stream consumer and emits summary `Completed` payload directly for forward-only lineages.
+  - `crates/snaq-lite-lsp/src/vector_slice.rs`:
+    - Extracted `collect_vector_slice_window` + known-length helper from `lib.rs` to reduce accidental complexity while preserving semantics.
+  - Verification green:
+    - `cargo test -p snaq-lite-lang`
+    - `cargo test -p snaq-lite-lsp`
+    - `cargo test -p snaq-lite-lsp --test lsp_integration`
+    - `pnpm test`
+    - `pnpm run lint`
+
 - **Bridge Canvas-LSP disruptive protocol/runtime pass (node-centric only):**
   - `crates/snaq-lite-lsp/src/lib.rs`:
     - Removed legacy custom method registration for `snaqlite/subscribe` / `snaqlite/unsubscribe`; service now exposes only `subscribeNode` / `unsubscribeNode`.

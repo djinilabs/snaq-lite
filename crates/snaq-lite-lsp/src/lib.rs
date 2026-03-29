@@ -8,6 +8,7 @@ pub mod pubsub;
 pub mod result_handle_registry;
 pub mod state;
 pub mod subscription;
+pub mod vector_slice;
 pub mod widget_registry;
 
 #[cfg(target_arch = "wasm32")]
@@ -65,10 +66,13 @@ type RunCache = std::collections::HashMap<Url, (snaq_lite_lang::Value, salsa::Da
 type SharedRunCache = Arc<Mutex<RunCache>>;
 type SharedResultHandles = Arc<Mutex<ResultHandleRegistry>>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct WiredNodeProjection {
     uri: Url,
     source: String,
+    root_def: Option<snaq_lite_lang::ExprDef>,
+    root_spanned: Option<snaq_lite_lang::SpannedExprDef>,
+    parse_succeeded: bool,
     incoming_by_param_id: Vec<(String, Url)>,
     input_name_by_param_id: std::collections::HashMap<String, String>,
 }
@@ -1208,24 +1212,46 @@ impl SnaqLiteBackend {
                             .set_cancel_tx(&subscription_id, Some(cancel_tx));
                         #[cfg(not(target_arch = "wasm32"))]
                         {
-                            let sid = subscription_id.clone();
-                            let notification_tx = self.notification_tx.clone();
-                            let canvas_id_for_stream = canvas_id.clone();
-                            let uri_for_stream = uri.to_string();
-                            let result_handle_for_stream = result_handle.clone();
-                            std::thread::spawn(move || {
-                                run_stream_consumer(
-                                    db,
-                                    inner,
-                                    sid,
-                                    Some(revision),
-                                    canvas_id_for_stream,
-                                    Some(uri_for_stream),
-                                    Some(result_handle_for_stream),
-                                    notification_tx,
-                                    cancel_rx,
+                            if matches!(inner, snaq_lite_lang::LazyVector::FromInput(_)) {
+                                let payload = Self::build_completed_payload(
+                                    &snaq_lite_lang::Value::Vector(v.clone()),
+                                    &db,
+                                    Some(&result_handle),
                                 );
-                            });
+                                self.send_publish_result_notifications(PublishResultParams {
+                                    subscription_id: subscription_id.clone(),
+                                    status: PublishStatus::Completed,
+                                    revision: Some(revision),
+                                    canvas_id: canvas_id.clone(),
+                                    uri: Some(uri.to_string()),
+                                    data: Some(payload),
+                                })
+                                .await;
+                                self.subscriptions
+                                    .lock()
+                                    .await
+                                    .set_cancel_tx(&subscription_id, None);
+                                std::mem::drop(cancel_rx);
+                            } else {
+                                let sid = subscription_id.clone();
+                                let notification_tx = self.notification_tx.clone();
+                                let canvas_id_for_stream = canvas_id.clone();
+                                let uri_for_stream = uri.to_string();
+                                let result_handle_for_stream = result_handle.clone();
+                                std::thread::spawn(move || {
+                                    run_stream_consumer(
+                                        db,
+                                        inner,
+                                        sid,
+                                        Some(revision),
+                                        canvas_id_for_stream,
+                                        Some(uri_for_stream),
+                                        Some(result_handle_for_stream),
+                                        notification_tx,
+                                        cancel_rx,
+                                    );
+                                });
+                            }
                         }
                         #[cfg(target_arch = "wasm32")]
                         {
@@ -1759,39 +1785,31 @@ impl SnaqLiteBackend {
     ) -> Option<String> {
         let docs: std::collections::HashSet<Url> = source_by_uri.keys().cloned().collect();
         let order = staged_graph.topological_order(sink_uri, &docs)?;
-        let sources: Vec<(Url, String)> = order
+        let projections: Vec<WiredNodeProjection> = order
             .iter()
             .map(|uri| {
-                let source = source_by_uri.get(uri).cloned().unwrap_or_default();
-                (uri.clone(), source)
-            })
-            .collect();
-        let incoming_map: std::collections::HashMap<Url, Vec<(String, Url)>> = order
-            .iter()
-            .map(|uri| (uri.clone(), staged_graph.incoming(uri)))
-            .collect();
-        let input_name_by_param_id: std::collections::HashMap<
-            Url,
-            std::collections::HashMap<String, String>,
-        > = order
-            .iter()
-            .map(|uri| {
-                let names = source_by_uri
+                let incoming = staged_graph.incoming(uri);
+                let input_name_by_param_id = source_by_uri
                     .get(uri)
                     .and_then(|source| Self::input_decls_from_source(source).ok())
                     .unwrap_or_default()
                     .into_iter()
                     .map(|decl| (decl.param_id, decl.name))
                     .collect();
-                (uri.clone(), names)
+                WiredNodeProjection {
+                    uri: uri.clone(),
+                    source: source_by_uri.get(uri).cloned().unwrap_or_default(),
+                    root_def: None,
+                    root_spanned: None,
+                    parse_succeeded: false,
+                    incoming_by_param_id: incoming,
+                    input_name_by_param_id,
+                }
             })
             .collect();
         run_node_with_graph_inputs_impl(
-            &order,
-            &sources,
+            &projections,
             unit_registry,
-            &incoming_map,
-            &input_name_by_param_id,
             sink_uri,
             None,
             None,
@@ -2769,7 +2787,7 @@ impl SnaqLiteBackend {
                                 let state = self.state.lock().await;
                                 state.db().clone()
                             };
-                            let (total_count, slice_vec) = collect_vector_slice_window(
+                            let (total_count, slice_vec) = vector_slice::collect_vector_slice_window(
                                 &db_for_collect,
                                 v.inner.clone(),
                                 offset,
@@ -2908,7 +2926,7 @@ impl SnaqLiteBackend {
         external_streams: Option<std::collections::HashMap<String, snaq_lite_lang::StreamHandleId>>,
         shared_cache: &mut std::collections::HashMap<Url, (snaq_lite_lang::Value, salsa::DatabaseImpl)>,
     ) -> Result<(snaq_lite_lang::Value, salsa::DatabaseImpl), snaq_lite_lang::RunError> {
-        let (order, projections, unit_registry) = {
+        let (projections, unit_registry) = {
             let state = self.state.lock().await;
             let graph = self.graph_state.lock().await;
             let docs = state.document_uris();
@@ -2939,37 +2957,33 @@ impl SnaqLiteBackend {
                         .into_iter()
                         .map(|decl| (decl.param_id, decl.name))
                         .collect();
+                    let (root_def, root_spanned, parse_succeeded) = state
+                        .get_document(u)
+                        .map(|d| {
+                            (
+                                d.root_def.clone(),
+                                d.root_spanned.clone(),
+                                d.parse_succeeded,
+                            )
+                        })
+                        .unwrap_or((None, None, false));
                     WiredNodeProjection {
                         uri: u.clone(),
                         source: state.source(u),
+                        root_def,
+                        root_spanned,
+                        parse_succeeded,
                         incoming_by_param_id: incoming,
                         input_name_by_param_id,
                     }
                 })
                 .collect();
-            (order, projections, state.unit_registry().clone())
+            (projections, state.unit_registry().clone())
         };
-        let sources: Vec<(Url, String)> = projections
-            .iter()
-            .map(|p| (p.uri.clone(), p.source.clone()))
-            .collect();
-        let incoming_map: std::collections::HashMap<Url, Vec<(String, Url)>> = projections
-            .iter()
-            .map(|p| (p.uri.clone(), p.incoming_by_param_id.clone()))
-            .collect();
-        let input_name_by_param_id: std::collections::HashMap<
-            Url,
-            std::collections::HashMap<String, String>,
-        > = projections
-            .iter()
-            .map(|p| (p.uri.clone(), p.input_name_by_param_id.clone()))
-            .collect();
+
         run_node_with_graph_inputs_impl(
-            &order,
-            &sources,
+            &projections,
             &unit_registry,
-            &incoming_map,
-            &input_name_by_param_id,
             sink_uri,
             external_streams.as_ref(),
             Some(shared_cache),
@@ -3002,11 +3016,8 @@ fn resolve_external_streams(
 /// (e.g. file-block–fed inputs); graph edges then fill any remaining inputs.
 #[allow(clippy::too_many_arguments)]
 fn run_node_with_graph_inputs_impl(
-    order: &[Url],
-    sources: &[(Url, String)],
+    projections: &[WiredNodeProjection],
     unit_registry: &snaq_lite_lang::UnitRegistry,
-    incoming_map: &std::collections::HashMap<Url, Vec<(String, Url)>>,
-    input_name_by_param_id: &std::collections::HashMap<Url, std::collections::HashMap<String, String>>,
     sink_uri: &Url,
     external_streams: Option<&std::collections::HashMap<String, snaq_lite_lang::StreamHandleId>>,
     mut shared_cache: Option<&mut std::collections::HashMap<Url, (snaq_lite_lang::Value, salsa::DatabaseImpl)>>,
@@ -3017,7 +3028,8 @@ fn run_node_with_graph_inputs_impl(
     > = std::collections::HashMap::new();
     let mut last_value = None;
     let mut last_db = None;
-    for (uri, source_entry) in order.iter().zip(sources.iter()) {
+    for projection in projections {
+        let uri = &projection.uri;
         if let Some(cache) = shared_cache.as_deref_mut() {
             if let Some((value, db)) = cache.get(uri).cloned() {
                 if uri == sink_uri {
@@ -3030,9 +3042,8 @@ fn run_node_with_graph_inputs_impl(
                 continue;
             }
         }
-        let source = &source_entry.1;
-        let incoming = incoming_map.get(uri).map(|i| i.as_slice()).unwrap_or(&[]);
-        let param_name_lookup = input_name_by_param_id.get(uri);
+        let incoming = projection.incoming_by_param_id.as_slice();
+        let param_name_lookup = Some(&projection.input_name_by_param_id);
         let is_sink = uri == sink_uri;
         let mut stream_inputs: std::collections::HashMap<String, snaq_lite_lang::StreamHandleId> =
             if is_sink {
@@ -3068,8 +3079,34 @@ fn run_node_with_graph_inputs_impl(
             };
             feed_value_to_senders(value, db, senders);
         }
-        let (value, db) =
-            snaq_lite_lang::run_with_stream_inputs(source, unit_registry, stream_inputs)?;
+        let (value, db) = if projection.parse_succeeded {
+            if let Some(root_def) = projection.root_def.clone() {
+                if root_def_is_resolved(&root_def) {
+                    snaq_lite_lang::run_resolved_with_stream_inputs(
+                        root_def,
+                        projection.root_spanned.clone(),
+                        unit_registry,
+                        stream_inputs,
+                    )?
+                } else {
+                    // Parse succeeded but resolve did not; keep old source-run behavior to avoid
+                    // unresolved-node panics in build_expression().
+                    snaq_lite_lang::run_with_stream_inputs(
+                        &projection.source,
+                        unit_registry,
+                        stream_inputs,
+                    )?
+                }
+            } else {
+                snaq_lite_lang::run_with_stream_inputs(
+                    &projection.source,
+                    unit_registry,
+                    stream_inputs,
+                )?
+            }
+        } else {
+            snaq_lite_lang::run_with_stream_inputs(&projection.source, unit_registry, stream_inputs)?
+        };
         if let Some(cache) = shared_cache.as_deref_mut() {
             cache.insert(uri.clone(), (value.clone(), db.clone()));
         }
@@ -3094,51 +3131,74 @@ fn run_node_with_graph_inputs_impl(
     Ok((value, db))
 }
 
-fn known_lazy_vector_len(inner: &snaq_lite_lang::LazyVector) -> Option<usize> {
-    match inner {
-        snaq_lite_lang::LazyVector::FromEvaluated(collected) => Some(collected.len()),
-        snaq_lite_lang::LazyVector::FromExprs(defs) => Some(defs.len()),
-        snaq_lite_lang::LazyVector::FromExprsWithEnv { defs, .. } => Some(defs.len()),
-        snaq_lite_lang::LazyVector::Map { source, .. } => known_lazy_vector_len(source),
-        snaq_lite_lang::LazyVector::Take { source, start, length } => {
-            let source_len = known_lazy_vector_len(source)?;
-            let available = source_len.saturating_sub(*start);
-            Some(available.min(*length))
+fn root_def_is_resolved(def: &snaq_lite_lang::ExprDef) -> bool {
+    use snaq_lite_lang::ExprDef;
+    match def {
+        ExprDef::LitScalar(..)
+        | ExprDef::LitWithUnit(..)
+        | ExprDef::LitUnit(..)
+        | ExprDef::LitTemporal(..) => false,
+        ExprDef::Lit(..)
+        | ExprDef::LitFuzzyBool(..)
+        | ExprDef::LitSymbol(..)
+        | ExprDef::LitDate(..)
+        | ExprDef::ExternalStream(..)
+        | ExprDef::InputDecl(..) => true,
+        ExprDef::Neg(inner)
+        | ExprDef::Transpose(inner)
+        | ExprDef::Binding(_, inner) => root_def_is_resolved(inner),
+        ExprDef::Add(left, right)
+        | ExprDef::Sub(left, right)
+        | ExprDef::Mul(left, right)
+        | ExprDef::Div(left, right)
+        | ExprDef::Eq(left, right)
+        | ExprDef::Ne(left, right)
+        | ExprDef::Lt(left, right)
+        | ExprDef::Le(left, right)
+        | ExprDef::Gt(left, right)
+        | ExprDef::Ge(left, right)
+        | ExprDef::And(left, right)
+        | ExprDef::As(left, right)
+        | ExprDef::WithPrecision(left, right) => {
+            root_def_is_resolved(left) && root_def_is_resolved(right)
         }
-        _ => None,
+        ExprDef::VecLiteral(items) | ExprDef::Block(items) => {
+            items.iter().all(root_def_is_resolved)
+        }
+        ExprDef::MapLiteral(entries) => entries
+            .iter()
+            .all(|(_, expr)| root_def_is_resolved(expr)),
+        ExprDef::Call(_, args) => args.iter().all(|arg| match arg {
+            snaq_lite_lang::ir::CallArg::Positional(expr) => root_def_is_resolved(expr),
+            snaq_lite_lang::ir::CallArg::Named(_, expr) => root_def_is_resolved(expr),
+        }),
+        ExprDef::If(cond, then_expr, else_expr) => {
+            root_def_is_resolved(cond)
+                && root_def_is_resolved(then_expr)
+                && root_def_is_resolved(else_expr)
+        }
+        ExprDef::Lambda(params, body) => {
+            params.iter().all(|(_, default)| match default {
+                Some(expr) => root_def_is_resolved(expr),
+                None => true,
+            }) && root_def_is_resolved(body)
+        }
+        ExprDef::MethodCall(base, _, args) => {
+            root_def_is_resolved(base)
+                && args.iter().all(|arg| match arg {
+                    snaq_lite_lang::ir::CallArg::Positional(expr) => root_def_is_resolved(expr),
+                    snaq_lite_lang::ir::CallArg::Named(_, expr) => root_def_is_resolved(expr),
+                })
+        }
+        ExprDef::CallExpr(callee, args) => {
+            root_def_is_resolved(callee)
+                && args.iter().all(|arg| match arg {
+                    snaq_lite_lang::ir::CallArg::Positional(expr) => root_def_is_resolved(expr),
+                    snaq_lite_lang::ir::CallArg::Named(_, expr) => root_def_is_resolved(expr),
+                })
+        }
+        ExprDef::Member(base, _) | ExprDef::Index(base, _) => root_def_is_resolved(base),
     }
-}
-
-fn collect_vector_slice_window(
-    db: &salsa::DatabaseImpl,
-    inner: snaq_lite_lang::LazyVector,
-    offset: usize,
-    limit: usize,
-) -> (
-    u64,
-    Vec<Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>>,
-) {
-    use futures::stream::StreamExt;
-    let known_total = known_lazy_vector_len(&inner).map(|len| len as u64);
-    let end = offset.saturating_add(limit);
-    let mut stream = snaq_lite_lang::vector_into_stream(db, inner);
-    futures::executor::block_on(async move {
-        let mut total = 0u64;
-        let mut out: Vec<Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>> =
-            Vec::with_capacity(limit);
-        while let Some(item) = stream.next().await {
-            let idx = total as usize;
-            if idx >= offset && idx < end {
-                out.push(item);
-            }
-            total += 1;
-            if known_total.is_some() && idx + 1 >= end {
-                break;
-            }
-        }
-        let effective_total = known_total.unwrap_or(total);
-        (effective_total, out)
-    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3711,18 +3771,12 @@ mod tests {
     #[test]
     fn run_node_with_graph_inputs_impl_empty_order_returns_invalid_argument() {
         // When order does not contain sink_uri, impl returns Err instead of panicking (WASM-safe).
-        let order: &[Url] = &[];
-        let sources: &[(Url, String)] = &[];
+        let projections: &[WiredNodeProjection] = &[];
         let unit_registry = snaq_lite_lang::default_si_registry();
-        let incoming_map = std::collections::HashMap::new();
-        let input_name_by_param_id = std::collections::HashMap::new();
         let sink_uri = Url::parse("snaq://graph/sink.sl").unwrap();
         let result = run_node_with_graph_inputs_impl(
-            order,
-            sources,
+            projections,
             &unit_registry,
-            &incoming_map,
-            &input_name_by_param_id,
             &sink_uri,
             None,
             None,
@@ -3738,6 +3792,41 @@ mod tests {
     }
 
     #[test]
+    fn run_node_with_graph_inputs_impl_falls_back_for_unresolved_root_def() {
+        let sink_uri = Url::parse("file:///sink.snaq").unwrap();
+        let unit_registry = snaq_lite_lang::default_si_registry();
+        let projections = vec![WiredNodeProjection {
+            uri: sink_uri.clone(),
+            source: "1 m".to_string(),
+            // Parsed-only form that would panic if fed to run_resolved_with_stream_inputs.
+            root_def: Some(snaq_lite_lang::ExprDef::LitWithUnit(
+                snaq_lite_lang::NumLiteral::from_f64(1.0),
+                "m".to_string(),
+            )),
+            root_spanned: None,
+            parse_succeeded: true,
+            incoming_by_param_id: Vec::new(),
+            input_name_by_param_id: std::collections::HashMap::new(),
+        }];
+
+        let result =
+            run_node_with_graph_inputs_impl(&projections, &unit_registry, &sink_uri, None, None);
+        assert!(
+            result.is_ok(),
+            "expected source fallback to avoid unresolved-root panic"
+        );
+    }
+
+    #[test]
+    fn root_def_is_resolved_rejects_parse_only_nodes() {
+        let parsed_only = snaq_lite_lang::ExprDef::LitUnit("m".to_string());
+        assert!(!root_def_is_resolved(&parsed_only));
+
+        let resolved = snaq_lite_lang::ExprDef::Lit(snaq_lite_lang::Quantity::from_exact_scalar(1.0));
+        assert!(root_def_is_resolved(&resolved));
+    }
+
+    #[test]
     fn collect_vector_slice_window_uses_known_total_without_draining_full_stream() {
         let (value, db) = snaq_lite_lang::run_with_stream_inputs(
             "[1, sqrt(-1)]",
@@ -3749,7 +3838,7 @@ mod tests {
             snaq_lite_lang::Value::Vector(v) => v.inner,
             _ => panic!("expected vector"),
         };
-        let (total, slice) = collect_vector_slice_window(&db, inner, 0, 1);
+        let (total, slice) = vector_slice::collect_vector_slice_window(&db, inner, 0, 1);
         assert_eq!(total, 2);
         assert_eq!(slice.len(), 1);
         assert!(matches!(

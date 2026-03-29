@@ -2,6 +2,40 @@
 
 ## Just completed
 
+- **Bridge scenario stale `resultHandle` fix:**
+  - `apps/frontend/src/routes/index.tsx`: verified that `runBridgeScenario` called `loadFirstSlice()` / `loadNextSlice()` immediately after `subscribeSecondNode()` while still reading stale closure state (`resultHandle` unset in same render tick), causing silent early returns.
+  - `subscribeSecondNode` now returns the fresh `resultHandle` from RPC response.
+  - `loadFirstSlice` / `loadNextSlice` now accept an optional handle override and use it before fallbacking to component state.
+  - `runBridgeScenario` now threads returned handles directly into pagination calls, so slice fetch steps execute reliably even before next re-render.
+  - Verification green: `pnpm -C apps/frontend run typecheck`, `pnpm -C apps/frontend run lint`.
+
+- **Frontend optimistic param mutation concurrency fix:**
+  - `apps/frontend/src/routes/index.tsx`: fixed stale-closure optimistic updates by changing `optimisticParamUpdate` to use functional `setNodes((current) => ...)` updates.
+  - Rollback is now operation-scoped (`rollbackUpdate(current, optimisticBase)`) instead of restoring an entire captured snapshot, avoiding accidental clobbering of concurrent UI changes.
+  - `renameParam` rollback now restores only the targeted `paramId` when it still holds the optimistic renamed value.
+  - `addParam` rollback now removes only the optimistic `paramId` entry.
+  - `removeParam` rollback now reinserts only the removed `paramId` (at bounded original index) if still absent.
+  - Verification green: `pnpm -C apps/frontend run typecheck`, `pnpm -C apps/frontend run lint`.
+
+- **Review + improve pass on bridge implementation:**
+  - `apps/frontend/src/routes/index.tsx`: improved bridge scenario robustness and UX: canvas URI helper reuse, action-level error wrapping, optimistic param mutations with rollback on `applyPatch` failure, explicit recovery-canvas switch flow in `runBridgeScenario`.
+  - `apps/frontend/src/lsp/client.ts`: added explicit LSP handshake (`initialize` + `initialized`) before custom RPCs.
+  - `apps/frontend/src/lsp/worker-connection.ts`: added worker ready timeout (`15_000ms`) so failed worker boot surfaces actionable error instead of hanging requests.
+  - `apps/frontend/src/routes/index.tsx`: switched worker instantiation to Vite worker constructor import (`lsp.worker?worker`) for stable preview/build behavior.
+  - Tests improved:
+    - `apps/frontend/src/lsp/worker-connection.test.ts` now covers notification forwarding for both `snaqlite/publishNodeResult` and `snaqlite/graph/widgetDataUpdate`.
+    - `apps/frontend/e2e/home.spec.ts` adds end-to-end bridge scenario execution assertion (run scenario -> completed status -> subscription/result handle + publish notification).
+  - Verification green: `pnpm -C apps/frontend run test`, `pnpm -C apps/frontend run lint`, `pnpm -C apps/frontend run typecheck`, `pnpm -C apps/frontend run build`, `pnpm -C apps/frontend run smoketest`, `pnpm smoketest`.
+
+- **Bridge Canvas LSP gaps (plan execution pass):**
+  - `docs/LSP.md`: canonicalized node-centric subscription guidance (`subscribeNode`/`unsubscribeNode` first, legacy subscribe marked compatibility-only).
+  - `crates/snaq-lite-lsp/src/pubsub.rs`: added protocol regression coverage for `nextCursor` and `canvasId` payload casing.
+  - `apps/frontend/src/lsp/*`: added worker bridge/runtime modules (`lsp.worker.ts`, framed transport, typed client, session orchestrator, graph patch helpers, pagination helpers) with unit tests.
+  - `apps/frontend/src/routes/index.tsx`: replaced blank shell with Canvas LSP Bridge controls covering init, canvas switch, connect/disconnect, param add/rename/remove, subscribe, and slice paging actions.
+  - `apps/frontend/e2e/home.spec.ts`: added smoke assertion for bridge controls visibility.
+  - `crates/snaq-lite-lsp/src/lib.rs`: fixed wasm compile blocker by avoiding non-`Send` await path in wasm vector subscribe flow (send lightweight `Running` placeholder + `Completed` payload).
+  - Verification green: `cargo test -p snaq-lite-lsp --test lsp_integration`, `pnpm -C apps/frontend run test`, `pnpm -C apps/frontend run lint`, `pnpm -C apps/frontend run typecheck`, `pnpm run lint`, `pnpm test`, `pnpm -C apps/frontend run build`, `pnpm smoketest`.
+
 - **WASM forward-only receiver preservation fix (review hardening):**
   - Verified `send_wasm_vector_progress_notifications` consumed `LazyVector::FromInput` receivers via `vector_into_stream` (`take_receiver`), which made subsequent handle-scoped `fetchResultSlice` reads observe `StreamInputNotAvailable`.
   - `crates/snaq-lite-lsp/src/lib.rs`: `send_wasm_vector_progress_notifications` now short-circuits for `LazyVector::FromInput` and does not consume the stream receiver; forward-only consumption remains owned by `fetchResultSlice` handle paging.

@@ -613,6 +613,7 @@ impl SnaqLiteBackend {
     }
 
     #[cfg(target_arch = "wasm32")]
+    #[allow(dead_code)]
     async fn send_wasm_vector_progress_notifications(
         &self,
         subscription_id: &str,
@@ -1270,15 +1271,19 @@ impl SnaqLiteBackend {
                             );
                             let _ = cancel_rx;
                             let sid = subscription_id.clone();
-                            self.send_wasm_vector_progress_notifications(
-                                &sid,
-                                &db,
-                                inner,
-                                revision,
-                                canvas_id.clone(),
-                                &uri,
-                                &result_handle,
-                            )
+                            let _ = inner;
+                            self.send_publish_result_notifications(PublishResultParams {
+                                subscription_id: sid.clone(),
+                                status: PublishStatus::Running,
+                                revision: Some(revision),
+                                canvas_id: canvas_id.clone(),
+                                uri: Some(uri.to_string()),
+                                data: Some(serde_json::json!({
+                                    "elements": [],
+                                    "offset": 0,
+                                    "count": 0
+                                })),
+                            })
                             .await;
                             self.send_publish_result_notifications(PublishResultParams {
                                 subscription_id: sid,
@@ -1390,15 +1395,19 @@ impl SnaqLiteBackend {
                             );
                             let _ = cancel_rx;
                             let sid = subscription_id.clone();
-                            self.send_wasm_vector_progress_notifications(
-                                &sid,
-                                &db,
-                                inner,
-                                revision,
-                                canvas_id.clone(),
-                                &uri,
-                                &result_handle,
-                            )
+                            let _ = inner;
+                            self.send_publish_result_notifications(PublishResultParams {
+                                subscription_id: sid.clone(),
+                                status: PublishStatus::Running,
+                                revision: Some(revision),
+                                canvas_id: canvas_id.clone(),
+                                uri: Some(uri.to_string()),
+                                data: Some(serde_json::json!({
+                                    "elements": [],
+                                    "offset": 0,
+                                    "count": 0
+                                })),
+                            })
                             .await;
                             self.send_publish_result_notifications(PublishResultParams {
                                 subscription_id: sid,

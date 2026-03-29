@@ -551,4 +551,33 @@ mod tests {
         assert_eq!(decoded.subscription_id, "sub-1");
         assert!(matches!(decoded.status, PublishStatus::Completed));
     }
+
+    #[test]
+    fn fetch_result_slice_response_serializes_next_cursor_camel_case() {
+        let response = FetchResultSliceResponse {
+            elements: vec![serde_json::json!({ "display": "1" })],
+            total_count: 10,
+            has_more: true,
+            next_cursor: Some("cursor-1".to_string()),
+        };
+        let value = serde_json::to_value(&response).expect("serialize");
+        assert_eq!(value["totalCount"], serde_json::json!(10));
+        assert_eq!(value["hasMore"], serde_json::json!(true));
+        assert_eq!(value["nextCursor"], serde_json::json!("cursor-1"));
+    }
+
+    #[test]
+    fn publish_result_params_serializes_canvas_id_camel_case() {
+        let params = PublishResultParams {
+            subscription_id: "sub-2".to_string(),
+            status: PublishStatus::Running,
+            revision: Some(5),
+            canvas_id: Some("canvas-main".to_string()),
+            uri: Some("snaq://canvas-main/node-1.sl".to_string()),
+            data: Some(serde_json::json!({ "elements": [] })),
+        };
+        let value = serde_json::to_value(&params).expect("serialize");
+        assert_eq!(value["canvasId"], serde_json::json!("canvas-main"));
+        assert_eq!(value["subscriptionId"], serde_json::json!("sub-2"));
+    }
 }

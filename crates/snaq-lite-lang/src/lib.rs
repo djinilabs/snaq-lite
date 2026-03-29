@@ -4640,4 +4640,22 @@ mod tests {
         let out: Vec<_> = futures::executor::block_on(stream.collect());
         assert_eq!(out.len(), 2);
     }
+
+    #[test]
+    fn vector_reduce_short_circuit_all_avoids_failing_tail() {
+        let v = run("input x: Number\n[(1 / 0 < 0), (sqrt(-x) == 0)].all()").unwrap();
+        assert!(matches!(v, Value::FuzzyBool(crate::fuzzy::FuzzyBool::False)));
+    }
+
+    #[test]
+    fn vector_reduce_short_circuit_any_avoids_failing_tail() {
+        let v = run("input x: Number\n[(1 / 0 > 0), (sqrt(-x) == 0)].any()").unwrap();
+        assert!(matches!(v, Value::FuzzyBool(crate::fuzzy::FuzzyBool::True)));
+    }
+
+    #[test]
+    fn vector_transform_and_order_stats_still_work_after_dispatch_refactor() {
+        let q = run_numeric("[1, 2, 3, 4].take(1, 2).map(fn (x) => (x * 2)).mean()").unwrap();
+        assert!((q.value() - 5.0).abs() < 1e-10);
+    }
 }

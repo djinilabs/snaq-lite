@@ -3276,6 +3276,21 @@ fn run_node_with_graph_inputs_impl(
     Ok((value, db))
 }
 
+fn known_lazy_vector_len(inner: &snaq_lite_lang::LazyVector) -> Option<usize> {
+    match inner {
+        snaq_lite_lang::LazyVector::FromEvaluated(collected) => Some(collected.len()),
+        snaq_lite_lang::LazyVector::FromExprs(defs) => Some(defs.len()),
+        snaq_lite_lang::LazyVector::FromExprsWithEnv { defs, .. } => Some(defs.len()),
+        snaq_lite_lang::LazyVector::Map { source, .. } => known_lazy_vector_len(source),
+        snaq_lite_lang::LazyVector::Take { source, start, length } => {
+            let source_len = known_lazy_vector_len(source)?;
+            let available = source_len.saturating_sub(*start);
+            Some(available.min(*length))
+        }
+        _ => None,
+    }
+}
+
 fn collect_vector_slice_window(
     db: &salsa::DatabaseImpl,
     inner: snaq_lite_lang::LazyVector,
@@ -3286,20 +3301,25 @@ fn collect_vector_slice_window(
     Vec<Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>>,
 ) {
     use futures::stream::StreamExt;
+    let known_total = known_lazy_vector_len(&inner).map(|len| len as u64);
+    let end = offset.saturating_add(limit);
     let mut stream = snaq_lite_lang::vector_into_stream(db, inner);
     futures::executor::block_on(async move {
         let mut total = 0u64;
         let mut out: Vec<Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>> =
             Vec::with_capacity(limit);
-        let end = offset.saturating_add(limit);
         while let Some(item) = stream.next().await {
             let idx = total as usize;
             if idx >= offset && idx < end {
                 out.push(item);
             }
             total += 1;
+            if known_total.is_some() && idx + 1 >= end {
+                break;
+            }
         }
-        (total, out)
+        let effective_total = known_total.unwrap_or(total);
+        (effective_total, out)
     })
 }
 
@@ -3899,6 +3919,27 @@ mod tests {
             ),
             Ok(_) => panic!("expected Err(InvalidArgument), got Ok"),
         }
+    }
+
+    #[test]
+    fn collect_vector_slice_window_uses_known_total_without_draining_full_stream() {
+        let (value, db) = snaq_lite_lang::run_with_stream_inputs(
+            "[1, sqrt(-1)]",
+            &snaq_lite_lang::default_si_registry(),
+            std::collections::HashMap::new(),
+        )
+        .unwrap();
+        let inner = match value {
+            snaq_lite_lang::Value::Vector(v) => v.inner,
+            _ => panic!("expected vector"),
+        };
+        let (total, slice) = collect_vector_slice_window(&db, inner, 0, 1);
+        assert_eq!(total, 2);
+        assert_eq!(slice.len(), 1);
+        assert!(matches!(
+            &slice[0],
+            Ok(Some(snaq_lite_lang::Value::Numeric(q))) if (q.value() - 1.0).abs() < 1e-10
+        ));
     }
 
     // ---- state (LspState) ----

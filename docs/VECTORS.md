@@ -91,11 +91,13 @@ Vectors support **properties** (no arguments) and **methods** (with arguments) u
   - **`V.stddev()`** — standard deviation (√ of variance). Empty vector → error.
   - **`V.median()`** — median of elements (middle value or average of two middles). Empty vector → error. Same dimension required. For non-replayable streams (for example direct input-handle streams), this returns an error because exact median requires replay/materialization.
   - **`V.quantile(p)`** — sample quantile; `p` in [0, 1] (e.g. 0.5 for median). Empty vector → error. Same dimension required. For non-replayable streams, this returns an error because exact quantile requires replay/materialization.
-  - **`V.all()`** — true if every element is true; **`V.any()`** — true if any element is true. Elements must be boolean (e.g. from comparisons). Empty vector: `all()` → true, `any()` → false.
+  - **`V.all()`** — true if every element is true; **`V.any()`** — true if any element is true. Elements must be boolean (e.g. from comparisons). Empty vector: `all()` → true, `any()` → false. Both are short-circuit reducers (`all()` stops at first false, `any()` stops at first true).
 
 Numeric index access (e.g. `V.0`, `V.1`) is unchanged: use a **number** after the dot for single-element access; use an **identifier** (e.g. `length`, `map`) for property or method access. Unknown property or method names return **unknown property** or **unknown method**.
 
 Reduction methods are evaluated by consuming vector streams; they do not require vectors to be pre-materialized in memory before computation starts. The exact-order statistics methods (`median`, `quantile`) are the intentional exception for non-replayable streams.
+
+Approximate order-statistics methods (`median_approx`, `quantile_approx`) remain streaming and are valid on forward-only streams.
 
 ### Math and statistics (for students)
 

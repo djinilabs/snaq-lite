@@ -928,6 +928,51 @@ fn vector_index_stream(
     })
 }
 
+fn for_each_vector_item<F>(
+    db: &dyn salsa::Database,
+    v: LazyVector,
+    mut f: F,
+) -> Result<(), RunError>
+where
+    F: FnMut(Option<Value>) -> Result<(), RunError>,
+{
+    use futures::stream::StreamExt;
+    let mut stream = vector_into_stream(db, v);
+    futures::executor::block_on(async move {
+        while let Some(item) = stream.next().await {
+            let opt = item?;
+            f(opt)?;
+        }
+        Ok::<(), RunError>(())
+    })
+}
+
+enum StreamControl {
+    Continue,
+    Break,
+}
+
+fn for_each_vector_item_control<F>(
+    db: &dyn salsa::Database,
+    v: LazyVector,
+    mut f: F,
+) -> Result<(), RunError>
+where
+    F: FnMut(Option<Value>) -> Result<StreamControl, RunError>,
+{
+    use futures::stream::StreamExt;
+    let mut stream = vector_into_stream(db, v);
+    futures::executor::block_on(async move {
+        while let Some(item) = stream.next().await {
+            let opt = item?;
+            if matches!(f(opt)?, StreamControl::Break) {
+                break;
+            }
+        }
+        Ok::<(), RunError>(())
+    })
+}
+
 /// Consume a stream input handle once and return its value (single element -> that value; multiple -> Vector).
 /// Used by scalar-friendly native input declaration binding paths.
 #[cfg(not(target_arch = "wasm32"))]
@@ -1692,543 +1737,31 @@ fn value_inner<'db>(
                 _ => return Err(run_err_with_span(db, expr, RunErrorKind::ExpectedVector)),
             };
             match name.as_str() {
-                "take" => {
-                    let arg_vals: Vec<Value> = args
-                        .iter()
-                        .map(|(_, e)| value_inner(db, scope, *e, registry))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    if arg_vals.len() != 2 {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(format!(
-                            "take requires 2 arguments (start, length), got {}",
-                            arg_vals.len()
-                        ))));
-                    }
-                    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
-                    let start_q = arg_vals[0].to_quantity(&sym_reg).map_err(|_| {
-                        RunError::new(RunErrorKind::InvalidIndex("take start must be numeric".to_string()))
-                    })?;
-                    let length_q = arg_vals[1].to_quantity(&sym_reg).map_err(|_| {
-                        RunError::new(RunErrorKind::InvalidIndex("take length must be numeric".to_string()))
-                    })?;
-                    let start_f = start_q.value();
-                    let length_f = length_q.value();
-                    if !start_f.is_finite() || start_f < 0.0 {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::InvalidIndex(
-                            "take start must be a non-negative integer".to_string(),
-                        )));
-                    }
-                    if !length_f.is_finite() || length_f < 0.0 {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::InvalidIndex(
-                            "take length must be a non-negative integer".to_string(),
-                        )));
-                    }
-                    let start_u = start_f as usize;
-                    let length_u = length_f as usize;
-                    Ok(Value::Vector(VectorValue {
-                        inner: LazyVector::Take {
-                            source: Box::new(inner),
-                            start: start_u,
-                            length: length_u,
-                        },
-                        orientation,
-                    }))
-                }
-                "map" => {
-                    if args.len() != 1 {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(format!(
-                            "map requires 1 argument (a function), got {}",
-                            args.len()
-                        ))));
-                    }
-                    let (_, fn_expr) = &args[0];
-                    let fn_val = value_inner(db, scope, *fn_expr, registry)?;
-                    match &fn_val {
-                        Value::Function(uf) => {
-                            if uf.params.len() != 1 {
-                                return Err(run_err_with_span(
-                                    db,
-                                    expr,
-                                    RunErrorKind::UnknownFunction(format!(
-                                        "map requires a function of one parameter (got {} parameters)",
-                                        uf.params.len()
-                                    )),
-                                ));
-                            }
-                            Ok(Value::Vector(VectorValue {
-                                inner: LazyVector::Map {
-                                    source: Box::new(inner),
-                                    op: VectorMapOp::UserMap(uf.clone()),
-                                },
-                                orientation,
-                            }))
-                        }
-                        Value::BuiltinFunction(name) => {
-                            let params = functions::param_names(name).ok_or_else(|| {
-                                RunError::new(RunErrorKind::UnknownMethod(
-                                    "map requires a function (e.g. sqrt or fn (x) => (x+1))"
-                                        .to_string(),
-                                ))
-                            })?;
-                            if params.len() != 1 {
-                                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(format!(
-                                    "map requires a function of one parameter (e.g. sqrt or fn x => (x+1)), got built-in '{}' which takes {}",
-                                    name,
-                                    params.len()
-                                ))));
-                            }
-                            Ok(Value::Vector(VectorValue {
-                                inner: LazyVector::Map {
-                                    source: Box::new(inner),
-                                    op: VectorMapOp::UnaryFunc(name.clone()),
-                                },
-                                orientation,
-                            }))
-                        }
-                        _ => {
-                            Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                                "map requires a function (e.g. fn (x) => (x+1) or sqrt)".to_string(),
-                            )))
-                        }
-                    }
-                }
-                "sum" => {
-                    if !args.is_empty() {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                            "sum takes no arguments".to_string(),
-                        )));
-                    }
-                    let (sum_val, _count) = sum_and_count_vector_stream(
-                        db,
-                        inner,
-                        registry,
-                        expr.span(db),
-                    )
-                    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                    Ok(sum_val)
-                }
-                "mean" => {
-                    if !args.is_empty() {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                            "mean takes no arguments".to_string(),
-                        )));
-                    }
-                    use futures::stream::StreamExt;
-                    let mut stream = vector_into_stream(db, inner);
-                    let mut n = 0usize;
-                    let mut sum_val = Value::Numeric(Quantity::from_scalar(0.0));
-                    futures::executor::block_on(async {
-                        while let Some(item) = stream.next().await {
-                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            if let Some(v) = opt {
-                                n += 1;
-                                sum_val = add_values(&sum_val, &v, registry, None, expr.span(db))
-                                    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            }
-                        }
-                        Ok::<(), RunError>(())
-                    })?;
-                    if n == 0 {
-                        return Err(run_err_with_span(
-                            db,
-                            expr,
-                            RunErrorKind::EmptyVectorReduction("mean".to_string()),
-                        ));
-                    }
-                    let len_val = Value::Numeric(Quantity::from_exact_scalar(n as f64));
-                    div_values(&sum_val, &len_val, registry, None, expr.span(db))
-                }
-                "median" => {
-                    if !args.is_empty() {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                            "median takes no arguments".to_string(),
-                        )));
-                    }
-                    if matches!(inner, LazyVector::FromInput(_)) {
-                        return Err(run_err_with_span(
-                            db,
-                            expr,
-                            RunErrorKind::InvalidArgument(
-                                "median on non-replayable stream requires explicit materialization upstream"
-                                    .to_string(),
-                            ),
-                        ));
-                    }
-                    let collected = collect_vector_stream(db, inner);
-                    median_from_collected(&collected, registry)
-                        .map_err(|e| with_span_if_missing(e, expr.span(db)))
-                }
-                "quantile" => {
-                    if args.len() != 1 {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(format!(
-                            "quantile requires 1 argument (p in [0,1]), got {}",
-                            args.len()
-                        ))));
-                    }
-                    let (_, p_expr) = &args[0];
-                    let p_val = value_inner(db, scope, *p_expr, registry)?;
-                    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
-                    let p_q = p_val.to_quantity(&sym_reg).map_err(|_| {
-                        RunError::new(RunErrorKind::InvalidArgument(
-                            "quantile: p must be numeric".to_string(),
-                        ))
-                    })?;
-                    let p = p_q.value();
-                    if matches!(inner, LazyVector::FromInput(_)) {
-                        return Err(run_err_with_span(
-                            db,
-                            expr,
-                            RunErrorKind::InvalidArgument(
-                                "quantile on non-replayable stream requires explicit materialization upstream"
-                                    .to_string(),
-                            ),
-                        ));
-                    }
-                    let collected = collect_vector_stream(db, inner);
-                    quantile_from_collected(&collected, p, registry)
-                        .map_err(|e| with_span_if_missing(e, expr.span(db)))
-                }
-                "median_approx" => {
-                    if !args.is_empty() {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                            "median_approx takes no arguments".to_string(),
-                        )));
-                    }
-                    quantile_approx_from_stream(db, inner, 0.5, registry, "median_approx")
-                        .map_err(|e| with_span_if_missing(e, expr.span(db)))
-                }
-                "quantile_approx" => {
-                    if args.len() != 1 {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(format!(
-                            "quantile_approx requires 1 argument (p in [0,1]), got {}",
-                            args.len()
-                        ))));
-                    }
-                    let (_, p_expr) = &args[0];
-                    let p_val = value_inner(db, scope, *p_expr, registry)?;
-                    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
-                    let p_q = p_val.to_quantity(&sym_reg).map_err(|_| {
-                        RunError::new(RunErrorKind::InvalidArgument(
-                            "quantile_approx: p must be numeric".to_string(),
-                        ))
-                    })?;
-                    let p = p_q.value();
-                    quantile_approx_from_stream(db, inner, p, registry, "quantile_approx")
-                        .map_err(|e| with_span_if_missing(e, expr.span(db)))
-                }
-                "min" => {
-                    if !args.is_empty() {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                            "min takes no arguments".to_string(),
-                        )));
-                    }
-                    use futures::stream::StreamExt;
-                    let mut stream = vector_into_stream(db, inner);
-                    let mut acc: Option<Quantity> = None;
-                    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
-                    futures::executor::block_on(async {
-                        while let Some(item) = stream.next().await {
-                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            let Some(v) = opt else { continue };
-                            let q = v.to_quantity(&sym_reg).map_err(|_| {
-                                run_err_with_span(
-                                    db,
-                                    expr,
-                                    RunErrorKind::UnknownMethod(
-                                        "min: elements must be numeric (same dimension)"
-                                            .to_string(),
-                                    ),
-                                )
-                            })?;
-                            acc = Some(match acc.take() {
-                                None => q,
-                                Some(prev) => functions::call_builtin("min", &[prev, q], registry)?
-                                    .to_quantity(&sym_reg)
-                                    .map_err(|_| {
-                                        run_err_with_span(
-                                            db,
-                                            expr,
-                                            RunErrorKind::UnknownMethod(
-                                                "min: elements must be numeric (same dimension)"
-                                                    .to_string(),
-                                            ),
-                                        )
-                                    })?,
-                            });
-                        }
-                        Ok::<(), RunError>(())
-                    })?;
-                    match acc {
-                        Some(q) => Ok(Value::Numeric(q)),
-                        None => Err(run_err_with_span(
-                            db,
-                            expr,
-                            RunErrorKind::EmptyVectorReduction("min".to_string()),
-                        )),
-                    }
-                }
-                "max" => {
-                    if !args.is_empty() {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                            "max takes no arguments".to_string(),
-                        )));
-                    }
-                    use futures::stream::StreamExt;
-                    let mut stream = vector_into_stream(db, inner);
-                    let mut acc: Option<Quantity> = None;
-                    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
-                    futures::executor::block_on(async {
-                        while let Some(item) = stream.next().await {
-                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            let Some(v) = opt else { continue };
-                            let q = v.to_quantity(&sym_reg).map_err(|_| {
-                                run_err_with_span(
-                                    db,
-                                    expr,
-                                    RunErrorKind::UnknownMethod(
-                                        "max: elements must be numeric (same dimension)"
-                                            .to_string(),
-                                    ),
-                                )
-                            })?;
-                            acc = Some(match acc.take() {
-                                None => q,
-                                Some(prev) => functions::call_builtin("max", &[prev, q], registry)?
-                                    .to_quantity(&sym_reg)
-                                    .map_err(|_| {
-                                        run_err_with_span(
-                                            db,
-                                            expr,
-                                            RunErrorKind::UnknownMethod(
-                                                "max: elements must be numeric (same dimension)"
-                                                    .to_string(),
-                                            ),
-                                        )
-                                    })?,
-                            });
-                        }
-                        Ok::<(), RunError>(())
-                    })?;
-                    match acc {
-                        Some(q) => Ok(Value::Numeric(q)),
-                        None => Err(run_err_with_span(
-                            db,
-                            expr,
-                            RunErrorKind::EmptyVectorReduction("max".to_string()),
-                        )),
-                    }
-                }
-                "dot" => {
-                    if args.len() != 1 {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(format!(
-                            "dot requires 1 argument (another vector), got {}",
-                            args.len()
-                        ))));
-                    }
-                    let (_, other_expr) = &args[0];
-                    let other_val = value_inner(db, scope, *other_expr, registry)?;
-                    let VectorValue { inner: other_inner, .. } = match &other_val {
-                        Value::Vector(v) => v.clone(),
-                        _ => {
-                            return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                                "dot requires a vector argument".to_string(),
-                            )))
-                        }
-                    };
-                    dot_product_stream(db, inner, other_inner, registry, expr.span(db))
-                }
-                "norm" => {
-                    if !args.is_empty() {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                            "norm takes no arguments".to_string(),
-                        )));
-                    }
-                    use futures::stream::StreamExt;
-                    let mut stream = vector_into_stream(db, inner);
-                    let mut sum_sq = Value::Numeric(Quantity::from_scalar(0.0));
-                    futures::executor::block_on(async {
-                        while let Some(item) = stream.next().await {
-                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            if let Some(v) = opt {
-                                let sq = mul_values(&v, &v, registry, None, expr.span(db))
-                                    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                                sum_sq = add_values(&sum_sq, &sq, registry, None, expr.span(db))
-                                    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            }
-                        }
-                        Ok::<(), RunError>(())
-                    })?;
-                    let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
-                    let sum_sq_q = sum_sq.to_quantity(&sym_reg).map_err(|_| {
-                        RunError::new(RunErrorKind::UnknownMethod(
-                            "norm: elements must be numeric (same dimension)".to_string(),
-                        ))
-                    })?;
-                    functions::call_builtin("sqrt", &[sum_sq_q], registry)
-                }
-                "product" => {
-                    if !args.is_empty() {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                            "product takes no arguments".to_string(),
-                        )));
-                    }
-                    use futures::stream::StreamExt;
-                    let mut stream = vector_into_stream(db, inner);
-                    let mut acc = Value::Numeric(Quantity::from_scalar(1.0));
-                    futures::executor::block_on(async {
-                        while let Some(item) = stream.next().await {
-                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            if let Some(v) = opt {
-                                acc = mul_values(&acc, &v, registry, None, expr.span(db))
-                                    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            }
-                        }
-                        Ok::<(), RunError>(())
-                    })?;
-                    Ok(acc)
-                }
-                "variance" => {
-                    if !args.is_empty() {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                            "variance takes no arguments".to_string(),
-                        )));
-                    }
-                    use futures::stream::StreamExt;
-                    let mut stream = vector_into_stream(db, inner);
-                    let mut n = 0usize;
-                    let mut mean: Option<Value> = None;
-                    let mut m2 = Value::Numeric(Quantity::from_scalar(0.0));
-                    futures::executor::block_on(async {
-                        while let Some(item) = stream.next().await {
-                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            let Some(x) = opt else { continue };
-                            n += 1;
-                            if n == 1 {
-                                mean = Some(x);
-                                continue;
-                            }
-                            let n_val = Value::Numeric(Quantity::from_exact_scalar(n as f64));
-                            let mean_val = mean
-                                .clone()
-                                .ok_or_else(|| run_err_with_span(db, expr, RunErrorKind::UndefinedResult))?;
-                            let delta = sub_values(&x, &mean_val, registry, None, expr.span(db))
-                                .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            let delta_over_n =
-                                div_values(&delta, &n_val, registry, None, expr.span(db))
-                                    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            let next_mean =
-                                add_values(&mean_val, &delta_over_n, registry, None, expr.span(db))
-                                    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            let delta2 = sub_values(&x, &next_mean, registry, None, expr.span(db))
-                                .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            let prod = mul_values(&delta, &delta2, registry, None, expr.span(db))
-                                .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            m2 = add_values(&m2, &prod, registry, None, expr.span(db))
-                                .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            mean = Some(next_mean);
-                        }
-                        Ok::<(), RunError>(())
-                    })?;
-                    if n == 0 {
-                        return Err(run_err_with_span(
-                            db,
-                            expr,
-                            RunErrorKind::EmptyVectorReduction("variance".to_string()),
-                        ));
-                    }
-                    let n_val = Value::Numeric(Quantity::from_exact_scalar(n as f64));
-                    div_values(&m2, &n_val, registry, None, expr.span(db))
-                }
-                "stddev" => {
-                    if !args.is_empty() {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                            "stddev takes no arguments".to_string(),
-                        )));
-                    }
-                    let variance_val = {
-                        let variance_expr = ExprData::MethodCall(*base, "variance".to_string(), vec![]);
-                        let variance_node = Expression::new(db, variance_expr, expr.span(db));
-                        value_inner(db, scope, variance_node, registry)?
-                    };
-                    let sym_reg =
-                        crate::symbol_registry::SymbolRegistry::default_registry();
-                    let variance_q = variance_val.to_quantity(&sym_reg).map_err(|_| {
-                        RunError::new(RunErrorKind::UnknownMethod(
-                            "stddev: elements must be numeric (same dimension)"
-                                .to_string(),
-                        ))
-                    })?;
-                    functions::call_builtin("sqrt", &[variance_q], registry)
-                }
-                "all" => {
-                    if !args.is_empty() {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                            "all takes no arguments".to_string(),
-                        )));
-                    }
-                    let mut acc = crate::fuzzy::FuzzyBool::True;
-                    use futures::stream::StreamExt;
-                    let mut stream = vector_into_stream(db, inner);
-                    futures::executor::block_on(async {
-                        while let Some(item) = stream.next().await {
-                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            let Some(v) = opt else { continue };
-                            let f = match v {
-                                Value::FuzzyBool(f) => f,
-                                _ => {
-                                    return Err(run_err_with_span(
-                                        db,
-                                        expr,
-                                        RunErrorKind::UnknownMethod(
-                                            "all: elements must be boolean (e.g. from comparison)"
-                                                .to_string(),
-                                        ),
-                                    ))
-                                }
-                            };
-                            acc = acc.clone().and_(&f);
-                            if matches!(acc, crate::fuzzy::FuzzyBool::False) {
-                                break;
-                            }
-                        }
-                        Ok::<(), RunError>(())
-                    })?;
-                    Ok(Value::FuzzyBool(acc))
-                }
-                "any" => {
-                    if !args.is_empty() {
-                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
-                            "any takes no arguments".to_string(),
-                        )));
-                    }
-                    let mut acc = crate::fuzzy::FuzzyBool::False;
-                    use futures::stream::StreamExt;
-                    let mut stream = vector_into_stream(db, inner);
-                    futures::executor::block_on(async {
-                        while let Some(item) = stream.next().await {
-                            let opt = item.map_err(|e| with_span_if_missing(e, expr.span(db)))?;
-                            let Some(v) = opt else { continue };
-                            let f = match v {
-                                Value::FuzzyBool(f) => f,
-                                _ => {
-                                    return Err(run_err_with_span(
-                                        db,
-                                        expr,
-                                        RunErrorKind::UnknownMethod(
-                                            "any: elements must be boolean (e.g. from comparison)"
-                                                .to_string(),
-                                        ),
-                                    ))
-                                }
-                            };
-                            acc = acc.clone().or_(&f);
-                            if matches!(acc, crate::fuzzy::FuzzyBool::True) {
-                                break;
-                            }
-                        }
-                        Ok::<(), RunError>(())
-                    })?;
-                    Ok(Value::FuzzyBool(acc))
-                }
+                "take" | "map" => eval_vector_method_transform(
+                    db,
+                    scope,
+                    expr,
+                    name,
+                    args,
+                    inner,
+                    orientation,
+                    registry,
+                )?
+                .ok_or_else(|| run_err_with_span(db, expr, RunErrorKind::UnknownMethod(name.clone()))),
+                "median" | "quantile" | "median_approx" | "quantile_approx" =>
+                    eval_vector_method_order_stats(db, scope, expr, name, args, inner, registry)?
+                        .ok_or_else(|| run_err_with_span(db, expr, RunErrorKind::UnknownMethod(name.clone()))),
+                "sum" | "mean" | "min" | "max" | "dot" | "norm" | "product" | "variance"
+                | "stddev" | "all" | "any" => eval_vector_method_reduce(
+                    db,
+                    scope,
+                    expr,
+                    name,
+                    args,
+                    inner,
+                    registry,
+                )?
+                .ok_or_else(|| run_err_with_span(db, expr, RunErrorKind::UnknownMethod(name.clone()))),
                 _ => Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(name.clone()))),
             }
         }
@@ -3050,20 +2583,16 @@ fn sum_and_count_vector_stream(
     registry: &UnitRegistry,
     span: Option<Span>,
 ) -> Result<(Value, usize), RunError> {
-    use futures::stream::StreamExt;
-    let mut stream = vector_into_stream(db, v);
     let mut acc = Value::Numeric(Quantity::from_scalar(0.0));
     let mut count = 0usize;
-    futures::executor::block_on(async move {
-        while let Some(item) = stream.next().await {
-            count += 1;
-            let opt = item?;
-            if let Some(v) = opt {
-                acc = add_values(&acc, &v, registry, None, span)?;
-            }
+    for_each_vector_item(db, v, |opt| {
+        count += 1;
+        if let Some(v) = opt {
+            acc = add_values(&acc, &v, registry, None, span)?;
         }
-        Ok((acc, count))
-    })
+        Ok(())
+    })?;
+    Ok((acc, count))
 }
 
 /// Product of all elements of a collected vector. Skips None (sparse); empty → 1.
@@ -3307,48 +2836,43 @@ fn quantile_approx_from_stream(
             "{method_name}: p must be in [0, 1]"
         ))));
     }
-    use futures::stream::StreamExt;
     const RESERVOIR_SIZE: usize = 1024;
-    let mut stream = vector_into_stream(db, inner);
     let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
     let mut count: u64 = 0;
     let mut rng_state: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut ref_unit: Option<Unit> = None;
     let mut sample: Vec<Quantity> = Vec::with_capacity(RESERVOIR_SIZE);
-    futures::executor::block_on(async {
-        while let Some(item) = stream.next().await {
-            let opt = item?;
-            let Some(v) = opt else { continue };
-            let mut q = v.to_quantity(&sym_reg).map_err(|_| {
-                RunError::new(RunErrorKind::UnknownMethod(format!(
-                    "{method_name}: elements must be numeric (same dimension)"
-                )))
+    for_each_vector_item(db, inner, |opt| {
+        let Some(v) = opt else { return Ok(()) };
+        let mut q = v.to_quantity(&sym_reg).map_err(|_| {
+            RunError::new(RunErrorKind::UnknownMethod(format!(
+                "{method_name}: elements must be numeric (same dimension)"
+            )))
+        })?;
+        if let Some(unit) = &ref_unit {
+            q = q.convert_to(registry, unit).map_err(|_| {
+                RunError::new(RunErrorKind::DimensionMismatch {
+                    left: q.unit().clone(),
+                    right: unit.clone(),
+                })
             })?;
-            if let Some(unit) = &ref_unit {
-                q = q.convert_to(registry, unit).map_err(|_| {
-                    RunError::new(RunErrorKind::DimensionMismatch {
-                        left: q.unit().clone(),
-                        right: unit.clone(),
-                    })
-                })?;
-            } else {
-                ref_unit = Some(q.unit().clone());
-            }
-            count = count.saturating_add(1);
-            if sample.len() < RESERVOIR_SIZE {
-                sample.push(q);
-            } else {
-                // Deterministic xorshift-based reservoir sampling.
-                rng_state ^= rng_state << 13;
-                rng_state ^= rng_state >> 7;
-                rng_state ^= rng_state << 17;
-                let j = (rng_state % count.max(1)) as usize;
-                if j < RESERVOIR_SIZE {
-                    sample[j] = q;
-                }
+        } else {
+            ref_unit = Some(q.unit().clone());
+        }
+        count = count.saturating_add(1);
+        if sample.len() < RESERVOIR_SIZE {
+            sample.push(q);
+        } else {
+            // Deterministic xorshift-based reservoir sampling.
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            let j = (rng_state % count.max(1)) as usize;
+            if j < RESERVOIR_SIZE {
+                sample[j] = q;
             }
         }
-        Ok::<(), RunError>(())
+        Ok(())
     })?;
     if sample.is_empty() {
         return Err(RunError::new(RunErrorKind::EmptyVectorReduction(
@@ -3368,6 +2892,517 @@ fn quantile_approx_from_stream(
         val,
         sample[0].unit().clone(),
     )))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn eval_vector_method_transform(
+    db: &dyn salsa::Database,
+    scope: Scope,
+    expr: Expression<'_>,
+    name: &str,
+    args: &[(Option<String>, Expression<'_>)],
+    inner: LazyVector,
+    orientation: VectorOrientation,
+    registry: &UnitRegistry,
+) -> Result<Option<Value>, RunError> {
+    match name {
+        "take" => {
+            let arg_vals: Vec<Value> = args
+                .iter()
+                .map(|(_, e)| value_inner(db, scope, *e, registry))
+                .collect::<Result<Vec<_>, _>>()?;
+            if arg_vals.len() != 2 {
+                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(format!(
+                    "take requires 2 arguments (start, length), got {}",
+                    arg_vals.len()
+                ))));
+            }
+            let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+            let start_q = arg_vals[0].to_quantity(&sym_reg).map_err(|_| {
+                RunError::new(RunErrorKind::InvalidIndex("take start must be numeric".to_string()))
+            })?;
+            let length_q = arg_vals[1].to_quantity(&sym_reg).map_err(|_| {
+                RunError::new(RunErrorKind::InvalidIndex("take length must be numeric".to_string()))
+            })?;
+            let start_f = start_q.value();
+            let length_f = length_q.value();
+            if !start_f.is_finite() || start_f < 0.0 {
+                return Err(run_err_with_span(db, expr, RunErrorKind::InvalidIndex(
+                    "take start must be a non-negative integer".to_string(),
+                )));
+            }
+            if !length_f.is_finite() || length_f < 0.0 {
+                return Err(run_err_with_span(db, expr, RunErrorKind::InvalidIndex(
+                    "take length must be a non-negative integer".to_string(),
+                )));
+            }
+            let start_u = start_f as usize;
+            let length_u = length_f as usize;
+            Ok(Some(Value::Vector(VectorValue {
+                inner: LazyVector::Take {
+                    source: Box::new(inner),
+                    start: start_u,
+                    length: length_u,
+                },
+                orientation,
+            })))
+        }
+        "map" => {
+            if args.len() != 1 {
+                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(format!(
+                    "map requires 1 argument (a function), got {}",
+                    args.len()
+                ))));
+            }
+            let (_, fn_expr) = &args[0];
+            let fn_val = value_inner(db, scope, *fn_expr, registry)?;
+            let result = match &fn_val {
+                Value::Function(uf) => {
+                    if uf.params.len() != 1 {
+                        return Err(run_err_with_span(
+                            db,
+                            expr,
+                            RunErrorKind::UnknownFunction(format!(
+                                "map requires a function of one parameter (got {} parameters)",
+                                uf.params.len()
+                            )),
+                        ));
+                    }
+                    Value::Vector(VectorValue {
+                        inner: LazyVector::Map {
+                            source: Box::new(inner),
+                            op: VectorMapOp::UserMap(uf.clone()),
+                        },
+                        orientation,
+                    })
+                }
+                Value::BuiltinFunction(name) => {
+                    let params = functions::param_names(name).ok_or_else(|| {
+                        RunError::new(RunErrorKind::UnknownMethod(
+                            "map requires a function (e.g. sqrt or fn (x) => (x+1))"
+                                .to_string(),
+                        ))
+                    })?;
+                    if params.len() != 1 {
+                        return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(format!(
+                            "map requires a function of one parameter (e.g. sqrt or fn x => (x+1)), got built-in '{}' which takes {}",
+                            name,
+                            params.len()
+                        ))));
+                    }
+                    Value::Vector(VectorValue {
+                        inner: LazyVector::Map {
+                            source: Box::new(inner),
+                            op: VectorMapOp::UnaryFunc(name.clone()),
+                        },
+                        orientation,
+                    })
+                }
+                _ => {
+                    return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
+                        "map requires a function (e.g. fn (x) => (x+1) or sqrt)".to_string(),
+                    )))
+                }
+            };
+            Ok(Some(result))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn variance_from_vector_stream(
+    db: &dyn salsa::Database,
+    expr: Expression<'_>,
+    inner: LazyVector,
+    registry: &UnitRegistry,
+    method_name: &str,
+) -> Result<Value, RunError> {
+    let mut n = 0usize;
+    let mut mean: Option<Value> = None;
+    let mut m2 = Value::Numeric(Quantity::from_scalar(0.0));
+    for_each_vector_item(db, inner, |opt| {
+        let Some(x) = opt else { return Ok(()) };
+        n += 1;
+        if n == 1 {
+            mean = Some(x);
+            return Ok(());
+        }
+        let n_val = Value::Numeric(Quantity::from_exact_scalar(n as f64));
+        let mean_val = mean
+            .clone()
+            .ok_or_else(|| run_err_with_span(db, expr, RunErrorKind::UndefinedResult))?;
+        let delta = sub_values(&x, &mean_val, registry, None, expr.span(db))
+            .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+        let delta_over_n = div_values(&delta, &n_val, registry, None, expr.span(db))
+            .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+        let next_mean = add_values(&mean_val, &delta_over_n, registry, None, expr.span(db))
+            .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+        let delta2 = sub_values(&x, &next_mean, registry, None, expr.span(db))
+            .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+        let prod = mul_values(&delta, &delta2, registry, None, expr.span(db))
+            .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+        m2 = add_values(&m2, &prod, registry, None, expr.span(db))
+            .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+        mean = Some(next_mean);
+        Ok(())
+    })
+    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+    if n == 0 {
+        return Err(run_err_with_span(
+            db,
+            expr,
+            RunErrorKind::EmptyVectorReduction(method_name.to_string()),
+        ));
+    }
+    let n_val = Value::Numeric(Quantity::from_exact_scalar(n as f64));
+    div_values(&m2, &n_val, registry, None, expr.span(db))
+}
+
+fn eval_vector_method_reduce(
+    db: &dyn salsa::Database,
+    scope: Scope,
+    expr: Expression<'_>,
+    name: &str,
+    args: &[(Option<String>, Expression<'_>)],
+    inner: LazyVector,
+    registry: &UnitRegistry,
+) -> Result<Option<Value>, RunError> {
+    let out = match name {
+        "sum" => {
+            if !args.is_empty() {
+                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
+                    "sum takes no arguments".to_string(),
+                )));
+            }
+            let (sum_val, _count) =
+                sum_and_count_vector_stream(db, inner, registry, expr.span(db))
+                    .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+            sum_val
+        }
+        "mean" => {
+            if !args.is_empty() {
+                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
+                    "mean takes no arguments".to_string(),
+                )));
+            }
+            let mut n = 0usize;
+            let mut sum_val = Value::Numeric(Quantity::from_scalar(0.0));
+            for_each_vector_item(db, inner, |opt| {
+                if let Some(v) = opt {
+                    n += 1;
+                    sum_val = add_values(&sum_val, &v, registry, None, expr.span(db))
+                        .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                }
+                Ok(())
+            })
+            .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+            if n == 0 {
+                return Err(run_err_with_span(
+                    db,
+                    expr,
+                    RunErrorKind::EmptyVectorReduction("mean".to_string()),
+                ));
+            }
+            let len_val = Value::Numeric(Quantity::from_exact_scalar(n as f64));
+            div_values(&sum_val, &len_val, registry, None, expr.span(db))?
+        }
+        "min" | "max" => {
+            if !args.is_empty() {
+                return Err(run_err_with_span(
+                    db,
+                    expr,
+                    RunErrorKind::UnknownMethod(format!("{name} takes no arguments")),
+                ));
+            }
+            let mut acc: Option<Quantity> = None;
+            let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+            for_each_vector_item(db, inner, |opt| {
+                let Some(v) = opt else { return Ok(()) };
+                let q = v.to_quantity(&sym_reg).map_err(|_| {
+                    run_err_with_span(
+                        db,
+                        expr,
+                        RunErrorKind::UnknownMethod(format!(
+                            "{name}: elements must be numeric (same dimension)"
+                        )),
+                    )
+                })?;
+                acc = Some(match acc.take() {
+                    None => q,
+                    Some(prev) => functions::call_builtin(name, &[prev, q], registry)?
+                        .to_quantity(&sym_reg)
+                        .map_err(|_| {
+                            run_err_with_span(
+                                db,
+                                expr,
+                                RunErrorKind::UnknownMethod(format!(
+                                    "{name}: elements must be numeric (same dimension)"
+                                )),
+                            )
+                        })?,
+                });
+                Ok(())
+            })
+            .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+            match acc {
+                Some(q) => Value::Numeric(q),
+                None => {
+                    return Err(run_err_with_span(
+                        db,
+                        expr,
+                        RunErrorKind::EmptyVectorReduction(name.to_string()),
+                    ))
+                }
+            }
+        }
+        "dot" => {
+            if args.len() != 1 {
+                return Err(run_err_with_span(
+                    db,
+                    expr,
+                    RunErrorKind::UnknownMethod(format!(
+                        "dot requires 1 argument (another vector), got {}",
+                        args.len()
+                    )),
+                ));
+            }
+            let (_, other_expr) = &args[0];
+            let other_val = value_inner(db, scope, *other_expr, registry)?;
+            let VectorValue { inner: other_inner, .. } = match &other_val {
+                Value::Vector(v) => v.clone(),
+                _ => {
+                    return Err(run_err_with_span(
+                        db,
+                        expr,
+                        RunErrorKind::UnknownMethod("dot requires a vector argument".to_string()),
+                    ))
+                }
+            };
+            dot_product_stream(db, inner, other_inner, registry, expr.span(db))?
+        }
+        "norm" => {
+            if !args.is_empty() {
+                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
+                    "norm takes no arguments".to_string(),
+                )));
+            }
+            let mut sum_sq = Value::Numeric(Quantity::from_scalar(0.0));
+            for_each_vector_item(db, inner, |opt| {
+                if let Some(v) = opt {
+                    let sq = mul_values(&v, &v, registry, None, expr.span(db))
+                        .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                    sum_sq = add_values(&sum_sq, &sq, registry, None, expr.span(db))
+                        .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                }
+                Ok(())
+            })
+            .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+            let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+            let sum_sq_q = sum_sq.to_quantity(&sym_reg).map_err(|_| {
+                RunError::new(RunErrorKind::UnknownMethod(
+                    "norm: elements must be numeric (same dimension)".to_string(),
+                ))
+            })?;
+            functions::call_builtin("sqrt", &[sum_sq_q], registry)?
+        }
+        "product" => {
+            if !args.is_empty() {
+                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
+                    "product takes no arguments".to_string(),
+                )));
+            }
+            let mut acc = Value::Numeric(Quantity::from_scalar(1.0));
+            for_each_vector_item(db, inner, |opt| {
+                if let Some(v) = opt {
+                    acc = mul_values(&acc, &v, registry, None, expr.span(db))
+                        .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+                }
+                Ok(())
+            })
+            .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+            acc
+        }
+        "variance" => {
+            if !args.is_empty() {
+                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
+                    "variance takes no arguments".to_string(),
+                )));
+            }
+            variance_from_vector_stream(db, expr, inner, registry, "variance")?
+        }
+        "stddev" => {
+            if !args.is_empty() {
+                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
+                    "stddev takes no arguments".to_string(),
+                )));
+            }
+            let variance_val = variance_from_vector_stream(db, expr, inner, registry, "variance")?;
+            let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+            let variance_q = variance_val.to_quantity(&sym_reg).map_err(|_| {
+                RunError::new(RunErrorKind::UnknownMethod(
+                    "stddev: elements must be numeric (same dimension)".to_string(),
+                ))
+            })?;
+            functions::call_builtin("sqrt", &[variance_q], registry)?
+        }
+        "all" => {
+            if !args.is_empty() {
+                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
+                    "all takes no arguments".to_string(),
+                )));
+            }
+            let mut acc = crate::fuzzy::FuzzyBool::True;
+            for_each_vector_item_control(db, inner, |opt| {
+                let Some(v) = opt else { return Ok(StreamControl::Continue) };
+                let f = match v {
+                    Value::FuzzyBool(f) => f,
+                    _ => {
+                        return Err(run_err_with_span(
+                            db,
+                            expr,
+                            RunErrorKind::UnknownMethod(
+                                "all: elements must be boolean (e.g. from comparison)".to_string(),
+                            ),
+                        ))
+                    }
+                };
+                acc = acc.clone().and_(&f);
+                if matches!(acc, crate::fuzzy::FuzzyBool::False) {
+                    Ok(StreamControl::Break)
+                } else {
+                    Ok(StreamControl::Continue)
+                }
+            })
+            .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+            Value::FuzzyBool(acc)
+        }
+        "any" => {
+            if !args.is_empty() {
+                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
+                    "any takes no arguments".to_string(),
+                )));
+            }
+            let mut acc = crate::fuzzy::FuzzyBool::False;
+            for_each_vector_item_control(db, inner, |opt| {
+                let Some(v) = opt else { return Ok(StreamControl::Continue) };
+                let f = match v {
+                    Value::FuzzyBool(f) => f,
+                    _ => {
+                        return Err(run_err_with_span(
+                            db,
+                            expr,
+                            RunErrorKind::UnknownMethod(
+                                "any: elements must be boolean (e.g. from comparison)".to_string(),
+                            ),
+                        ))
+                    }
+                };
+                acc = acc.clone().or_(&f);
+                if matches!(acc, crate::fuzzy::FuzzyBool::True) {
+                    Ok(StreamControl::Break)
+                } else {
+                    Ok(StreamControl::Continue)
+                }
+            })
+            .map_err(|e| with_span_if_missing(e, expr.span(db)))?;
+            Value::FuzzyBool(acc)
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(out))
+}
+
+fn eval_vector_method_order_stats(
+    db: &dyn salsa::Database,
+    scope: Scope,
+    expr: Expression<'_>,
+    name: &str,
+    args: &[(Option<String>, Expression<'_>)],
+    inner: LazyVector,
+    registry: &UnitRegistry,
+) -> Result<Option<Value>, RunError> {
+    let out = match name {
+        "median" => {
+            if !args.is_empty() {
+                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
+                    "median takes no arguments".to_string(),
+                )));
+            }
+            if matches!(inner, LazyVector::FromInput(_)) {
+                return Err(run_err_with_span(
+                    db,
+                    expr,
+                    RunErrorKind::InvalidArgument(
+                        "median on non-replayable stream requires explicit materialization upstream"
+                            .to_string(),
+                    ),
+                ));
+            }
+            let collected = collect_vector_stream(db, inner);
+            median_from_collected(&collected, registry)
+                .map_err(|e| with_span_if_missing(e, expr.span(db)))?
+        }
+        "quantile" => {
+            if args.len() != 1 {
+                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(format!(
+                    "quantile requires 1 argument (p in [0,1]), got {}",
+                    args.len()
+                ))));
+            }
+            let (_, p_expr) = &args[0];
+            let p_val = value_inner(db, scope, *p_expr, registry)?;
+            let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+            let p_q = p_val.to_quantity(&sym_reg).map_err(|_| {
+                RunError::new(RunErrorKind::InvalidArgument(
+                    "quantile: p must be numeric".to_string(),
+                ))
+            })?;
+            let p = p_q.value();
+            if matches!(inner, LazyVector::FromInput(_)) {
+                return Err(run_err_with_span(
+                    db,
+                    expr,
+                    RunErrorKind::InvalidArgument(
+                        "quantile on non-replayable stream requires explicit materialization upstream"
+                            .to_string(),
+                    ),
+                ));
+            }
+            let collected = collect_vector_stream(db, inner);
+            quantile_from_collected(&collected, p, registry)
+                .map_err(|e| with_span_if_missing(e, expr.span(db)))?
+        }
+        "median_approx" => {
+            if !args.is_empty() {
+                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(
+                    "median_approx takes no arguments".to_string(),
+                )));
+            }
+            quantile_approx_from_stream(db, inner, 0.5, registry, "median_approx")
+                .map_err(|e| with_span_if_missing(e, expr.span(db)))?
+        }
+        "quantile_approx" => {
+            if args.len() != 1 {
+                return Err(run_err_with_span(db, expr, RunErrorKind::UnknownMethod(format!(
+                    "quantile_approx requires 1 argument (p in [0,1]), got {}",
+                    args.len()
+                ))));
+            }
+            let (_, p_expr) = &args[0];
+            let p_val = value_inner(db, scope, *p_expr, registry)?;
+            let sym_reg = crate::symbol_registry::SymbolRegistry::default_registry();
+            let p_q = p_val.to_quantity(&sym_reg).map_err(|_| {
+                RunError::new(RunErrorKind::InvalidArgument(
+                    "quantile_approx: p must be numeric".to_string(),
+                ))
+            })?;
+            let p = p_q.value();
+            quantile_approx_from_stream(db, inner, p, registry, "quantile_approx")
+                .map_err(|e| with_span_if_missing(e, expr.span(db)))?
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(out))
 }
 
 /// Min or max over collected vector elements (numeric only). Empty → EmptyVectorReduction.

@@ -2,6 +2,29 @@
 
 ## Just completed
 
+- **Lazy runtime hardening pass (stream reducers + method dispatch + LSP slice optimization):**
+  - `crates/snaq-lite-lang/src/queries.rs`:
+    - Added shared stream iteration helpers (`for_each_vector_item`, `for_each_vector_item_control`) and rewired reducer call sites (`sum_and_count_vector_stream`, `quantile_approx_from_stream`, and vector methods `mean/min/max/norm/product/variance/all/any`) to reduce duplicated stream loops while preserving behavior.
+    - Extracted vector method families into focused helpers:
+      - `eval_vector_method_transform` (`take`, `map`)
+      - `eval_vector_method_order_stats` (`median`, `quantile`, `median_approx`, `quantile_approx`)
+    - `value_inner` method dispatch now routes through these helper families.
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - Added `known_lazy_vector_len` and optimized `collect_vector_slice_window` to stop stream traversal at the requested page window when total length is structurally known (`FromEvaluated`, `FromExprs`, `FromExprsWithEnv`, `Map`, `Take`), while preserving exact `totalCount`.
+    - Added unit test `collect_vector_slice_window_uses_known_total_without_draining_full_stream`.
+  - `crates/snaq-lite-lang/src/lib.rs`:
+    - Added regression coverage for reducer short-circuit behavior (`all`/`any`) and transform+order-stat dispatch parity.
+  - Docs updated:
+    - `docs/VECTORS.md` (explicit short-circuit behavior for `all`/`any`, streaming approx order stats),
+    - `docs/LSP.md` (slice-windowing semantics and non-draining forward-only paths),
+    - `docs/EXTERNAL_STREAMS.md` (forward-only ownership/non-draining contract).
+  - Verification green:
+    - `cargo test -p snaq-lite-lang`
+    - `cargo test -p snaq-lite-lsp`
+    - `cargo test -p snaq-lite-lsp --test lsp_integration`
+    - `pnpm test`
+    - `pnpm run lint`
+
 - **LSP client document-version monotonicity fix (`didChange`)**
   - Verified issue in `apps/frontend/src/lsp/client.ts`: both `didOpen` and `didChange` defaulted version to `1`, allowing non-monotonic versioning when callers omitted `version`.
   - Implemented per-URI version tracking in `createLspClient`:
@@ -507,3 +530,9 @@
   - Fix: hash full function payload with `uf.hash(hasher)` in the `Value::Function` arm.
   - Added regression test `function_fingerprint_changes_when_function_payload_changes`.
   - Verification green: targeted failing->passing test, full `cargo test -p snaq-lite-lsp`, and `pnpm check`.
+- **Review and improve (lazy-runtime reducer refactor follow-up):**
+  - Reviewed the previous hardening implementation in `crates/snaq-lite-lang/src/queries.rs` and found remaining accidental complexity in `ExprData::MethodCall` where reducer methods were still mostly inline.
+  - Extracted reducer dispatch into a dedicated helper: `eval_vector_method_reduce` handling `sum`, `mean`, `min`, `max`, `dot`, `norm`, `product`, `variance`, `stddev`, `all`, `any`.
+  - Added shared reducer utility `variance_from_vector_stream` so `variance` and `stddev` reuse one stream implementation (removes expression-rebuild path for stddev and keeps semantics local to reducer evaluation).
+  - Simplified `value_inner` vector method dispatch to route reducers through the helper family, aligning reducer/transform/order-stat method structure and reducing monolithic branch complexity.
+  - Verification green: `cargo test -p snaq-lite-lang`, `cargo clippy -p snaq-lite-lang -- -D warnings`.

@@ -221,14 +221,6 @@ impl ResultHandleRegistry {
         self.cursors.retain(|_, entry| entry.handle != handle);
     }
 
-    fn run_local_future<F>(future: F) -> F::Output
-    where
-        F: futures::Future,
-    {
-        let mut pool = futures::executor::LocalPool::new();
-        pool.run_until(future)
-    }
-
     fn ensure_forward_only_state(
         &mut self,
         handle: &str,
@@ -284,7 +276,7 @@ impl ResultHandleRegistry {
             if state.exhausted {
                 break;
             }
-            let next = Self::run_local_future(async { state.stream.next().await });
+            let next = futures::executor::block_on(state.stream.next());
             match next {
                 Some(item) => {
                     items.push(item);
@@ -297,7 +289,7 @@ impl ResultHandleRegistry {
             }
         }
         if !state.exhausted && state.prefetched.is_empty() {
-            let next = Self::run_local_future(async { state.stream.next().await });
+            let next = futures::executor::block_on(state.stream.next());
             match next {
                 Some(item) => {
                     if state.prefetched.len() >= FORWARD_ONLY_PREFETCH_LIMIT {

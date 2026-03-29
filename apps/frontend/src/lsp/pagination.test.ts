@@ -58,4 +58,5 @@ describe('pagination helpers', () => {
     })
     expect(page.cursor).toEqual({ cursor: undefined, offset: 4 })
   })
+
 })

@@ -678,6 +678,63 @@ impl SnaqLiteBackend {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    async fn publish_wasm_vector_subscription_payload(
+        &self,
+        subscription_id: &str,
+        uri: &Url,
+        revision: Option<u64>,
+        canvas_id: Option<String>,
+        payload: serde_json::Value,
+        result_handle: Option<&str>,
+    ) {
+        self.send_publish_result_notifications(PublishResultParams {
+            subscription_id: subscription_id.to_string(),
+            status: PublishStatus::Running,
+            revision,
+            canvas_id: canvas_id.clone(),
+            uri: Some(uri.to_string()),
+            data: Self::with_result_handle_data(
+                Some(serde_json::json!({
+                    "elements": [],
+                    "offset": 0,
+                    "count": 0
+                })),
+                result_handle,
+            ),
+        })
+        .await;
+        self.send_publish_result_notifications(PublishResultParams {
+            subscription_id: subscription_id.to_string(),
+            status: PublishStatus::Completed,
+            revision,
+            canvas_id,
+            uri: Some(uri.to_string()),
+            data: Some(payload),
+        })
+        .await;
+    }
+
+    async fn publish_scalar_subscription_payload(
+        &self,
+        subscription_id: &str,
+        uri: &Url,
+        revision: Option<u64>,
+        canvas_id: Option<String>,
+        display: String,
+        result_handle: Option<&str>,
+    ) {
+        self.send_publish_result_notifications(PublishResultParams {
+            subscription_id: subscription_id.to_string(),
+            status: PublishStatus::Completed,
+            revision,
+            canvas_id,
+            uri: Some(uri.to_string()),
+            data: Self::with_result_handle_data(Some(serde_json::json!({ "display": display })), result_handle),
+        })
+        .await;
+    }
+
     async fn cancel_subscription_entries(
         &self,
         entries: Vec<(String, Option<futures::channel::oneshot::Sender<()>>)>,
@@ -1015,31 +1072,18 @@ impl SnaqLiteBackend {
                         }
                         #[cfg(target_arch = "wasm32")]
                         {
-                            let payload = Self::build_completed_payload(
-                                &snaq_lite_lang::Value::Vector(v.clone()),
-                                &db,
-                                result_handle,
-                            );
-                            self.send_publish_result_notifications(PublishResultParams {
-                                subscription_id: subscription_id.clone(),
-                                status: PublishStatus::Running,
+                            self.publish_wasm_vector_subscription_payload(
+                                &subscription_id,
+                                &uri,
                                 revision,
-                                canvas_id: canvas_id.clone(),
-                                uri: Some(uri.to_string()),
-                                data: Self::with_result_handle_data(
-                                    Some(serde_json::json!({ "elements": [] })),
+                                canvas_id.clone(),
+                                Self::build_completed_payload(
+                                    &snaq_lite_lang::Value::Vector(v.clone()),
+                                    &db,
                                     result_handle,
                                 ),
-                            })
-                            .await;
-                            self.send_publish_result_notifications(PublishResultParams {
-                                subscription_id: subscription_id.clone(),
-                                status: PublishStatus::Completed,
-                                revision,
-                                canvas_id: canvas_id.clone(),
-                                uri: Some(uri.to_string()),
-                                data: Some(payload),
-                            })
+                                result_handle,
+                            )
                             .await;
                             self.subscriptions
                                 .lock()
@@ -1048,19 +1092,15 @@ impl SnaqLiteBackend {
                         }
                     }
                     _ => {
-                        let display = snaq_lite_lang::format_value_for_display(&db, &value)
-                            .unwrap_or_else(|_| "<error>".to_string());
-                        self.send_publish_result_notifications(PublishResultParams {
-                            subscription_id: subscription_id.clone(),
-                            status: PublishStatus::Completed,
+                        self.publish_scalar_subscription_payload(
+                            &subscription_id,
+                            uri,
                             revision,
-                            canvas_id: canvas_id.clone(),
-                            uri: Some(uri.to_string()),
-                            data: Self::with_result_handle_data(
-                                Some(serde_json::json!({ "display": display })),
-                                result_handle,
-                            ),
-                        })
+                            canvas_id.clone(),
+                            snaq_lite_lang::format_value_for_display(&db, &value)
+                                .unwrap_or_else(|_| "<error>".to_string()),
+                            result_handle,
+                        )
                         .await;
                         self.subscriptions
                             .lock()
@@ -1264,52 +1304,33 @@ impl SnaqLiteBackend {
                         }
                         #[cfg(target_arch = "wasm32")]
                         {
-                            let payload = Self::build_completed_payload(
-                                &snaq_lite_lang::Value::Vector(v.clone()),
-                                &db,
-                                Some(&result_handle),
-                            );
                             let _ = cancel_rx;
-                            let sid = subscription_id.clone();
                             let _ = inner;
-                            self.send_publish_result_notifications(PublishResultParams {
-                                subscription_id: sid.clone(),
-                                status: PublishStatus::Running,
-                                revision: Some(revision),
-                                canvas_id: canvas_id.clone(),
-                                uri: Some(uri.to_string()),
-                                data: Some(serde_json::json!({
-                                    "elements": [],
-                                    "offset": 0,
-                                    "count": 0
-                                })),
-                            })
-                            .await;
-                            self.send_publish_result_notifications(PublishResultParams {
-                                subscription_id: sid,
-                                status: PublishStatus::Completed,
-                                revision: Some(revision),
-                                canvas_id: canvas_id.clone(),
-                                uri: Some(uri.to_string()),
-                                data: Some(payload),
-                            })
+                            self.publish_wasm_vector_subscription_payload(
+                                &subscription_id,
+                                &uri,
+                                Some(revision),
+                                canvas_id.clone(),
+                                Self::build_completed_payload(
+                                    &snaq_lite_lang::Value::Vector(v.clone()),
+                                    &db,
+                                    Some(&result_handle),
+                                ),
+                                Some(&result_handle),
+                            )
                             .await;
                         }
                     }
                     _ => {
-                        let display = snaq_lite_lang::format_value_for_display(&db, &value)
-                            .unwrap_or_else(|_| "<error>".to_string());
-                        self.send_publish_result_notifications(PublishResultParams {
-                            subscription_id: subscription_id.clone(),
-                            status: PublishStatus::Completed,
-                            revision: Some(revision),
-                            canvas_id: canvas_id.clone(),
-                            uri: Some(uri.to_string()),
-                            data: Self::with_result_handle_data(
-                                Some(serde_json::json!({ "display": display })),
-                                Some(&result_handle),
-                            ),
-                        })
+                        self.publish_scalar_subscription_payload(
+                            &subscription_id,
+                            &uri,
+                            Some(revision),
+                            canvas_id.clone(),
+                            snaq_lite_lang::format_value_for_display(&db, &value)
+                                .unwrap_or_else(|_| "<error>".to_string()),
+                            Some(&result_handle),
+                        )
                         .await;
                     }
                 }
@@ -1388,52 +1409,33 @@ impl SnaqLiteBackend {
                         }
                         #[cfg(target_arch = "wasm32")]
                         {
-                            let payload = Self::build_completed_payload(
-                                &snaq_lite_lang::Value::Vector(v.clone()),
-                                &db,
-                                Some(&result_handle),
-                            );
                             let _ = cancel_rx;
-                            let sid = subscription_id.clone();
                             let _ = inner;
-                            self.send_publish_result_notifications(PublishResultParams {
-                                subscription_id: sid.clone(),
-                                status: PublishStatus::Running,
-                                revision: Some(revision),
-                                canvas_id: canvas_id.clone(),
-                                uri: Some(uri.to_string()),
-                                data: Some(serde_json::json!({
-                                    "elements": [],
-                                    "offset": 0,
-                                    "count": 0
-                                })),
-                            })
-                            .await;
-                            self.send_publish_result_notifications(PublishResultParams {
-                                subscription_id: sid,
-                                status: PublishStatus::Completed,
-                                revision: Some(revision),
-                                canvas_id: canvas_id.clone(),
-                                uri: Some(uri.to_string()),
-                                data: Some(payload),
-                            })
+                            self.publish_wasm_vector_subscription_payload(
+                                &subscription_id,
+                                &uri,
+                                Some(revision),
+                                canvas_id.clone(),
+                                Self::build_completed_payload(
+                                    &snaq_lite_lang::Value::Vector(v.clone()),
+                                    &db,
+                                    Some(&result_handle),
+                                ),
+                                Some(&result_handle),
+                            )
                             .await;
                         }
                     }
                     _ => {
-                        let display = snaq_lite_lang::format_value_for_display(&db, &value)
-                            .unwrap_or_else(|_| "<error>".to_string());
-                        self.send_publish_result_notifications(PublishResultParams {
-                            subscription_id: subscription_id.clone(),
-                            status: PublishStatus::Completed,
-                            revision: Some(revision),
-                            canvas_id: canvas_id.clone(),
-                            uri: Some(uri.to_string()),
-                            data: Self::with_result_handle_data(
-                                Some(serde_json::json!({ "display": display })),
-                                Some(&result_handle),
-                            ),
-                        })
+                        self.publish_scalar_subscription_payload(
+                            &subscription_id,
+                            &uri,
+                            Some(revision),
+                            canvas_id.clone(),
+                            snaq_lite_lang::format_value_for_display(&db, &value)
+                                .unwrap_or_else(|_| "<error>".to_string()),
+                            Some(&result_handle),
+                        )
                         .await;
                     }
                 }
@@ -2687,32 +2689,30 @@ impl SnaqLiteBackend {
     ) -> Option<snaq_lite_lang::Value> {
         use crate::pubsub::PathSegment;
         use snaq_lite_lang::map_registry;
-        if path.is_empty() {
-            return Some(value.clone());
-        }
-        let (head, tail) = (&path[0], &path[1..]);
-        let next = match (value, head) {
-            (snaq_lite_lang::Value::Vector(v), PathSegment::Index(i)) => {
-                let idx = *i as usize;
-                let slice = snaq_lite_lang::LazyVector::Take {
-                    source: Box::new(v.inner.clone()),
-                    start: idx,
-                    length: 1,
-                };
-                use futures::stream::StreamExt;
-                let mut stream = snaq_lite_lang::vector_into_stream(db, slice);
-                let item = run_local_future(async move { stream.next().await })?;
-                match item {
-                    Ok(Some(val)) => val,
-                    _ => return None,
+        let mut current = value.clone();
+        for segment in path {
+            current = match (&current, segment) {
+                (snaq_lite_lang::Value::Vector(v), PathSegment::Index(i)) => {
+                    let idx = *i as usize;
+                    let slice = snaq_lite_lang::LazyVector::Take {
+                        source: Box::new(v.inner.clone()),
+                        start: idx,
+                        length: 1,
+                    };
+                    use futures::stream::StreamExt;
+                    let mut stream = snaq_lite_lang::vector_into_stream(db, slice);
+                    match futures::executor::block_on(stream.next()) {
+                        Some(Ok(Some(val))) => val,
+                        _ => return None,
+                    }
                 }
-            }
-            (snaq_lite_lang::Value::Map(id), PathSegment::Key(k)) => {
-                map_registry::get_key(*id, k)?.clone()
-            }
-            _ => return None,
-        };
-        Self::resolve_path(&next, tail, db)
+                (snaq_lite_lang::Value::Map(id), PathSegment::Key(k)) => {
+                    map_registry::get_key(*id, k)?.clone()
+                }
+                _ => return None,
+            };
+        }
+        Some(current)
     }
 
     /// Handle snaqlite/graph/subscribeWidget: run source node (with graph inputs when wired), cache result and send Completed with summary.
@@ -3248,7 +3248,7 @@ fn collect_vector_slice_window(
 ) {
     use futures::stream::StreamExt;
     let mut stream = snaq_lite_lang::vector_into_stream(db, inner);
-    run_local_future(async move {
+    futures::executor::block_on(async move {
         let mut total = 0u64;
         let mut out: Vec<Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>> =
             Vec::with_capacity(limit);
@@ -4093,6 +4093,19 @@ mod tests {
                 assert_eq!(data["resultHandle"].as_str(), Some("handle-1"));
             }
         }
+        let completed = messages
+            .iter()
+            .find(|p| matches!(p.status, PublishStatus::Completed))
+            .expect("completed payload");
+        let completed_data = completed.data.as_ref().expect("completed data");
+        assert!(
+            completed_data.get("display").is_none(),
+            "vector completion payload must not include eager display"
+        );
+        assert!(
+            completed_data.get("totalElements").is_some(),
+            "vector completion payload should include element count"
+        );
     }
 
     #[test]

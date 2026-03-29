@@ -152,6 +152,10 @@ fn format_vector_for_display(
     db: &dyn salsa::Database,
     v: &vector::VectorValue,
 ) -> Result<String, RunError> {
+    // Forward-only input streams are non-replayable; formatting must not consume them.
+    if matches!(v.inner, LazyVector::FromInput(_)) {
+        return Ok("<stream-vector>".to_string());
+    }
     let stream = vector_into_stream(db, v.inner.clone());
     let results: Vec<_> = futures::executor::block_on(async move {
         use futures::stream::StreamExt;
@@ -175,6 +179,10 @@ pub fn format_vector_for_widget_display(
     db: &dyn salsa::Database,
     v: &vector::VectorValue,
 ) -> Result<String, RunError> {
+    // Keep widget formatting non-destructive for forward-only lineages.
+    if matches!(v.inner, LazyVector::FromInput(_)) {
+        return Ok("<stream-vector>".to_string());
+    }
     let stream = vector_into_stream(db, v.inner.clone());
     let results: Vec<_> = futures::executor::block_on(async move {
         use futures::stream::StreamExt;
@@ -4520,6 +4528,37 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn format_value_for_display_does_not_consume_forward_only_stream_vectors() {
+        use crate::quantity::Quantity;
+        use crate::symbolic::Value;
+        use futures::sink::SinkExt;
+        use futures::stream::StreamExt;
+
+        let db = salsa::DatabaseImpl::new();
+        let (id, mut tx) = create_stream_input();
+        futures::executor::block_on(async {
+            tx.send(vec![Ok(Some(Value::Numeric(Quantity::from_scalar(7.0))))])
+                .await
+                .expect("send chunk");
+        });
+        drop(tx);
+
+        let value = Value::Vector(VectorValue::column(LazyVector::FromInput(id)));
+        let display = format_value_for_display(&db, &value).expect("format should succeed");
+        assert_eq!(display, "<stream-vector>");
+
+        let Value::Vector(v) = value else {
+            panic!("expected vector");
+        };
+        let out = futures::executor::block_on(vector_into_stream(&db, v.inner).collect::<Vec<_>>());
+        assert_eq!(out.len(), 1, "stream should remain consumable after formatting");
+        match &out[0] {
+            Ok(Some(Value::Numeric(q))) => assert!((q.value() - 7.0).abs() < 1e-10),
+            other => panic!("unexpected stream output: {other:?}"),
+        }
     }
 
     #[test]

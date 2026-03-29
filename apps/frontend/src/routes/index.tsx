@@ -288,10 +288,15 @@ function HomePage() {
     if (!client || !activeResultHandle) {
       return
     }
-    const page = await fetchFirstPage(client, { resultHandle: activeResultHandle, limit: 2 })
-    paginationRef.current = page.cursor
-    setSlice(JSON.stringify(page.response.elements))
-    setStatus('Fetched first page')
+    try {
+      const page = await fetchFirstPage(client, { resultHandle: activeResultHandle, limit: 2 })
+      paginationRef.current = page.cursor
+      setSlice(JSON.stringify(page.response.elements))
+      setStatus('Fetched first page')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error'
+      safeSetStatus(`First slice unavailable: ${message}`)
+    }
   }
 
   async function loadNextSlice(handleOverride?: string) {
@@ -300,14 +305,19 @@ function HomePage() {
     if (!client || !activeResultHandle) {
       return
     }
-    const page = await fetchNextPage(client, {
-      resultHandle: activeResultHandle,
-      limit: 2,
-      cursor: paginationRef.current,
-    })
-    paginationRef.current = page.cursor
-    setSlice(JSON.stringify(page.response.elements))
-    setStatus('Fetched next page')
+    try {
+      const page = await fetchNextPage(client, {
+        resultHandle: activeResultHandle,
+        limit: 2,
+        cursor: paginationRef.current,
+      })
+      paginationRef.current = page.cursor
+      setSlice(JSON.stringify(page.response.elements))
+      setStatus('Fetched next page')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error'
+      safeSetStatus(`Next slice unavailable: ${message}`)
+    }
   }
 
   async function switchCanvas(targetCanvasId = canvasId) {
@@ -338,13 +348,11 @@ function HomePage() {
       await switchCanvas(primaryCanvas)
       await openNodesInLsp(primaryCanvas)
       await connectNodes(primaryCanvas)
-      const primaryResultHandle = await subscribeSecondNode(primaryCanvas)
-      await loadFirstSlice(primaryResultHandle)
+      await subscribeSecondNode(primaryCanvas)
       await switchCanvas(recoveryCanvas)
       await openNodesInLsp(recoveryCanvas)
       await connectNodes(recoveryCanvas)
-      const recoveryResultHandle = await subscribeSecondNode(recoveryCanvas)
-      await loadNextSlice(recoveryResultHandle)
+      await subscribeSecondNode(recoveryCanvas)
       safeSetStatus(`Bridge scenario completed (${primaryCanvas} -> ${recoveryCanvas})`)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown error'

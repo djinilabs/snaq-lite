@@ -451,3 +451,27 @@
   - Added `graph_connect_order_does_not_change_downstream_result` integration coverage to verify equivalent downstream evaluation when connect operations are applied in different orders (deterministic wiring projection behavior).
   - Verification green: `cargo test -p snaq-lite-lsp`, `pnpm test`, `pnpm run lint`.
 - **Recompute cache-eviction issue verification:** reviewed `recompute_and_push` in `crates/snaq-lite-lsp/src/lib.rs` against the reported "clear-all impacted_set + value-change gate skip" bug; current implementation does not include that gate/flow. Applied cleanup only (removed stale changed-output wording/unused tuple field) and re-verified with `cargo test -p snaq-lite-lsp` and `pnpm check` (green).
+- **Bridge Lazy Streaming Gaps implementation (workstreams executed):**
+  - LSP request-path refactor: `fetch_result_slice` path traversal and slice-window collection remain functionally stable, and request-path `run_local_future`/`LocalPool` usage was removed from path resolution codepaths.
+  - Subscription/notification dedup: extracted shared helpers for scalar and wasm-vector completion publishing in `crates/snaq-lite-lsp/src/lib.rs` to reduce duplicate subscribe/subscribeNode logic while preserving behavior.
+  - Semantic fingerprinting improvement: `NodeResultRegistry` now uses explicit hashed semantic fingerprints (including vector-shape/lineage cases) instead of heavy `Debug`-string fingerprints; added regression tests for unchanged/changed revisions and `FromInput` handle identity changes.
+  - Runtime no-drain display guarantee: `format_value_for_display`/`format_vector_for_widget_display` now return `<stream-vector>` for `LazyVector::FromInput` so display formatting cannot consume forward-only streams; added test coverage.
+  - Frontend bridge flow hardening: bridge scenario no longer blocks on slice fetches in the end-to-end path; pagination helper now enforces a fetch timeout and scenario flow remains completion-oriented.
+- **Verification (current):**
+  - `cargo test -p snaq-lite-lang` ✅
+  - `cargo test -p snaq-lite-lsp` ✅
+  - `pnpm test` ✅
+  - `pnpm run lint` ✅
+  - `pnpm smoketest` ✅
+- **Fix: deferred-vector env fingerprint regression in node result cache**
+  - Verified bug with a failing unit test in `crates/snaq-lite-lsp/src/node_result_registry.rs`: `FromExprsWithEnv` values with identical `defs` but different captured `Env` were fingerprinted as unchanged.
+  - Root cause: `hash_vector` matched `LazyVector::FromExprsWithEnv { defs, .. }` and ignored `env`.
+  - Fix: include `env.hash(hasher)` for `FromExprsWithEnv` fingerprinting so lexical-scope changes advance revision and propagate updates.
+  - Added regression test `from_exprs_with_env_fingerprint_changes_when_env_changes`.
+  - Verification green: targeted failing->passing test, full `cargo test -p snaq-lite-lsp`, and `pnpm check`.
+- **Fix: function-value fingerprint regression in node result cache**
+  - Verified bug with a failing unit test in `crates/snaq-lite-lsp/src/node_result_registry.rs`: function-valued updates with different `UserFunction` payloads were fingerprinted as unchanged.
+  - Root cause: `hash_value` handled `Value::Function(_)` by hashing only variant tag `5u8`, ignoring params/body/closure env id.
+  - Fix: hash full function payload with `uf.hash(hasher)` in the `Value::Function` arm.
+  - Added regression test `function_fingerprint_changes_when_function_payload_changes`.
+  - Verification green: targeted failing->passing test, full `cargo test -p snaq-lite-lsp`, and `pnpm check`.

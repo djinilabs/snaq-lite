@@ -5,9 +5,9 @@ The snaq-lite LSP server powers IDE features (diagnostics, hover, inlay hints) f
 ## Capabilities
 
 - **Initialize / Initialized** — Handshake and capability negotiation.
-- **Text document sync** — Full document sync on open and change.
-  (The server advertises incremental sync and applies `didChange` ranges when provided.)
-- **Diagnostics** — Parse and resolve errors are reported as LSP diagnostics (e.g. red squiggles). Errors include source location (line/column). Positions use 0-based line and **byte offset** as character (consistent with the language’s span representation).
+- **Text document sync** — Incremental document sync on open/change.
+  (The server advertises incremental sync and applies `didChange` ranges when provided, with full-text fallback.)
+- **Diagnostics** — Parse and resolve errors are reported as LSP diagnostics (e.g. red squiggles). Errors include source location (line/column). Position conversion uses UTF-16 LSP coordinates.
 - **Hover** — At a position, shows the evaluated value (numeric, symbolic, or formatted) for the expression under the cursor.
 - **Inlay hints** — Inline hints after expressions showing the computed value (e.g. `→ 5` or `→ 3 m`).
 - **Live result pub-sub** — Custom methods `snaqlite/subscribe`, `snaqlite/unsubscribe`, and server-to-client notification `snaqlite/publishResult` for streaming or one-shot results. See [Pub-sub (live results)](#pub-sub-live-results) below.
@@ -213,7 +213,7 @@ The server can run inside a Web Worker so the IDE (e.g. in the browser) does not
 ## Limits and edge cases
 
 - **Multi-document** — The server tracks a map of URI → document. Opening or changing a document creates or updates the entry for that URI; virtual URIs (e.g. `snaq://graph/...`) are supported the same way as file URIs.
-- **Pub-sub** — Subscriptions are root-only (whole-document result). Subscribing to a range is not yet supported. Stream input source for `$name` is not in subscribe params (Phase 1); the server runs with empty stream inputs, so unbound `$name` yields a run error. On WASM, vector subscriptions do not stream element batches, but status notifications follow `Running` then `Completed` for lifecycle parity. Vector/map `Completed` payloads contain summary + optional `resultHandle`; fetch detailed content via `snaqlite/graph/fetchResultSlice`.
+- **Pub-sub** — `subscribeNode` is the canonical node-centric API and evaluates through graph wiring. Legacy `subscribe` remains compatibility-only and root-oriented. Vector/map `Completed` payloads contain summary + optional `resultHandle`; detailed values are retrieved via `snaqlite/graph/fetchResultSlice`.
 - **Forward-only non-replayable result handles** — For stream-backed non-replayable vectors, `fetchResultSlice` requires `offset=0` on the first request, then cursor-based continuation for later pages (`nextCursor` -> `cursor`). Random jumps without cursor are rejected with `invalid_params`. The server keeps per-handle continuation state and does not implicitly convert these streams into replayable fully-evaluated vectors.
 - **Vector summary on WASM** — For some lazy vector kinds, `resultSummary.length` / `totalElements` in Completed payload may be omitted until data is materialized. Clients should rely on `fetchResultSlice` for authoritative pagination metadata and detailed values.
 - **Incremental sync** — The server uses incremental text sync (`TextDocumentSyncKind::INCREMENTAL`) and supports full-text replacement fallback when range is omitted. A `didChange` with an empty `content_changes` array is a no-op.

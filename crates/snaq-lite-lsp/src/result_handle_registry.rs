@@ -255,7 +255,7 @@ impl ResultHandleRegistry {
             .expect("forward-only state exists"))
     }
 
-    pub fn read_forward_only_page(
+    pub async fn read_forward_only_page(
         &mut self,
         handle: &str,
         offset: u64,
@@ -276,7 +276,7 @@ impl ResultHandleRegistry {
             if state.exhausted {
                 break;
             }
-            let next = futures::executor::block_on(state.stream.next());
+            let next = state.stream.next().await;
             match next {
                 Some(item) => {
                     items.push(item);
@@ -289,7 +289,7 @@ impl ResultHandleRegistry {
             }
         }
         if !state.exhausted && state.prefetched.is_empty() {
-            let next = futures::executor::block_on(state.stream.next());
+            let next = state.stream.next().await;
             match next {
                 Some(item) => {
                     if state.prefetched.len() >= FORWARD_ONLY_PREFETCH_LIMIT {
@@ -395,17 +395,15 @@ mod tests {
             )),
         );
 
-        let page1 = reg
-            .read_forward_only_page(&handle, 0, 2)
+        let page1 = futures::executor::block_on(reg.read_forward_only_page(&handle, 0, 2))
             .expect("first page");
         assert_eq!(page1.items.len(), 2);
         assert!(page1.has_more);
-        let page2 = reg
-            .read_forward_only_page(&handle, 2, 2)
+        let page2 = futures::executor::block_on(reg.read_forward_only_page(&handle, 2, 2))
             .expect("second page");
         assert_eq!(page2.items.len(), 1);
         assert!(!page2.has_more);
-        let err = match reg.read_forward_only_page(&handle, 2, 1) {
+        let err = match futures::executor::block_on(reg.read_forward_only_page(&handle, 2, 1)) {
             Ok(_) => panic!("expected offset mismatch error"),
             Err(e) => e,
         };

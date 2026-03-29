@@ -2,6 +2,38 @@
 
 ## Just completed
 
+- **LSP client document-version monotonicity fix (`didChange`)**
+  - Verified issue in `apps/frontend/src/lsp/client.ts`: both `didOpen` and `didChange` defaulted version to `1`, allowing non-monotonic versioning when callers omitted `version`.
+  - Implemented per-URI version tracking in `createLspClient`:
+    - `didOpen` records provided/default version.
+    - `didChange` now auto-increments from tracked version when omitted and rejects non-increasing explicit versions.
+    - `didClose` clears tracked version for that URI.
+  - Added `apps/frontend/src/lsp/client.test.ts` with coverage for:
+    - monotonic auto-increment on consecutive `didChange`,
+    - rejection of non-increasing explicit version,
+    - version reset after `didClose`,
+    - notification handler forwarding.
+  - Verification green:
+    - `pnpm -C apps/frontend run test`
+    - `pnpm -C apps/frontend run lint`
+    - `pnpm -C apps/frontend run typecheck`
+    - `pnpm -C apps/frontend run build`
+    - `pnpm test`
+    - `pnpm run lint`
+
+- **Bridge runtime gaps execution pass (frontend orchestration + pagination contract + docs + backend non-blocking step):**
+  - `apps/frontend/src/lsp/client.ts`: added canonical typed helpers for document lifecycle and node subscriptions (`didOpen`, `didChange`, `didClose`, `subscribeNode`, `unsubscribeNode`) so UI orchestration no longer relies on ad-hoc raw request strings.
+  - `apps/frontend/src/lsp/canvas-runtime.ts`: added reusable canvas runtime orchestration helpers (`toCanvasUri`, `openCanvasNodes`, `patchCanvasNodeSource`, `connectCanvasNodes`, `disconnectCanvasNodeInput`) and new unit coverage in `apps/frontend/src/lsp/canvas-runtime.test.ts`.
+  - `apps/frontend/src/routes/index.tsx`: refactored bridge actions to use canvas-runtime and typed client helpers; scenario flow now exercises canonical `setNodeSource` patch + connect/subscribe flow via shared orchestration helpers.
+  - `apps/frontend/src/lsp/pagination.ts`: enforced forward-only continuation semantics in client helper (`fetchNextPage` now requires cursor; both first/next page require positive limit) with new tests in `apps/frontend/src/lsp/pagination.test.ts`.
+  - `crates/snaq-lite-lsp/src/result_handle_registry.rs`: made forward-only page read async (`read_forward_only_page`) and updated tests; `fetch_result_slice` now awaits forward-only page reads without `block_on` in this hot path.
+  - `crates/snaq-lite-lsp/src/lib.rs`: reduced non-send lock/future coupling in `fetch_result_slice` by narrowing DB clone scope around awaited operations.
+  - `docs/LSP.md`: updated stale protocol text (incremental sync wording, UTF-16 diagnostics position wording, and node-centric pub-sub contract) to align with current implementation.
+  - Verification green:
+    - frontend: `pnpm -C apps/frontend run test`, `pnpm -C apps/frontend run lint`, `pnpm -C apps/frontend run typecheck`, `pnpm -C apps/frontend run build`
+    - backend: `cargo test -p snaq-lite-lsp`, `cargo test -p snaq-lite-lang`, `cargo test -p snaq-lite-lsp --test lsp_integration`
+    - full repo: `pnpm test`, `pnpm run lint`, `pnpm build`, `pnpm smoketest`
+
 - **Bridge scenario stale `resultHandle` fix:**
   - `apps/frontend/src/routes/index.tsx`: verified that `runBridgeScenario` called `loadFirstSlice()` / `loadNextSlice()` immediately after `subscribeSecondNode()` while still reading stale closure state (`resultHandle` unset in same render tick), causing silent early returns.
   - `subscribeSecondNode` now returns the fresh `resultHandle` from RPC response.

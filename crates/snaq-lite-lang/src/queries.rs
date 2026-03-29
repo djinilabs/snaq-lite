@@ -7,7 +7,9 @@
 use crate::error::{RunError, RunErrorKind, Span};
 use crate::functions;
 use crate::ir::{CallArg, ExprData, ExprDef, Expression, ProgramDef, SpannedExprDef, SpannedExprDefKind, StreamInputRegistry};
-use crate::stream_handle::{create_stream_input, take_receiver, ChunkFlattenStream};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::stream_handle::create_stream_input;
+use crate::stream_handle::{take_receiver, ChunkFlattenStream};
 use crate::map_registry;
 use crate::scope::{closure_env_get, closure_env_register, Env, Scope, StoredValue};
 use crate::user_function;

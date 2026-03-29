@@ -5,14 +5,19 @@ import LspWorker from '../lsp/lsp.worker?worker'
 import {
   buildPatchForAddParam,
   buildNodeSource,
-  buildPatchForConnect,
-  buildPatchForDisconnect,
   buildPatchForRemoveParam,
   buildPatchForRenameParam,
   type CanvasNode,
 } from '../lsp/graph-patch'
 import { fetchFirstPage, fetchNextPage, type PageCursor } from '../lsp/pagination'
 import { ensureCanvasSession } from '../lsp/session-orchestrator'
+import {
+  connectCanvasNodes,
+  disconnectCanvasNodeInput,
+  openCanvasNodes,
+  patchCanvasNodeSource,
+  toCanvasUri,
+} from '../lsp/canvas-runtime'
 
 export const Route = createFileRoute('/')({
   component: HomePage,
@@ -68,21 +73,11 @@ function HomePage() {
     if (!client) {
       throw new Error('LSP client not initialized')
     }
-    for (const node of nodes) {
-      const uri = node.uri.replace(/snaq:\/\/[^/]+\//, `snaq://${targetCanvasId}/`)
-      await client.sendNotification('textDocument/didOpen', {
-        textDocument: {
-          uri,
-          languageId: 'snaq',
-          version: 1,
-          text: buildNodeSource({ ...node, uri }),
-        },
-      })
-    }
+    await openCanvasNodes(client, nodes, targetCanvasId)
   }
 
   function canvasUri(uri: string, targetCanvasId: string): string {
-    return uri.replace(/snaq:\/\/[^/]+\//, `snaq://${targetCanvasId}/`)
+    return toCanvasUri(uri, targetCanvasId)
   }
 
   function optimisticParamUpdate(
@@ -116,12 +111,11 @@ function HomePage() {
     }
     const sourceUri = canvasUri(nodes[0].uri, targetCanvasId)
     const targetUri = canvasUri(nodes[1].uri, targetCanvasId)
-    const operation = buildPatchForConnect({
+    await connectCanvasNodes(client, {
       sourceUri,
       targetUri,
       targetParamId: nodes[1].params[0]?.paramId ?? 'p1',
-    })[0]
-    await client.applyPatch([operation])
+    })
     safeSetStatus(`Connected node-1 -> node-2 (${targetCanvasId})`)
   }
 
@@ -131,12 +125,10 @@ function HomePage() {
       return
     }
     const targetUri = canvasUri(nodes[1].uri, targetCanvasId)
-    const operation = buildPatchForDisconnect({
-      sourceUri: '',
+    await disconnectCanvasNodeInput(client, {
       targetUri,
       targetParamId: nodes[1].params[0]?.paramId ?? 'p1',
-    })[0]
-    await client.applyPatch([operation])
+    })
     safeSetStatus(`Disconnected node-2 input (${targetCanvasId})`)
   }
 
@@ -271,10 +263,7 @@ function HomePage() {
       return undefined
     }
     const sourceUri = canvasUri(nodes[1].uri, targetCanvasId)
-    const response = await client.sendRequest<{ subscriptionId: string; resultHandle?: string }>(
-      'snaqlite/subscribeNode',
-      { sourceUri },
-    )
+    const response = await client.subscribeNode(sourceUri)
     setSubscriptionId(response.subscriptionId)
     setResultHandle(response.resultHandle)
     paginationRef.current = { offset: 0 }
@@ -345,12 +334,26 @@ function HomePage() {
       const primaryCanvas = canvasId
       const recoveryCanvas = `${canvasId}-recovered`
       await initClient()
+      const client = clientRef.current
+      if (!client) {
+        throw new Error('LSP client not initialized')
+      }
       await switchCanvas(primaryCanvas)
       await openNodesInLsp(primaryCanvas)
+      await patchCanvasNodeSource(
+        client,
+        { ...nodes[0] },
+        primaryCanvas,
+      )
       await connectNodes(primaryCanvas)
       await subscribeSecondNode(primaryCanvas)
       await switchCanvas(recoveryCanvas)
       await openNodesInLsp(recoveryCanvas)
+      await patchCanvasNodeSource(
+        client,
+        { ...nodes[0] },
+        recoveryCanvas,
+      )
       await connectNodes(recoveryCanvas)
       await subscribeSecondNode(recoveryCanvas)
       safeSetStatus(`Bridge scenario completed (${primaryCanvas} -> ${recoveryCanvas})`)

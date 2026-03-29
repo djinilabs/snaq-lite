@@ -52,6 +52,11 @@ export interface FetchResultSliceResponse {
   nextCursor?: string
 }
 
+export interface SubscribeNodeResponse {
+  subscriptionId: string
+  resultHandle?: string
+}
+
 export type GraphPatchOperation =
   | { op: 'setNodeSource'; uri: string; source: string }
   | {

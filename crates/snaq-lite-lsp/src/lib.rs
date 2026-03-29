@@ -2682,7 +2682,7 @@ impl SnaqLiteBackend {
     }
 
     /// Resolve path segments to a sub-value. Empty path returns Some(value). Returns None if path is invalid.
-    fn resolve_path(
+    fn resolve_path_blocking(
         value: &snaq_lite_lang::Value,
         path: &[PathSegment],
         db: &salsa::DatabaseImpl,
@@ -2713,6 +2713,14 @@ impl SnaqLiteBackend {
             };
         }
         Some(current)
+    }
+
+    fn resolve_path(
+        value: &snaq_lite_lang::Value,
+        path: &[PathSegment],
+        db: &salsa::DatabaseImpl,
+    ) -> Option<snaq_lite_lang::Value> {
+        Self::resolve_path_blocking(value, path, db)
     }
 
     /// Handle snaqlite/graph/subscribeWidget: run source node (with graph inputs when wired), cache result and send Completed with summary.
@@ -2883,14 +2891,32 @@ impl SnaqLiteBackend {
             })
             .collect();
 
-        let db = {
-            let state = self.state.lock().await;
-            state.db().clone()
-        };
         let (elements, total_count, supports_cursor, explicit_has_more) = {
-            let sub_value = Self::resolve_path(&value, &path_segments, &db).ok_or_else(|| {
-                tower_lsp::jsonrpc::Error::invalid_params("Invalid path or value not found")
-            })?;
+            let sub_value = {
+                let db_for_path = {
+                    let state = self.state.lock().await;
+                    state.db().clone()
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let value_for_path = value.clone();
+                    let path_for_path = path_segments.clone();
+                    tokio::task::spawn_blocking(move || {
+                        Self::resolve_path(&value_for_path, &path_for_path, &db_for_path)
+                    })
+                    .await
+                    .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?
+                    .ok_or_else(|| {
+                        tower_lsp::jsonrpc::Error::invalid_params("Invalid path or value not found")
+                    })?
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    Self::resolve_path(&value, &path_segments, &db_for_path).ok_or_else(|| {
+                        tower_lsp::jsonrpc::Error::invalid_params("Invalid path or value not found")
+                    })?
+                }
+            };
 
             let (elements, total_count, supports_cursor, explicit_has_more) = match &sub_value {
                 snaq_lite_lang::Value::Vector(v) => {
@@ -2915,13 +2941,18 @@ impl SnaqLiteBackend {
                                 .lock()
                                 .await
                                 .read_forward_only_page(handle, params.offset, limit)
+                                .await
                                 .map_err(tower_lsp::jsonrpc::Error::invalid_params)?;
                             (page.total_count, page.items, Some(page.has_more))
                         }
                         _ => {
                             // Stream once to compute both total count and requested window.
+                            let db_for_collect = {
+                                let state = self.state.lock().await;
+                                state.db().clone()
+                            };
                             let (total_count, slice_vec) = collect_vector_slice_window(
-                                &db,
+                                &db_for_collect,
                                 v.inner.clone(),
                                 offset,
                                 limit,
@@ -2930,6 +2961,10 @@ impl SnaqLiteBackend {
                         }
                     };
 
+                    let db_for_elements = {
+                        let state = self.state.lock().await;
+                        state.db().clone()
+                    };
                     let elements: Vec<serde_json::Value> = slice_vec
                         .into_iter()
                         .enumerate()
@@ -2937,7 +2972,7 @@ impl SnaqLiteBackend {
                             Ok(Some(val)) => {
                                 let mut elem_path = path_json.clone();
                                 elem_path.push(serde_json::json!((offset + i) as u64));
-                                crate::pubsub::value_to_slice_element(&db, val, &elem_path)
+                                crate::pubsub::value_to_slice_element(&db_for_elements, val, &elem_path)
                             }
                             Ok(None) => serde_json::Value::Null,
                             Err(e) => serde_json::json!({
@@ -2951,11 +2986,15 @@ impl SnaqLiteBackend {
                 }
                 snaq_lite_lang::Value::Map(id) => {
                     use snaq_lite_lang::map_registry;
-                    let entries = map_registry::get(*id).unwrap_or_default();
+                    let entries = map_registry::get(id.to_owned()).unwrap_or_default();
                     let total_count = entries.len() as u64;
                     let offset = (params.offset as usize).min(entries.len());
                     let end = (offset + params.limit as usize).min(entries.len());
                     let slice_entries = &entries[offset..end];
+                    let db_for_elements = {
+                        let state = self.state.lock().await;
+                        state.db().clone()
+                    };
                     let elements: Vec<serde_json::Value> = slice_entries
                         .iter()
                         .map(|(k, val)| {
@@ -2963,7 +3002,7 @@ impl SnaqLiteBackend {
                             elem_path.push(serde_json::json!(k));
                             serde_json::json!({
                                 "key": k,
-                                "value": crate::pubsub::value_to_slice_element(&db, val, &elem_path)
+                                "value": crate::pubsub::value_to_slice_element(&db_for_elements, val, &elem_path)
                             })
                         })
                         .collect();
@@ -3264,6 +3303,7 @@ fn collect_vector_slice_window(
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_local_future<F>(future: F) -> F::Output
 where
     F: futures::Future,

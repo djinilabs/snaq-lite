@@ -46,6 +46,9 @@ export async function fetchFirstPage(
   client: LspClient,
   params: { resultHandle: string; limit: number; path?: Array<number | string> },
 ): Promise<{ response: FetchResultSliceResponse; cursor: PageCursor }> {
+  if (params.limit <= 0) {
+    throw new Error('Page size must be greater than zero')
+  }
   const response = await fetchResultSliceWithTimeout(client, {
     resultHandle: params.resultHandle,
     path: params.path ?? [],
@@ -64,6 +67,12 @@ export async function fetchNextPage(
     path?: Array<number | string>
   },
 ): Promise<{ response: FetchResultSliceResponse; cursor: PageCursor }> {
+  if (params.limit <= 0) {
+    throw new Error('Page size must be greater than zero')
+  }
+  if (!params.cursor.cursor) {
+    throw new Error('Cursor continuation is required for fetchNextPage')
+  }
   const response = await fetchResultSliceWithTimeout(client, {
     resultHandle: params.resultHandle,
     path: params.path ?? [],

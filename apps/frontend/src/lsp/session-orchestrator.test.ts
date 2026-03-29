@@ -12,6 +12,11 @@ function createClientMock(overrides?: Partial<LspClient>): LspClient {
     onNotification: vi.fn(),
     sendRequest: makeSendRequest(),
     sendNotification: vi.fn(),
+    didOpen: vi.fn(async () => undefined),
+    didChange: vi.fn(async () => undefined),
+    didClose: vi.fn(async () => undefined),
+    subscribeNode: vi.fn(async () => ({ subscriptionId: 'sub-1', resultHandle: 'h1' })),
+    unsubscribeNode: vi.fn(async () => undefined),
     bootstrapSession: vi.fn(async () => ({
       canvasId: 'canvas-a',
       openDocuments: 0,

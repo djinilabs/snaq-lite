@@ -8,6 +8,11 @@ function makeClient(fetchResultSlice: LspClient['fetchResultSlice']): LspClient 
     onNotification: vi.fn(),
     sendRequest: vi.fn(),
     sendNotification: vi.fn(),
+    didOpen: vi.fn(async () => undefined),
+    didChange: vi.fn(async () => undefined),
+    didClose: vi.fn(async () => undefined),
+    subscribeNode: vi.fn(async () => ({ subscriptionId: 'sub-1', resultHandle: 'h1' })),
+    unsubscribeNode: vi.fn(async () => undefined),
     bootstrapSession: vi.fn(),
     applyPatch: vi.fn(),
     fetchResultSlice,
@@ -59,4 +64,44 @@ describe('pagination helpers', () => {
     expect(page.cursor).toEqual({ cursor: undefined, offset: 4 })
   })
 
+  it('rejects fetchNextPage calls without continuation cursor', async () => {
+    const fetchResultSlice = vi.fn(async () => ({
+      elements: [],
+      totalCount: 0,
+      hasMore: false,
+      nextCursor: undefined,
+    }))
+    const client = makeClient(fetchResultSlice)
+
+    await expect(
+      fetchNextPage(client, {
+        resultHandle: 'h1',
+        limit: 2,
+        cursor: { offset: 2 },
+      }),
+    ).rejects.toThrow('Cursor continuation is required for fetchNextPage')
+    expect(fetchResultSlice).not.toHaveBeenCalled()
+  })
+
+  it('rejects non-positive page sizes', async () => {
+    const fetchResultSlice = vi.fn(async () => ({
+      elements: [],
+      totalCount: 0,
+      hasMore: false,
+      nextCursor: undefined,
+    }))
+    const client = makeClient(fetchResultSlice)
+
+    await expect(fetchFirstPage(client, { resultHandle: 'h1', limit: 0 })).rejects.toThrow(
+      'Page size must be greater than zero',
+    )
+    await expect(
+      fetchNextPage(client, {
+        resultHandle: 'h1',
+        limit: 0,
+        cursor: { offset: 0, cursor: 'c1' },
+      }),
+    ).rejects.toThrow('Page size must be greater than zero')
+    expect(fetchResultSlice).not.toHaveBeenCalled()
+  })
 })

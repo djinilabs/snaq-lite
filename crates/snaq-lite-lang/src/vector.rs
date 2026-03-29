@@ -4,6 +4,10 @@
 //! Display is intentionally `"<vector>"` for all vectors (orientation not shown); transpose flips
 //! orientation, and element-wise Map preserves the operand's orientation.
 //!
+//! NOTE: `queries::vector_into_stream` is the canonical runtime stream executor because it has
+//! access to the database/registries needed by deferred and input-backed vectors. The lightweight
+//! `LazyVector::into_stream` adapter below is intentionally limited to db-free variants.
+//!
 //! **Vector–vector binary ops** (add, sub, mul, div, and comparison ==, !=, <, <=, >, >=) depend on
 //! orientation: column×column or row×row → element-wise ([ZipMap](LazyVector::ZipMap)), result
 //! column or row (comparisons yield bool per element); column×row → outer product ([Outer](LazyVector::Outer)),
@@ -219,6 +223,10 @@ impl LazyVector {
 
     /// Produce a stream of elements. Each element is evaluated only when the stream is polled for that position.
     /// For `FromExprs`, `ctx.eval_expr(def)` is called for each element in order.
+    ///
+    /// This helper supports only db-free variants. For runtime execution of all lazy forms
+    /// (`FromExprsWithEnv`, `Map`, `ZipMap`, `Outer`, `Take`, `FromInput`), use
+    /// `crate::queries::vector_into_stream`.
     pub fn into_stream(
         self,
         ctx: &impl VectorEvalContext,

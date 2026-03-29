@@ -1070,7 +1070,11 @@ impl SnaqLiteBackend {
         }
     }
 
-    /// Eager recompute for changed URIs + descendants and push update events.
+    /// Eager recompute for changed URIs and conditionally their descendants.
+    ///
+    /// Descendants are enqueued when:
+    /// - a node's semantic fingerprint changed, or
+    /// - caller sets `force_downstream` (topology/type-driven wave).
     async fn recompute_and_push(&self, changed: &[Url], force_downstream: bool) {
         let docs = {
             let state = self.state.lock().await;
@@ -1090,7 +1094,7 @@ impl SnaqLiteBackend {
             let result = self
                 .run_node_with_graph_inputs_cached(&uri, None, &mut shared_cache)
                 .await;
-            let (revision, _semantic_changed, result_handle) = {
+            let (revision, semantic_changed, result_handle) = {
                 let mut store = self.node_results.lock().await;
                 match &result {
                     Ok((value, _)) => {
@@ -1120,7 +1124,10 @@ impl SnaqLiteBackend {
             .await;
             self.update_document_subscribers_for_uri(&uri, result, revision, result_handle.as_deref())
                 .await;
-            let _ = force_downstream;
+            let should_enqueue_downstream = force_downstream || semantic_changed;
+            if !should_enqueue_downstream {
+                continue;
+            }
             let downstream = { self.graph_state.lock().await.targets_from_source(&uri) };
             for target in downstream {
                 if !docs.contains(&target) || !queued.insert(target.clone()) {
@@ -2543,6 +2550,10 @@ impl SnaqLiteBackend {
     }
 
     /// Resolve path segments to a sub-value. Empty path returns Some(value). Returns None if path is invalid.
+    ///
+    /// This stays on the current runtime thread because vector path traversal can execute deferred
+    /// vector elements (including user-map closures), and closure environments are thread-local.
+    /// Moving this to a different worker thread can break closure-env lookup.
     fn resolve_path_blocking(
         value: &snaq_lite_lang::Value,
         path: &[PathSegment],
@@ -2808,6 +2819,8 @@ impl SnaqLiteBackend {
                         }
                         _ => {
                             // Stream once to compute both total count and requested window.
+                            // Intentionally evaluated on the current runtime thread: deferred
+                            // vector elements can depend on thread-local evaluation/closure state.
                             let db_for_collect = {
                                 let state = self.state.lock().await;
                                 state.db().clone()
@@ -3852,7 +3865,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_vector_slice_window_uses_known_total_without_draining_full_stream() {
+    fn fetch_result_slice_async_window_collection_equivalent() {
         let (value, db) = snaq_lite_lang::run_with_stream_inputs(
             "[1, sqrt(-1)]",
             &snaq_lite_lang::default_si_registry(),

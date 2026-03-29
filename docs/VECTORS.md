@@ -96,6 +96,7 @@ Vectors support **properties** (no arguments) and **methods** (with arguments) u
 Numeric index access (e.g. `V.0`, `V.1`) is unchanged: use a **number** after the dot for single-element access; use an **identifier** (e.g. `length`, `map`) for property or method access. Unknown property or method names return **unknown property** or **unknown method**.
 
 Reduction methods are evaluated by consuming vector streams; they do not require vectors to be pre-materialized in memory before computation starts. The exact-order statistics methods (`median`, `quantile`) are the intentional exception for non-replayable streams.
+For replayable vectors, `median` and `quantile` are also explicit materializing operations (they need global ordering), while other reducers remain streaming.
 
 Approximate order-statistics methods (`median_approx`, `quantile_approx`) remain streaming and are valid on forward-only streams.
 

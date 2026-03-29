@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn forward_only_paging_is_sequential_without_materialization_upgrade() {
+    fn fetch_result_slice_forward_only_cursor_contract_still_holds() {
         let mut reg = ResultHandleRegistry::new();
         let uri = Url::parse("snaq://canvas/stream.sl").unwrap();
         let (stream_id, mut sender) = snaq_lite_lang::create_stream_input();

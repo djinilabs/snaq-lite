@@ -3800,7 +3800,7 @@ async fn graph_runtime_recomputes_without_widget_subscriptions() {
 }
 
 #[tokio::test]
-async fn did_change_on_source_with_same_output_recomputes_descendants() {
+async fn did_change_on_source_with_same_output_does_not_recompute_descendants() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
     let server_handle =
@@ -3889,7 +3889,7 @@ async fn did_change_on_source_with_same_output_recomputes_descendants() {
         "expected downstream update after semantic source change to 3"
     );
 
-    // Then perform a non-semantic edit (same numeric output) and assert descendant recompute.
+    // Then perform a non-semantic edit (same numeric output) and assert no descendant recompute.
     let did_change_same_output = serde_json::json!({
         "jsonrpc":"2.0","method":"textDocument/didChange",
         "params":{"textDocument":{"uri":"snaq://graph/src-same.sl","version":3},"contentChanges":[{"text":"( 3 )"}]}
@@ -3916,9 +3916,129 @@ async fn did_change_on_source_with_same_output_recomputes_descendants() {
         }
     }
     assert!(
-        got_descendant_update,
-        "didChange with unchanged source output should still recompute downstream widget"
+        !got_descendant_update,
+        "didChange with unchanged source output should not recompute downstream widget"
     );
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
+async fn topology_mutation_forces_descendant_recompute() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://graph/src-topo.sl", "3", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/mid-topo.sl",
+        "input x: Numeric\nx + 1",
+        1,
+    )
+    .await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/tgt-topo.sl",
+        "input y: Numeric\ny * 2",
+        1,
+    )
+    .await;
+    open_document_uri(&mut client_w, "snaq://graph/src-alt-topo.sl", "10", 1).await;
+
+    let connect_src_mid = serde_json::json!({
+        "jsonrpc":"2.0","id":656,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/src-topo.sl","targetUri":"snaq://graph/mid-topo.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_src_mid.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 656).await;
+
+    let connect_mid_tgt = serde_json::json!({
+        "jsonrpc":"2.0","id":657,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/mid-topo.sl","targetUri":"snaq://graph/tgt-topo.sl","targetInputName":"y"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_mid_tgt.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 657).await;
+
+    let sub = serde_json::json!({
+        "jsonrpc":"2.0","id":658,"method":"snaqlite/graph/subscribeWidget",
+        "params":{"widgetId":"w-topology-force","sourceUri":"snaq://graph/tgt-topo.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&sub.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 658).await;
+
+    // Drain until first completed value is observed.
+    for _ in 0..20 {
+        let maybe = timeout(Duration::from_millis(500), read_one_lsp_message_async(&mut client_r)).await;
+        let Ok(Ok(body)) = maybe else {
+            continue;
+        };
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["widgetId"].as_str() == Some("w-topology-force")
+            && v["params"]["status"].as_str() == Some("Completed")
+        {
+            break;
+        }
+    }
+
+    let disconnect_src_mid = serde_json::json!({
+        "jsonrpc":"2.0","id":659,"method":"snaqlite/graph/disconnect",
+        "params":{"targetUri":"snaq://graph/mid-topo.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&disconnect_src_mid.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let connect_alt_mid = serde_json::json!({
+        "jsonrpc":"2.0","id":660,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/src-alt-topo.sl","targetUri":"snaq://graph/mid-topo.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_alt_mid.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut saw_completed_after_topology_mutation = false;
+    for _ in 0..60 {
+        let maybe = timeout(Duration::from_millis(500), read_one_lsp_message_async(&mut client_r)).await;
+        let Ok(Ok(body)) = maybe else {
+            continue;
+        };
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate")
+            && v["params"]["widgetId"].as_str() == Some("w-topology-force")
+            && v["params"]["status"].as_str() == Some("Completed")
+        {
+            if v["params"]["payload"]["display"].as_str() == Some("22") {
+                saw_completed_after_topology_mutation = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_completed_after_topology_mutation,
+        "topology mutation should force descendant recompute and publish updated result"
+    );
+
     server_handle.abort();
     let _ = server_handle.await;
 }

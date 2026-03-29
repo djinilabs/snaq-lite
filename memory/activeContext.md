@@ -2,6 +2,45 @@
 
 ## Just completed
 
+- **Post-implementation review + stabilization pass (lazy-streaming closure):**
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - Added explicit inline rationale around intentional same-thread blocking in `resolve_path_blocking` and slice-window collection path, documenting thread-local closure/eval-state constraints that make naive cross-thread offloading unsafe.
+  - `crates/snaq-lite-lsp/tests/lsp_integration.rs`:
+    - Reviewed `topology_mutation_forces_descendant_recompute` determinism; retained message-driven assertion flow (without response-id draining that could consume expected notifications) for stable topology recompute verification.
+  - Verification green:
+    - `cargo test -p snaq-lite-lsp topology_mutation_forces_descendant_recompute -- --nocapture`
+    - `cargo test -p snaq-lite-lsp did_change_on_source_with_same_output_does_not_recompute_descendants -- --nocapture`
+    - `cargo test -p snaq-lite-lsp`
+
+- **Lazy streaming gap closure (recompute gating + regression coverage + docs clarity):**
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - `recompute_and_push` now propagates to downstream nodes only when semantic fingerprint changed or the mutation wave is topology-forced (`force_downstream`), instead of unconditional descendant enqueue.
+    - Kept direct subscriber/widget refresh for processed nodes, while gating descendant traversal.
+    - `fetch_result_slice` keeps known behavior and replay/materialization semantics; slice windowing call sites updated for test-name alignment without changing forward-only paging contract.
+  - `crates/snaq-lite-lsp/tests/lsp_integration.rs`:
+    - Replaced prior strict-descendant expectation test with semantic-gated behavior test:
+      - `did_change_on_source_with_same_output_does_not_recompute_descendants`.
+    - Added topology-forced propagation regression:
+      - `topology_mutation_forces_descendant_recompute`.
+  - `crates/snaq-lite-lsp/src/lib.rs` + `crates/snaq-lite-lsp/src/result_handle_registry.rs`:
+    - Added/renamed targeted acceptance tests:
+      - `fetch_result_slice_async_window_collection_equivalent`
+      - `fetch_result_slice_forward_only_cursor_contract_still_holds`
+  - `crates/snaq-lite-lang/src/vector.rs`:
+    - Clarified canonical stream execution ownership in docs/comments (`queries::vector_into_stream` is canonical for db/registry-backed lazy variants) to reduce accidental complexity/drift risk.
+  - Docs clarified intentional materialization boundaries:
+    - `docs/VECTORS.md`
+    - `docs/EXTERNAL_STREAMS.md`
+  - Verification green:
+    - `cargo test -p snaq-lite-lsp did_change_on_source_with_same_output_does_not_recompute_descendants -- --nocapture`
+    - `cargo test -p snaq-lite-lsp topology_mutation_forces_descendant_recompute -- --nocapture`
+    - `cargo test -p snaq-lite-lsp fetch_result_slice_async_window_collection_equivalent -- --nocapture`
+    - `cargo test -p snaq-lite-lsp fetch_result_slice_forward_only_cursor_contract_still_holds -- --nocapture`
+    - `cargo test -p snaq-lite-lsp`
+    - `cargo test -p snaq-lite-lang`
+    - `pnpm test`
+    - `pnpm run lint`
+
 - **Post-implementation review + hardening pass (frontend canvas bridge):**
   - Performed a code review focused on recently landed canvas/LSP bridge changes and improved robustness in `apps/frontend/src/routes/index.tsx`.
   - Improvements implemented:

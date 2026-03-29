@@ -31,6 +31,12 @@ describe('canvas runtime helpers', () => {
     expect(toCanvasUri('snaq://canvas-a/node-1.sl', 'canvas-b')).toBe('snaq://canvas-b/node-1.sl')
   })
 
+  it('rejects non-snaq URIs for canvas mapping', () => {
+    expect(() => toCanvasUri('file:///tmp/node-1.sl', 'canvas-b')).toThrow(
+      'Expected snaq:// URI',
+    )
+  })
+
   it('opens all nodes as deterministic didOpen payloads', async () => {
     const client = createClientMock()
     await openCanvasNodes(

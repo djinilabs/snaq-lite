@@ -10,11 +10,11 @@ The snaq-lite LSP server powers IDE features (diagnostics, hover, inlay hints) f
 - **Diagnostics** — Parse and resolve errors are reported as LSP diagnostics (e.g. red squiggles). Errors include source location (line/column). Position conversion uses UTF-16 LSP coordinates.
 - **Hover** — At a position, shows the evaluated value (numeric, symbolic, or formatted) for the expression under the cursor.
 - **Inlay hints** — Inline hints after expressions showing the computed value (e.g. `→ 5` or `→ 3 m`).
-- **Live result pub-sub** — Custom methods `snaqlite/subscribe`, `snaqlite/unsubscribe`, and server-to-client notification `snaqlite/publishResult` for streaming or one-shot results. See [Pub-sub (live results)](#pub-sub-live-results) below.
+- **Live result pub-sub** — Node-centric custom methods `snaqlite/subscribeNode`, `snaqlite/unsubscribeNode`, and server-to-client notification `snaqlite/publishNodeResult` for streaming or one-shot results. See [Pub-sub (live results)](#pub-sub-live-results) below.
 
 ## Pub-sub (live results)
 
-The canonical subscription flow is **node-centric** via `snaqlite/subscribeNode` and `snaqlite/unsubscribeNode`. Legacy `snaqlite/subscribe` and `snaqlite/unsubscribe` remain supported for compatibility.
+The subscription flow is node-centric via `snaqlite/subscribeNode` and `snaqlite/unsubscribeNode`.
 
 When a subscribed result is a vector (e.g. from a literal or from `$name`), the server streams batches via `Running` notifications and then emits a terminal `Completed` or `Error` notification.
 
@@ -24,10 +24,7 @@ When a subscribed result is a vector (e.g. from a literal or from `$name`), the 
 | --- | --- | --- | --- |
 | `snaqlite/subscribeNode` | Request | `{ sourceUri }` | `{ subscriptionId: string, resultHandle?: string }` or error |
 | `snaqlite/unsubscribeNode` | Request | `{ subscriptionId: string }` | `null` or error |
-| `snaqlite/publishResult` | Notification (server → client) | `{ subscriptionId, status, data? }` | — |
-| `snaqlite/publishNodeResult` | Notification (server → client) | Same payload as `snaqlite/publishResult` | — |
-| `snaqlite/subscribe` | Request | `{ textDocument: { uri }, range?: Range }` (legacy compatibility path) | `{ subscriptionId: string }` or error |
-| `snaqlite/unsubscribe` | Request | `{ subscriptionId: string }` | `null` or error |
+| `snaqlite/publishNodeResult` | Notification (server → client) | `{ subscriptionId, status, data? }` | — |
 | `snaqlite/bootstrapSession` | Request | `{}` | `{ canvasId?, openDocuments, subscriptions, widgets, resultHandles, runtimeDrained }` |
 
 **Status:** `"Running"` \| `"Completed"` \| `"Error"` \| `"Cancelled"`.
@@ -42,18 +39,15 @@ When a subscribed result is a vector (e.g. from a literal or from `$name`), the 
 - **Error:** `{ message: string }`.
 - **Cancelled:** optional `{ reason?: string }` (e.g. `"Document changed"`).
 
-`subscribeNode`/`unsubscribeNode` are the canonical node-centric APIs. `subscribe`/`unsubscribe` remain supported for compatibility and should not be used for new canvas integrations.
-
 ### Lifecycle
 
 - **Subscribe:** Client sends `snaqlite/subscribeNode` for a node URI.
   - `subscribeNode` evaluates with graph inputs (upstream wiring applied).
-  - Legacy `subscribe` remains root-only and evaluates with empty stream inputs (no graph wiring).
-  - If the result is a vector, the server returns a `subscriptionId` and emits `Running` updates followed by `Completed` or `Error` (`publishResult` and `publishNodeResult` stay in sync).
-- **Unsubscribe:** Client sends `snaqlite/unsubscribeNode` (or legacy `snaqlite/unsubscribe`) with `subscriptionId`. The server cancels the consumer and stops sending for that subscription.
+  - If the result is a vector, the server returns a `subscriptionId` and emits `Running` updates followed by `Completed` or `Error`.
+- **Unsubscribe:** Client sends `snaqlite/unsubscribeNode` with `subscriptionId`. The server cancels the consumer and stops sending for that subscription.
 - **Document change:** On `textDocument/didChange` (or open), the server recomputes impacted nodes and pushes fresh `Completed` / `Error` updates for active subscriptions/widgets on affected URIs. Descendant propagation is **semantic-change gated**: downstream nodes are reevaluated only when an upstream node’s value/error state changes. Topology mutations (connect/disconnect/edge pruning) still force downstream reevaluation.
 
-Clients should send `snaqlite/unsubscribe` when closing the file or hiding the results panel.
+Clients should send `snaqlite/unsubscribeNode` when closing a subscribed node view.
 
 ## Visual computation graph
 

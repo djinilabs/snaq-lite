@@ -33,11 +33,11 @@ use crate::pubsub::{
     ExportCanvasDocumentResponse, FetchResultSliceParams, FetchResultSliceResponse,
     GraphPatchOperation, ImportCanvasDocumentParams, ImportCanvasDocumentResponse, NodeInputPort,
     NodeSignatureUpdatedNotification, NodeSignatureUpdatedParams, PathSegment,
-    PublishNodeResultNotification, PublishResultNotification, PublishResultParams, PublishStatus,
-    RemoveParamParams, RenameParamParams, ResetNamespaceParams, ResetNamespaceResponse, ResultType,
-    SubscribeNodeParams, SubscribeNodeResponse, SubscribeParams, SubscribeResponse,
-    SubscribeWidgetParams, UnsubscribeNodeParams, UnsubscribeParams, UnsubscribeWidgetParams,
-    WidgetDataStatus, WidgetDataUpdateNotification, WidgetDataUpdateParams,
+    PublishNodeResultNotification, PublishResultParams, PublishStatus, RemoveParamParams,
+    RenameParamParams, ResetNamespaceParams, ResetNamespaceResponse, ResultType,
+    SubscribeNodeParams, SubscribeNodeResponse, SubscribeWidgetParams, UnsubscribeNodeParams,
+    UnsubscribeWidgetParams, WidgetDataStatus, WidgetDataUpdateNotification,
+    WidgetDataUpdateParams,
 };
 use crate::subscription::SubscriptionRegistry;
 use crate::widget_registry::WidgetRegistry;
@@ -93,7 +93,7 @@ pub struct SnaqLiteBackend {
     pub widgets: SharedWidgetRegistry,
     pub node_results: SharedNodeResults,
     pub notification_tx: NotificationSender,
-    /// Locked receiver for draining pending publishResult notifications (sent by consumer threads).
+    /// Locked receiver for draining pending publishNodeResult notifications (sent by consumer threads).
     pub notification_rx: Arc<Mutex<NotificationReceiver>>,
     pub widget_notification_tx: WidgetNotificationSender,
     pub widget_notification_rx: Arc<Mutex<WidgetNotificationReceiver>>,
@@ -444,11 +444,6 @@ impl SnaqLiteBackend {
         )
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    fn should_stream_wasm_vector_progress(inner: &snaq_lite_lang::LazyVector) -> bool {
-        !matches!(inner, snaq_lite_lang::LazyVector::FromInput(_))
-    }
-
     fn resolve_target_input_param_id(
         input_decls: &[snaq_lite_lang::GraphInputDecl],
         target_input_name: &str,
@@ -605,77 +600,8 @@ impl SnaqLiteBackend {
 
     async fn send_publish_result_notifications(&self, params: PublishResultParams) {
         self.client
-            .send_notification::<PublishResultNotification>(params.clone())
-            .await;
-        self.client
             .send_notification::<PublishNodeResultNotification>(params)
             .await;
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    #[allow(dead_code)]
-    async fn send_wasm_vector_progress_notifications(
-        &self,
-        subscription_id: &str,
-        db: &salsa::DatabaseImpl,
-        inner: snaq_lite_lang::LazyVector,
-        revision: u64,
-        canvas_id: Option<String>,
-        uri: &Url,
-        result_handle: &str,
-    ) {
-        use futures::stream::StreamExt;
-        const BATCH_SIZE: usize = 100;
-        // Do not consume non-replayable input receivers here.
-        // `fetchResultSlice` owns forward-only consumption for handle-scoped `FromInput` values.
-        if !Self::should_stream_wasm_vector_progress(&inner) {
-            return;
-        }
-        let mut stream = snaq_lite_lang::vector_into_stream(db, inner);
-        let mut batch: Vec<serde_json::Value> = Vec::with_capacity(BATCH_SIZE);
-        let mut offset: u64 = 0;
-        while let Some(item) = stream.next().await {
-            batch.push(crate::pubsub::stream_element_to_json(db, &item));
-            if batch.len() >= BATCH_SIZE {
-                self.send_publish_result_notifications(PublishResultParams {
-                    subscription_id: subscription_id.to_string(),
-                    status: PublishStatus::Running,
-                    revision: Some(revision),
-                    canvas_id: canvas_id.clone(),
-                    uri: Some(uri.to_string()),
-                    data: Self::with_result_handle_data(
-                        Some(serde_json::json!({
-                            "elements": batch,
-                            "offset": offset,
-                            "count": BATCH_SIZE
-                        })),
-                        Some(result_handle),
-                    ),
-                })
-                .await;
-                offset += BATCH_SIZE as u64;
-                batch = Vec::with_capacity(BATCH_SIZE);
-            }
-        }
-        if !batch.is_empty() {
-            let count = batch.len();
-            self.send_publish_result_notifications(PublishResultParams {
-                subscription_id: subscription_id.to_string(),
-                status: PublishStatus::Running,
-                revision: Some(revision),
-                canvas_id: canvas_id.clone(),
-                uri: Some(uri.to_string()),
-                data: Self::with_result_handle_data(
-                    Some(serde_json::json!({
-                        "elements": batch,
-                        "offset": offset,
-                        "count": count
-                    })),
-                    Some(result_handle),
-                ),
-            })
-            .await;
-        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -833,7 +759,7 @@ impl SnaqLiteBackend {
             .await;
     }
 
-    /// Drain pending publishResult notifications from the channel and send them to the client.
+    /// Drain pending publishNodeResult notifications from the channel and send them to the client.
     async fn drain_notifications(&self) {
         let mut rx = self.notification_rx.lock().await;
         while let Ok((_id, params)) = rx.try_recv() {
@@ -1234,113 +1160,7 @@ impl SnaqLiteBackend {
             .await;
     }
 
-    /// Handle snaqlite/subscribe: run document (root-only), return subscription id; if root is a vector, spawn consumer and stream batches.
-    pub async fn subscribe(
-        &self,
-        params: SubscribeParams,
-    ) -> tower_lsp::jsonrpc::Result<SubscribeResponse> {
-        self.drain_notifications().await;
-        let uri = params.text_document.uri;
-        self.ensure_canvas_uri_request(&uri).await?;
-        let state = self.state.lock().await;
-        if !state.has_document(&uri) {
-            drop(state);
-            return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                "document not open or URI mismatch",
-            ));
-        }
-        let source = state.source(&uri);
-        let unit_registry = state.unit_registry().clone();
-        let version = state.document_version(&uri);
-        let canvas_id = state.active_canvas_id();
-        drop(state);
-        let stream_inputs = std::collections::HashMap::new();
-        let result = snaq_lite_lang::run_with_stream_inputs(&source, &unit_registry, stream_inputs);
-        match result {
-            Err(e) => Err(tower_lsp::jsonrpc::Error::invalid_params(format!(
-                "run error: {e}"
-            ))),
-            Ok((value, db)) => {
-                let revision = {
-                    let mut store = self.node_results.lock().await;
-                    store.upsert_value(uri.clone(), value.clone())
-                };
-                let result_handle = self
-                    .upsert_result_handle_for_uri(&uri, revision, value.clone())
-                    .await;
-                let subscription_id = uuid::Uuid::new_v4().to_string();
-                self.subscriptions
-                    .lock()
-                    .await
-                    .insert(subscription_id.clone(), uri.clone(), version, None);
-                match &value {
-                    snaq_lite_lang::Value::Vector(v) => {
-                        let inner = v.inner.clone();
-                        let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
-                        self.subscriptions
-                            .lock()
-                            .await
-                            .set_cancel_tx(&subscription_id, Some(cancel_tx));
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            let sid = subscription_id.clone();
-                            let notification_tx = self.notification_tx.clone();
-                            let canvas_id_for_stream = canvas_id.clone();
-                            let uri_for_stream = uri.to_string();
-                            let result_handle_for_stream = result_handle.clone();
-                            std::thread::spawn(move || {
-                                run_stream_consumer(
-                                    db,
-                                    inner,
-                                    sid,
-                                    Some(revision),
-                                    canvas_id_for_stream,
-                                    Some(uri_for_stream),
-                                    Some(result_handle_for_stream),
-                                    notification_tx,
-                                    cancel_rx,
-                                );
-                            });
-                        }
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            let _ = cancel_rx;
-                            let _ = inner;
-                            self.publish_wasm_vector_subscription_payload(
-                                &subscription_id,
-                                &uri,
-                                Some(revision),
-                                canvas_id.clone(),
-                                Self::build_completed_payload(
-                                    &snaq_lite_lang::Value::Vector(v.clone()),
-                                    &db,
-                                    Some(&result_handle),
-                                ),
-                                Some(&result_handle),
-                            )
-                            .await;
-                        }
-                    }
-                    _ => {
-                        self.publish_scalar_subscription_payload(
-                            &subscription_id,
-                            &uri,
-                            Some(revision),
-                            canvas_id.clone(),
-                            snaq_lite_lang::format_value_for_display(&db, &value)
-                                .unwrap_or_else(|_| "<error>".to_string()),
-                            Some(&result_handle),
-                        )
-                        .await;
-                    }
-                }
-                Ok(SubscribeResponse { subscription_id })
-            }
-        }
-    }
-
     /// Handle snaqlite/subscribeNode: canonical node-centric subscription API.
-    /// Internally reuses the same subscription runtime as snaqlite/subscribe.
     pub async fn subscribe_node(
         &self,
         params: SubscribeNodeParams,
@@ -1447,25 +1267,17 @@ impl SnaqLiteBackend {
         }
     }
 
-    /// Handle snaqlite/unsubscribe: cancel subscription and remove from registry.
-    pub async fn unsubscribe(&self, params: UnsubscribeParams) -> tower_lsp::jsonrpc::Result<()> {
+    /// Handle snaqlite/unsubscribeNode: canonical node-centric unsubscribe API.
+    pub async fn unsubscribe_node(
+        &self,
+        params: UnsubscribeNodeParams,
+    ) -> tower_lsp::jsonrpc::Result<()> {
         self.drain_notifications().await;
         let mut subs = self.subscriptions.lock().await;
         if let Some(Some(cancel_tx)) = subs.remove(&params.subscription_id) {
             let _ = cancel_tx.send(());
         }
         Ok(())
-    }
-
-    /// Handle snaqlite/unsubscribeNode: canonical node-centric unsubscribe API.
-    pub async fn unsubscribe_node(
-        &self,
-        params: UnsubscribeNodeParams,
-    ) -> tower_lsp::jsonrpc::Result<()> {
-        self.unsubscribe(UnsubscribeParams {
-            subscription_id: params.subscription_id,
-        })
-        .await
     }
 
     /// Handle snaqlite/graph/connect: type-check and add edge.
@@ -1542,11 +1354,13 @@ impl SnaqLiteBackend {
         }
         {
             let mut graph = self.graph_state.lock().await;
-            graph.connect(source_uri, target_uri.clone(), target_param_id);
+            graph.connect(source_uri.clone(), target_uri.clone(), target_param_id);
         }
         self.recompute_and_push(std::slice::from_ref(&target_uri), true).await;
         self.drain_widget_notifications().await;
         self.drain_notifications().await;
+        self.send_node_signature_updated(&source_uri).await;
+        self.send_node_signature_updated(&target_uri).await;
         Ok(())
     }
 
@@ -1578,6 +1392,7 @@ impl SnaqLiteBackend {
         self.recompute_and_push(std::slice::from_ref(&target_uri), true).await;
         self.drain_widget_notifications().await;
         self.drain_notifications().await;
+        self.send_node_signature_updated(&target_uri).await;
         Ok(())
     }
 
@@ -2345,6 +2160,9 @@ impl SnaqLiteBackend {
         self.drain_widget_notifications().await;
         for uri in &changed_sources {
             self.publish_diagnostics(uri.clone()).await;
+            self.send_node_signature_updated(uri).await;
+        }
+        for uri in &changed_roots {
             self.send_node_signature_updated(uri).await;
         }
 
@@ -3660,7 +3478,7 @@ fn run_stream_consumer_for_widget(
     pool.run();
 }
 
-/// Build the LSP service (same for native and WASM). Uses custom methods for snaqlite/subscribe, unsubscribe, snaqlite/graph/connect, subscribeWidget, unsubscribeWidget.
+/// Build the LSP service (same for native and WASM).
 pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSocket) {
     let state: SharedState = Arc::new(Mutex::new(LspState::new()));
     let subscriptions: SharedSubscriptions = Arc::new(Mutex::new(SubscriptionRegistry::new()));
@@ -3685,9 +3503,7 @@ pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSo
         run_cache: Arc::clone(&run_cache),
         result_handles: Arc::clone(&result_handles),
     })
-    .custom_method("snaqlite/subscribe", SnaqLiteBackend::subscribe)
     .custom_method("snaqlite/subscribeNode", SnaqLiteBackend::subscribe_node)
-    .custom_method("snaqlite/unsubscribe", SnaqLiteBackend::unsubscribe)
     .custom_method("snaqlite/unsubscribeNode", SnaqLiteBackend::unsubscribe_node)
     .custom_method("snaqlite/graph/connect", SnaqLiteBackend::graph_connect)
     .custom_method(
@@ -4112,21 +3928,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn wasm_progress_guard_skips_from_input_vectors() {
-        let (handle_id, _sender) = snaq_lite_lang::create_stream_input();
-        let from_input = snaq_lite_lang::LazyVector::FromInput(handle_id);
-        let replayable = snaq_lite_lang::LazyVector::FromEvaluated(vec![]);
-        assert!(
-            !SnaqLiteBackend::should_stream_wasm_vector_progress(&from_input),
-            "FromInput must be excluded to preserve handle receiver for fetchResultSlice"
-        );
-        assert!(
-            SnaqLiteBackend::should_stream_wasm_vector_progress(&replayable),
-            "Replayable vectors should still support progress streaming"
-        );
-    }
-
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn run_stream_consumer_propagates_metadata_fields() {
@@ -4499,27 +4300,30 @@ mod tests {
     // ---- pubsub wire format (camelCase) ----
 
     #[test]
-    fn subscribe_params_deserializes_camel_case() {
-        let json = r#"{"textDocument":{"uri":"file:///x.snaq"}}"#;
-        let params: pubsub::SubscribeParams = serde_json::from_str(json).unwrap();
-        assert_eq!(params.text_document.uri.as_str(), "file:///x.snaq");
+    fn subscribe_node_params_deserializes_camel_case() {
+        let json = r#"{"sourceUri":"file:///x.snaq"}"#;
+        let params: pubsub::SubscribeNodeParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.source_uri, "file:///x.snaq");
     }
 
     #[test]
-    fn subscribe_response_serializes_camel_case() {
-        let response = pubsub::SubscribeResponse {
+    fn subscribe_node_response_serializes_camel_case() {
+        let response = pubsub::SubscribeNodeResponse {
             subscription_id: "id-123".to_string(),
+            result_handle: Some("h-1".to_string()),
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("subscriptionId"));
-        let back: pubsub::SubscribeResponse = serde_json::from_str(&json).unwrap();
+        assert!(json.contains("resultHandle"));
+        let back: pubsub::SubscribeNodeResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back.subscription_id, "id-123");
+        assert_eq!(back.result_handle.as_deref(), Some("h-1"));
     }
 
     #[test]
-    fn unsubscribe_params_deserializes_camel_case() {
+    fn unsubscribe_node_params_deserializes_camel_case() {
         let json = r#"{"subscriptionId":"sub-1"}"#;
-        let params: pubsub::UnsubscribeParams = serde_json::from_str(json).unwrap();
+        let params: pubsub::UnsubscribeNodeParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.subscription_id, "sub-1");
     }
 

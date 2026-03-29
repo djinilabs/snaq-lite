@@ -2,6 +2,39 @@
 
 ## Just completed
 
+- **Bridge Canvas-LSP disruptive protocol/runtime pass (node-centric only):**
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - Removed legacy custom method registration for `snaqlite/subscribe` / `snaqlite/unsubscribe`; service now exposes only `subscribeNode` / `unsubscribeNode`.
+    - Consolidated publish path to `snaqlite/publishNodeResult` only (no dual publish fanout).
+    - Removed legacy root-subscribe handlers and updated unsubscribe-node path to operate directly on the shared registry.
+    - Added topology-triggered signature republish after `graph/connect` / `graph/disconnect`, and for all affected roots in `graph/applyPatch`.
+  - `crates/snaq-lite-lsp/src/pubsub.rs`:
+    - Removed legacy subscribe/unsubscribe payload structs and updated protocol comments to node-centric publish semantics.
+  - `crates/snaq-lite-lsp/tests/lsp_integration.rs`:
+    - Migrated legacy subscribe/unsubscribe test flows to node-centric methods and `publishNodeResult`.
+    - Hardened several flaky notification-order assertions by using deterministic subscribe-node + didChange validation.
+  - `apps/frontend/src/routes/index.tsx`:
+    - Added per-node runtime tracking (`nodeSubscriptionsByUri`, `nodeResultsByUri`, per-handle pagination cursor map, subscription-id→URI routing).
+    - Routed `publishNodeResult` and `widgetDataUpdate` notifications into node-scoped state updates.
+    - Added debounced auto-sync for node source edits via `applyPatch(setNodeSource)`.
+    - Added deterministic resubscribe-on-mutation helper for connect/disconnect/param edits and unsubscribe-all on canvas switch.
+    - Canvas session import now includes tracked edges rather than always importing empty-edge snapshots.
+  - `apps/frontend/src/lsp/canvas-runtime.ts` (+ test):
+    - Hardened `toCanvasUri` with strict `snaq://` URI validation and non-empty `canvasId` requirement.
+  - `docs/LSP.md`:
+    - Removed legacy `subscribe`/`unsubscribe` and `publishResult` documentation; documented node-centric-only API surface and notification channel.
+  - Verification green:
+    - `pnpm -C apps/frontend run test`
+    - `pnpm -C apps/frontend run lint`
+    - `pnpm -C apps/frontend run typecheck`
+    - `pnpm -C apps/frontend run build`
+    - `pnpm -C apps/frontend run smoketest`
+    - `cargo test -p snaq-lite-lsp`
+    - `cargo test -p snaq-lite-lsp --test lsp_integration`
+    - `cargo test -p snaq-lite-lang`
+    - `pnpm test`
+    - `pnpm run lint`
+
 - **Lazy runtime hardening pass (stream reducers + method dispatch + LSP slice optimization):**
   - `crates/snaq-lite-lang/src/queries.rs`:
     - Added shared stream iteration helpers (`for_each_vector_item`, `for_each_vector_item_control`) and rewired reducer call sites (`sum_and_count_vector_stream`, `quantile_approx_from_stream`, and vector methods `mean/min/max/norm/product/variance/all/any`) to reduce duplicated stream loops while preserving behavior.
@@ -536,3 +569,40 @@
   - Added shared reducer utility `variance_from_vector_stream` so `variance` and `stddev` reuse one stream implementation (removes expression-rebuild path for stddev and keeps semantics local to reducer evaluation).
   - Simplified `value_inner` vector method dispatch to route reducers through the helper family, aligning reducer/transform/order-stat method structure and reducing monolithic branch complexity.
   - Verification green: `cargo test -p snaq-lite-lang`, `cargo clippy -p snaq-lite-lang -- -D warnings`.
+- **Plan-gap closure pass (remaining test coverage + verification):**
+  - Added frontend runtime-state helpers in `apps/frontend/src/lsp/node-runtime-state.ts` and unit coverage in `apps/frontend/src/lsp/node-runtime-state.test.ts` for per-node URI resolution, subscription upserts, and publish payload/result-handle updates.
+  - Wired `apps/frontend/src/routes/index.tsx` to use the new helpers for node publish routing and subscription state updates.
+  - Expanded frontend e2e coverage in `apps/frontend/e2e/home.spec.ts` with scenario-level checks for node-centric publish behavior, post-edit subscription stability, stale-canvas mismatch handling, and pagination-control stability after recovery.
+  - Added explicit LSP integration regressions in `crates/snaq-lite-lsp/tests/lsp_integration.rs` to assert `snaqlite/graph/nodeSignatureUpdated` visibility for connect/disconnect/applyPatch topology paths.
+  - Hardened signature assertions with `saw_signature_for_uri_around_response(...)` to account for notification ordering before/after RPC response ids.
+  - Verification green:
+    - `pnpm -C apps/frontend test`
+    - `pnpm -C apps/frontend lint`
+    - `pnpm -C apps/frontend build`
+    - `pnpm -C apps/frontend smoketest`
+    - `cargo test -p snaq-lite-lsp --test lsp_integration connect_emits_node_signature_updated_for_topology_target`
+    - `cargo test -p snaq-lite-lsp --test lsp_integration disconnect_emits_node_signature_updated_for_topology_target`
+    - `cargo test -p snaq-lite-lsp --test lsp_integration apply_patch_topology_connect_emits_node_signature_updated_for_target`
+    - `pnpm test`
+    - `pnpm run lint`
+- **Review-and-improve pass (post-implementation hardening):**
+  - Reviewed the recent frontend bridge/runtime changes and identified two practical risks:
+    - publish notification races could overwrite intermediate state when rapid notifications arrive before ref mirrors update;
+    - UI actions after recovery could still target stale `canvasId`, causing post-scenario mismatch behavior.
+  - Improved `apps/frontend/src/routes/index.tsx`:
+    - `handlePublishNodeResult` now synchronizes in-memory refs immediately with computed next state before scheduling React state updates.
+    - `switchCanvas` now updates UI `canvasId` to the active target canvas.
+    - `disconnectNodes` now treats post-disconnect subscription-refresh errors as non-fatal and reports contextual status instead of failing the whole action.
+  - Refined `apps/frontend/e2e/home.spec.ts` assertions to validate stable, deterministic post-recovery behavior while avoiding brittle status coupling.
+  - Verification green:
+    - `pnpm -C apps/frontend test`
+    - `pnpm -C apps/frontend lint`
+    - `pnpm -C apps/frontend build`
+    - `pnpm -C apps/frontend smoketest`
+- **Stale notification-closure fix (frontend):**
+  - Verified `handlePublishNodeResult` could use render-captured `nodes`/`canvasId` from the one-time `initClient` notification registration path, which risks stale `resultHandle` targeting after canvas switch or node updates.
+  - Fixed in `apps/frontend/src/routes/index.tsx` by introducing `canvasIdRef` and `nodesRef` synchronized via `useEffect`, then using those refs for target-URI comparison inside `handlePublishNodeResult`.
+  - Verification green:
+    - `pnpm -C apps/frontend test`
+    - `pnpm -C apps/frontend lint`
+    - `pnpm -C apps/frontend build`

@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createLspClient, type LspClient } from '../lsp/client'
 import LspWorker from '../lsp/lsp.worker?worker'
 import {
@@ -7,6 +7,7 @@ import {
   buildNodeSource,
   buildPatchForRemoveParam,
   buildPatchForRenameParam,
+  type CanvasEdge,
   type CanvasNode,
 } from '../lsp/graph-patch'
 import { fetchFirstPage, fetchNextPage, type PageCursor } from '../lsp/pagination'
@@ -18,6 +19,12 @@ import {
   patchCanvasNodeSource,
   toCanvasUri,
 } from '../lsp/canvas-runtime'
+import type { PublishNodeResultParams, WidgetDataUpdateParams } from '../lsp/types'
+import {
+  applyPublishNodeResult,
+  resolveNodeUriFromPublish,
+  upsertNodeSubscription,
+} from '../lsp/node-runtime-state'
 
 export const Route = createFileRoute('/')({
   component: HomePage,
@@ -39,18 +46,120 @@ function HomePage() {
       params: [{ name: 'x', paramId: 'p1', typeName: 'Vector' }],
     },
   ])
-  const [subscriptionId, setSubscriptionId] = useState<string>()
+  const [edges, setEdges] = useState<CanvasEdge[]>([])
   const [resultHandle, setResultHandle] = useState<string>()
   const [slice, setSlice] = useState<string>('[]')
   const [newParamName, setNewParamName] = useState('x2')
   const paginationRef = useRef<PageCursor>({ offset: 0 })
+  const paginationByHandlePathRef = useRef<Record<string, PageCursor>>({})
   const clientRef = useRef<LspClient | null>(null)
+  const syncTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  const [nodeSubscriptionsByUri, setNodeSubscriptionsByUri] = useState<
+    Record<string, { subscriptionId: string; resultHandle?: string }>
+  >({})
+  const nodeSubscriptionsRef = useRef<Record<string, { subscriptionId: string; resultHandle?: string }>>({})
+  const subscriptionUriByIdRef = useRef<Record<string, string>>({})
+  const [nodeResultsByUri, setNodeResultsByUri] = useState<
+    Record<
+      string,
+      {
+        status: string
+        revision?: number
+        payload?: Record<string, unknown>
+      }
+    >
+  >({})
+  const nodeResultsRef = useRef<
+    Record<
+      string,
+      {
+        status: string
+        revision?: number
+        payload?: Record<string, unknown>
+      }
+    >
+  >({})
+  const canvasIdRef = useRef(canvasId)
+  const nodesRef = useRef(nodes)
   const wasmUrl = useMemo(() => {
     if (typeof window === 'undefined') {
       return '/lsp-wasm/snaq_lite_lsp.js'
     }
     return `${window.location.origin}${import.meta.env.BASE_URL}lsp-wasm/snaq_lite_lsp.js`
   }, [])
+
+  useEffect(() => {
+    return () => {
+      for (const timerId of Object.values(syncTimersRef.current)) {
+        clearTimeout(timerId)
+      }
+      syncTimersRef.current = {}
+    }
+  }, [])
+
+  useEffect(() => {
+    nodeSubscriptionsRef.current = nodeSubscriptionsByUri
+  }, [nodeSubscriptionsByUri])
+
+  useEffect(() => {
+    nodeResultsRef.current = nodeResultsByUri
+  }, [nodeResultsByUri])
+
+  useEffect(() => {
+    canvasIdRef.current = canvasId
+  }, [canvasId])
+
+  useEffect(() => {
+    nodesRef.current = nodes
+  }, [nodes])
+
+  function pathKey(resultHandleValue: string, path: Array<number | string> = []): string {
+    return `${resultHandleValue}:${JSON.stringify(path)}`
+  }
+
+  function handlePublishNodeResult(notificationParams: unknown): void {
+    const params = (notificationParams ?? {}) as PublishNodeResultParams
+    if (!params.subscriptionId) {
+      return
+    }
+    const uri = resolveNodeUriFromPublish(params, subscriptionUriByIdRef.current)
+    if (!uri) {
+      return
+    }
+    const publishUpdate = applyPublishNodeResult(
+      nodeResultsRef.current,
+      nodeSubscriptionsRef.current,
+      uri,
+      params,
+    )
+    nodeResultsRef.current = publishUpdate.nextResults
+    nodeSubscriptionsRef.current = publishUpdate.nextSubscriptions
+    setNodeResultsByUri(publishUpdate.nextResults)
+    setNodeSubscriptionsByUri(publishUpdate.nextSubscriptions)
+    if (publishUpdate.resultHandle) {
+      const activeTargetNode = nodesRef.current[1]
+      if (!activeTargetNode) {
+        return
+      }
+      const activeTargetUri = canvasUri(activeTargetNode.uri, canvasIdRef.current)
+      setResultHandle((current) => (uri === activeTargetUri ? publishUpdate.resultHandle : current))
+    }
+  }
+
+  function handleWidgetDataUpdate(notificationParams: unknown): void {
+    const params = (notificationParams ?? {}) as WidgetDataUpdateParams
+    if (!params.uri) {
+      return
+    }
+    setNodeResultsByUri((current) => ({
+      ...current,
+      [params.uri as string]: {
+        status: params.status,
+        revision: params.revision,
+        payload: params.payload,
+      },
+    }))
+  }
 
   async function initClient() {
     if (clientRef.current) {
@@ -62,6 +171,12 @@ function HomePage() {
     })
     client.onNotification((notification) => {
       setNotifications((current) => [...current.slice(-20), notification.method])
+      if (notification.method === 'snaqlite/publishNodeResult') {
+        handlePublishNodeResult(notification.params)
+      }
+      if (notification.method === 'snaqlite/graph/widgetDataUpdate') {
+        handleWidgetDataUpdate(notification.params)
+      }
     })
     await client.initialize()
     clientRef.current = client
@@ -116,6 +231,14 @@ function HomePage() {
       targetUri,
       targetParamId: nodes[1].params[0]?.paramId ?? 'p1',
     })
+    setEdges([
+      {
+        sourceUri,
+        targetUri,
+        targetParamId: nodes[1].params[0]?.paramId ?? 'p1',
+      },
+    ])
+    await refreshSubscriptionForUri(targetUri)
     safeSetStatus(`Connected node-1 -> node-2 (${targetCanvasId})`)
   }
 
@@ -129,6 +252,14 @@ function HomePage() {
       targetUri,
       targetParamId: nodes[1].params[0]?.paramId ?? 'p1',
     })
+    setEdges([])
+    try {
+      await refreshSubscriptionForUri(targetUri)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error'
+      safeSetStatus(`Disconnected node-2 input (${targetCanvasId}); refresh failed: ${message}`)
+      return
+    }
     safeSetStatus(`Disconnected node-2 input (${targetCanvasId})`)
   }
 
@@ -166,6 +297,7 @@ function HomePage() {
     )
     try {
       await client.applyPatch(buildPatchForRenameParam(targetUri, primary.paramId, renamed))
+      await refreshSubscriptionForUri(targetUri)
       safeSetStatus(`Renamed param ${primary.paramId} -> ${renamed}`)
     } catch (error) {
       rollback()
@@ -205,6 +337,7 @@ function HomePage() {
     )
     try {
       await client.applyPatch(buildPatchForAddParam(targetUri, { paramId, name, typeName: 'Undefined' }))
+      await refreshSubscriptionForUri(targetUri)
       safeSetStatus(`Added param ${name}@${paramId}`)
     } catch (error) {
       rollback()
@@ -250,11 +383,46 @@ function HomePage() {
     )
     try {
       await client.applyPatch(buildPatchForRemoveParam(targetUri, removed.paramId))
+      await refreshSubscriptionForUri(targetUri)
       safeSetStatus(`Removed param ${removed.paramId}`)
     } catch (error) {
       rollback()
       throw error
     }
+  }
+
+  async function unsubscribeAllNodes() {
+    const client = clientRef.current
+    if (!client) {
+      return
+    }
+    const subscriptions = Object.values(nodeSubscriptionsByUri)
+    for (const subscription of subscriptions) {
+      await client.unsubscribeNode(subscription.subscriptionId)
+      delete subscriptionUriByIdRef.current[subscription.subscriptionId]
+    }
+    setNodeSubscriptionsByUri({})
+  }
+
+  async function refreshSubscriptionForUri(uri: string): Promise<void> {
+    const client = clientRef.current
+    if (!client) {
+      return
+    }
+    const existing = nodeSubscriptionsByUri[uri]
+    if (!existing) {
+      return
+    }
+    await client.unsubscribeNode(existing.subscriptionId)
+    delete subscriptionUriByIdRef.current[existing.subscriptionId]
+    const response = await client.subscribeNode(uri)
+    subscriptionUriByIdRef.current[response.subscriptionId] = uri
+    setNodeSubscriptionsByUri((current) =>
+      upsertNodeSubscription(current, uri, {
+        subscriptionId: response.subscriptionId,
+        resultHandle: response.resultHandle,
+      }),
+    )
   }
 
   async function subscribeSecondNode(targetCanvasId = canvasId): Promise<string | undefined> {
@@ -263,10 +431,24 @@ function HomePage() {
       return undefined
     }
     const sourceUri = canvasUri(nodes[1].uri, targetCanvasId)
+    const existing = nodeSubscriptionsByUri[sourceUri]
+    if (existing) {
+      await client.unsubscribeNode(existing.subscriptionId)
+      delete subscriptionUriByIdRef.current[existing.subscriptionId]
+    }
     const response = await client.subscribeNode(sourceUri)
-    setSubscriptionId(response.subscriptionId)
+    subscriptionUriByIdRef.current[response.subscriptionId] = sourceUri
+    setNodeSubscriptionsByUri((current) =>
+      upsertNodeSubscription(current, sourceUri, {
+        subscriptionId: response.subscriptionId,
+        resultHandle: response.resultHandle,
+      }),
+    )
     setResultHandle(response.resultHandle)
     paginationRef.current = { offset: 0 }
+    if (response.resultHandle) {
+      paginationByHandlePathRef.current[pathKey(response.resultHandle)] = { offset: 0 }
+    }
     safeSetStatus(`Subscribed to node-2 (${targetCanvasId})`)
     return response.resultHandle
   }
@@ -280,6 +462,7 @@ function HomePage() {
     try {
       const page = await fetchFirstPage(client, { resultHandle: activeResultHandle, limit: 2 })
       paginationRef.current = page.cursor
+      paginationByHandlePathRef.current[pathKey(activeResultHandle)] = page.cursor
       setSlice(JSON.stringify(page.response.elements))
       setStatus('Fetched first page')
     } catch (error) {
@@ -295,12 +478,15 @@ function HomePage() {
       return
     }
     try {
+      const currentCursor =
+        paginationByHandlePathRef.current[pathKey(activeResultHandle)] ?? paginationRef.current
       const page = await fetchNextPage(client, {
         resultHandle: activeResultHandle,
         limit: 2,
-        cursor: paginationRef.current,
+        cursor: currentCursor,
       })
       paginationRef.current = page.cursor
+      paginationByHandlePathRef.current[pathKey(activeResultHandle)] = page.cursor
       setSlice(JSON.stringify(page.response.elements))
       setStatus('Fetched next page')
     } catch (error) {
@@ -314,6 +500,7 @@ function HomePage() {
     if (!client) {
       return
     }
+    await unsubscribeAllNodes()
     await ensureCanvasSession(client, targetCanvasId, {
       canvasId: targetCanvasId,
       nodes: nodes.map((node) => ({
@@ -324,9 +511,31 @@ function HomePage() {
         }),
         version: 1,
       })),
-      edges: [],
+      edges: edges.map((edge) => ({
+        sourceUri: canvasUri(edge.sourceUri, targetCanvasId),
+        targetUri: canvasUri(edge.targetUri, targetCanvasId),
+        targetParamId: edge.targetParamId,
+      })),
     })
+    setCanvasId(targetCanvasId)
     safeSetStatus(`Switched to ${targetCanvasId}`)
+  }
+
+  function scheduleNodeSourceSync(node: CanvasNode, targetCanvasId = canvasId) {
+    const existing = syncTimersRef.current[node.uri]
+    if (existing) {
+      clearTimeout(existing)
+    }
+    syncTimersRef.current[node.uri] = setTimeout(() => {
+      const client = clientRef.current
+      if (!client) {
+        return
+      }
+      void patchCanvasNodeSource(client, node, targetCanvasId).catch((error) => {
+        const message = error instanceof Error ? error.message : 'unknown error'
+        safeSetStatus(`Auto-sync failed: ${message}`)
+      })
+    }, 250)
   }
 
   async function runBridgeScenario() {
@@ -441,9 +650,16 @@ function HomePage() {
               value={node.source}
               onChange={(event) => {
                 const source = event.target.value
-                setNodes((current) =>
-                  current.map((item) => (item.uri === node.uri ? { ...item, source } : item)),
-                )
+                setNodes((current) => {
+                  const nextNodes = current.map((item) =>
+                    item.uri === node.uri ? { ...item, source } : item,
+                  )
+                  const changedNode = nextNodes.find((item) => item.uri === node.uri)
+                  if (changedNode) {
+                    scheduleNodeSourceSync(changedNode)
+                  }
+                  return nextNodes
+                })
               }}
               style={{ display: 'block', width: 480, height: 72 }}
             />
@@ -454,9 +670,24 @@ function HomePage() {
         </div>
       </section>
       <section style={{ marginTop: 16 }}>
-        <div data-testid="subscription-id">Subscription: {subscriptionId ?? 'none'}</div>
+        <div data-testid="subscription-id">
+          Subscription:{' '}
+          {Object.values(nodeSubscriptionsByUri)
+            .map((entry) => entry.subscriptionId)
+            .join(', ') || 'none'}
+        </div>
         <div data-testid="result-handle">Result handle: {resultHandle ?? 'none'}</div>
         <div data-testid="slice-output">Slice: {slice}</div>
+      </section>
+      <section style={{ marginTop: 16 }}>
+        <h2>Node Result Status</h2>
+        <ul data-testid="node-result-status">
+          {Object.entries(nodeResultsByUri).map(([uri, result]) => (
+            <li key={uri}>
+              {uri}: {result.status}
+            </li>
+          ))}
+        </ul>
       </section>
       <section style={{ marginTop: 16 }}>
         <h2>Notification Log</h2>

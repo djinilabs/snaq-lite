@@ -57,6 +57,26 @@ export interface SubscribeNodeResponse {
   resultHandle?: string
 }
 
+export type PublishStatus = 'Running' | 'Completed' | 'Error' | 'Cancelled'
+
+export interface PublishNodeResultParams {
+  subscriptionId: string
+  status: PublishStatus
+  revision?: number
+  canvasId?: string
+  uri?: string
+  data?: Record<string, unknown>
+}
+
+export interface WidgetDataUpdateParams {
+  widgetId: string
+  status: PublishStatus
+  revision?: number
+  canvasId?: string
+  uri?: string
+  payload?: Record<string, unknown>
+}
+
 export type GraphPatchOperation =
   | { op: 'setNodeSource'; uri: string; source: string }
   | {

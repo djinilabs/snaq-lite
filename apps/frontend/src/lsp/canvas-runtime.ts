@@ -8,7 +8,18 @@ import {
 } from './graph-patch'
 
 export function toCanvasUri(uri: string, canvasId: string): string {
-  return uri.replace(/snaq:\/\/[^/]+\//, `snaq://${canvasId}/`)
+  const parsed = new URL(uri)
+  if (parsed.protocol !== 'snaq:') {
+    throw new Error(`Expected snaq:// URI, got ${uri}`)
+  }
+  if (!parsed.hostname) {
+    throw new Error(`Expected canvas host in URI, got ${uri}`)
+  }
+  if (!canvasId.trim()) {
+    throw new Error('canvasId must not be empty')
+  }
+  parsed.hostname = canvasId
+  return parsed.toString()
 }
 
 export async function openCanvasNodes(

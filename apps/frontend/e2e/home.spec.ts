@@ -26,3 +26,43 @@ test('bridge scenario runs end-to-end', async ({ page }) => {
   await expect(page.getByTestId('result-handle')).not.toContainText('none')
   await expect(page.getByTestId('notification-log')).toContainText('snaqlite/publishNodeResult')
 })
+
+test('editing node source pushes dependent updates without manual resubscribe', async ({ page }) => {
+  await page.goto('/')
+  await page.getByTestId('canvas-id-input').fill('canvas-e2e-edit')
+  await page.getByTestId('run-scenario-btn').click()
+  await expect(page.getByTestId('status-text')).toContainText('Bridge scenario completed', {
+    timeout: 30_000,
+  })
+  await page.getByTestId('node-source-1').fill('[9, 10, 11, 12]')
+  await expect(page.getByTestId('subscription-id')).not.toContainText('none')
+  await expect(page.getByTestId('notification-log')).toContainText('snaqlite/publishNodeResult')
+})
+
+test('connect and disconnect drive node result status transitions', async ({ page }) => {
+  await page.goto('/')
+  await page.getByTestId('canvas-id-input').fill('canvas-e2e-disconnect')
+  await page.getByTestId('run-scenario-btn').click()
+  await expect(page.getByTestId('status-text')).toContainText('Bridge scenario completed', {
+    timeout: 30_000,
+  })
+  await page.getByTestId('disconnect-nodes-btn').click()
+  await expect(page.getByTestId('status-text')).not.toContainText('canvas mismatch')
+  await expect(page.getByTestId('notification-log')).toContainText('snaqlite/publishNodeResult')
+})
+
+test('slice pagination uses continuation flow', async ({ page }) => {
+  await page.goto('/')
+  await page.getByTestId('canvas-id-input').fill('canvas-e2e-pagination')
+  await page.getByTestId('run-scenario-btn').click()
+  await expect(page.getByTestId('status-text')).toContainText('Bridge scenario completed', {
+    timeout: 30_000,
+  })
+  await expect(page.getByTestId('result-handle')).not.toContainText('none')
+
+  await page.getByTestId('fetch-first-slice-btn').click()
+  await expect(page.getByTestId('slice-output')).toBeVisible()
+
+  await page.getByTestId('fetch-next-slice-btn').click()
+  await expect(page.getByTestId('slice-output')).toBeVisible()
+})

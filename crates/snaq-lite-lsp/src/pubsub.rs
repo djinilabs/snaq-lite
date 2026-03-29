@@ -1,45 +1,14 @@
 //! Custom LSP methods and notification payloads for live result pub-sub (snaqlite/*).
-//! Stream chunk protocol: serialize stream elements to JSON for snaqlite/publishResult.
+//! Stream chunk protocol: serialize stream elements to JSON for snaqlite/publishNodeResult.
 
 use serde::{Deserialize, Serialize};
 use snaq_lite_lang::{format_value_for_display, RunError, Value};
 
-/// Custom LSP notification for snaqlite/publishResult (server → client).
-pub struct PublishResultNotification;
-impl tower_lsp::lsp_types::notification::Notification for PublishResultNotification {
-    type Params = PublishResultParams;
-    const METHOD: &'static str = "snaqlite/publishResult";
-}
-
 /// Custom LSP notification for snaqlite/publishNodeResult (server → client).
-/// Node-centric alias of publishResult with identical payload shape.
 pub struct PublishNodeResultNotification;
 impl tower_lsp::lsp_types::notification::Notification for PublishNodeResultNotification {
     type Params = PublishResultParams;
     const METHOD: &'static str = "snaqlite/publishNodeResult";
-}
-
-/// Params for snaqlite/subscribe. Range identifies the code block/expression to watch.
-/// Phase 1: root-only subscription (range can be omitted or ignored; whole document result).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubscribeParams {
-    pub text_document: TextDocumentIdentifier,
-    /// Range of the block/expression to subscribe to. Optional for root-only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub range: Option<tower_lsp::lsp_types::Range>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TextDocumentIdentifier {
-    pub uri: tower_lsp::lsp_types::Url,
-}
-
-/// Response for snaqlite/subscribe: unique subscription id for unsubscribe and notifications.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubscribeResponse {
-    pub subscription_id: String,
 }
 
 /// Params for snaqlite/subscribeNode (node-centric canonical API).
@@ -58,13 +27,6 @@ pub struct SubscribeNodeResponse {
     pub result_handle: Option<String>,
 }
 
-/// Params for snaqlite/unsubscribe.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UnsubscribeParams {
-    pub subscription_id: String,
-}
-
 /// Params for snaqlite/unsubscribeNode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,7 +34,7 @@ pub struct UnsubscribeNodeParams {
     pub subscription_id: String,
 }
 
-/// Status in snaqlite/publishResult notification.
+/// Status in snaqlite/publishNodeResult notification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum PublishStatus {
@@ -82,7 +44,7 @@ pub enum PublishStatus {
     Cancelled,
 }
 
-/// Payload for snaqlite/publishResult notification (server → client).
+/// Payload for snaqlite/publishNodeResult notification (server → client).
 /// `data` is a JSON value: for Running, an object with elements, offset?, count?; for Error/Cancelled, object with message/reason.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

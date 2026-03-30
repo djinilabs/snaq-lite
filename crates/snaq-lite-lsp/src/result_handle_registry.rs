@@ -55,13 +55,7 @@ pub struct ResultHandleRegistry {
 
 impl ResultHandleRegistry {
     fn is_forward_only_value(value: &snaq_lite_lang::Value) -> bool {
-        matches!(
-            value,
-            snaq_lite_lang::Value::Vector(snaq_lite_lang::VectorValue {
-                inner: snaq_lite_lang::LazyVector::FromInput(_),
-                ..
-            })
-        )
+        matches!(value, snaq_lite_lang::Value::Vector(v) if v.is_forward_only_lineage())
     }
 
     fn uri_matches_prefix(uri: &str, prefix: &str) -> bool {
@@ -131,8 +125,9 @@ impl ResultHandleRegistry {
             return false;
         };
         entry.revision = revision;
+        entry.forward_only = Self::is_forward_only_value(&value);
         entry.value = value;
-        // Preserve forward-only contract once established for this handle lineage.
+        // Recompute lineage metadata and reset continuation state for the updated value.
         self.invalidate_cursors_for_handle(handle);
         self.forward_only.remove(handle);
         true

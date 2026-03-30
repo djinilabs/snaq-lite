@@ -37,7 +37,8 @@ pub use ir::{ExprDef, Expression, NumLiteral, ProgramDef, SpannedExprDef, Stream
 pub use scope::{empty_scope, Env, Scope, StoredValue};
 pub use parser::parse;
 pub use queries::{
-    collect_vector_stream, program, set_eval_registry, set_stream_input_registry, value,
+    collect_vector_slice_window_streaming, collect_vector_stream, next_vector_item_streaming,
+    feed_value_to_senders_streaming, program, set_eval_registry, set_stream_input_registry, value,
     vector_into_stream,
 };
 pub use symbol_registry::SymbolRegistry;
@@ -165,7 +166,7 @@ fn format_vector_for_display(
     v: &vector::VectorValue,
 ) -> Result<String, RunError> {
     // Forward-only input streams are non-replayable; formatting must not consume them.
-    if matches!(v.inner, LazyVector::FromInput(_)) {
+    if v.is_forward_only_lineage() {
         return Ok("<stream-vector>".to_string());
     }
     let stream = vector_into_stream(db, v.inner.clone());
@@ -192,7 +193,7 @@ pub fn format_vector_for_widget_display(
     v: &vector::VectorValue,
 ) -> Result<String, RunError> {
     // Keep widget formatting non-destructive for forward-only lineages.
-    if matches!(v.inner, LazyVector::FromInput(_)) {
+    if v.is_forward_only_lineage() {
         return Ok("<stream-vector>".to_string());
     }
     let stream = vector_into_stream(db, v.inner.clone());
@@ -4586,6 +4587,51 @@ mod tests {
             Ok(Some(Value::Numeric(q))) => assert!((q.value() - 7.0).abs() < 1e-10),
             other => panic!("unexpected stream output: {other:?}"),
         }
+    }
+
+    #[test]
+    fn format_value_for_display_does_not_consume_wrapped_forward_only_lineage() {
+        use crate::quantity::Quantity;
+        use crate::symbolic::Value;
+        use futures::sink::SinkExt;
+        use futures::stream::StreamExt;
+
+        let registry = default_si_registry();
+        let (id, mut tx) = create_stream_input();
+        futures::executor::block_on(async {
+            tx.send(vec![
+                Ok(Some(Value::Numeric(Quantity::from_scalar(1.0)))),
+                Ok(Some(Value::Numeric(Quantity::from_scalar(2.0)))),
+            ])
+            .await
+            .expect("send chunk");
+        });
+        drop(tx);
+
+        let (value, db) = run_with_stream_inputs(
+            "input x: Vector\nx.map(fn (v) => (v * 2))",
+            &registry,
+            std::collections::HashMap::from([("x".to_string(), id)]),
+        )
+        .expect("run should succeed");
+
+        let display = format_value_for_display(&db, &value).expect("format should succeed");
+        assert_eq!(display, "<stream-vector>");
+
+        let Value::Vector(v) = value else {
+            panic!("expected vector");
+        };
+        let out = futures::executor::block_on(vector_into_stream(&db, v.inner).collect::<Vec<_>>());
+        assert_eq!(out.len(), 2, "stream should remain consumable after formatting");
+        let displays: Vec<String> = out
+            .into_iter()
+            .map(|item| match item {
+                Ok(Some(val)) => format_value_for_display(&db, &val).expect("element display"),
+                Ok(None) => "?".to_string(),
+                Err(e) => panic!("unexpected stream error after formatting: {e}"),
+            })
+            .collect();
+        assert_eq!(displays, vec!["2", "4"]);
     }
 
     #[test]

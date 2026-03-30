@@ -420,6 +420,16 @@ impl LanguageServer for SnaqLiteBackend {
 }
 
 impl SnaqLiteBackend {
+    fn value_has_forward_only_lineage(value: &snaq_lite_lang::Value) -> bool {
+        matches!(value, snaq_lite_lang::Value::Vector(v) if v.is_forward_only_lineage())
+    }
+
+    fn should_short_circuit_vector_subscription(inner: &snaq_lite_lang::LazyVector) -> bool {
+        // Only direct input vectors should skip native stream-consumer startup.
+        // Wrapped forward-only lineages (e.g. map over input) must stream normally.
+        matches!(inner, snaq_lite_lang::LazyVector::FromInput(_))
+    }
+
     fn recompute_roots_for_change(changed_uri: &Url, revalidated_targets: Vec<Url>) -> Vec<Url> {
         let mut changed_roots = Vec::with_capacity(1 + revalidated_targets.len());
         let mut seen = std::collections::HashSet::with_capacity(1 + revalidated_targets.len());
@@ -1231,7 +1241,7 @@ impl SnaqLiteBackend {
                             .set_cancel_tx(&subscription_id, Some(cancel_tx));
                         #[cfg(not(target_arch = "wasm32"))]
                         {
-                            if matches!(inner, snaq_lite_lang::LazyVector::FromInput(_)) {
+                            if Self::should_short_circuit_vector_subscription(&inner) {
                                 let payload = Self::build_completed_payload(
                                     &snaq_lite_lang::Value::Vector(v.clone()),
                                     &db,
@@ -2622,8 +2632,7 @@ impl SnaqLiteBackend {
     ///
     /// This stays on the current runtime thread because vector path traversal can execute deferred
     /// vector elements (including user-map closures), and closure environments are thread-local.
-    /// Moving this to a different worker thread can break closure-env lookup.
-    fn resolve_path_blocking(
+    fn resolve_path(
         value: &snaq_lite_lang::Value,
         path: &[PathSegment],
         db: &salsa::DatabaseImpl,
@@ -2640,9 +2649,7 @@ impl SnaqLiteBackend {
                         start: idx,
                         length: 1,
                     };
-                    use futures::stream::StreamExt;
-                    let mut stream = snaq_lite_lang::vector_into_stream(db, slice);
-                    match futures::executor::block_on(stream.next()) {
+                    match snaq_lite_lang::next_vector_item_streaming(db, slice) {
                         Some(Ok(Some(val))) => val,
                         _ => return None,
                     }
@@ -2654,14 +2661,6 @@ impl SnaqLiteBackend {
             };
         }
         Some(current)
-    }
-
-    fn resolve_path(
-        value: &snaq_lite_lang::Value,
-        path: &[PathSegment],
-        db: &salsa::DatabaseImpl,
-    ) -> Option<snaq_lite_lang::Value> {
-        Self::resolve_path_blocking(value, path, db)
     }
 
     /// Handle snaqlite/graph/subscribeWidget: run source node (with graph inputs when wired), cache result and send Completed with summary.
@@ -2807,13 +2806,7 @@ impl SnaqLiteBackend {
         }
         if source_handle.is_some()
             && !path_segments.is_empty()
-            && matches!(
-                value,
-                snaq_lite_lang::Value::Vector(snaq_lite_lang::VectorValue {
-                    inner: snaq_lite_lang::LazyVector::FromInput(_),
-                    ..
-                })
-            )
+            && Self::value_has_forward_only_lineage(&value)
         {
             return Err(tower_lsp::jsonrpc::Error::invalid_params(
                 "non-replayable stream slice does not support nested paths",
@@ -2837,36 +2830,25 @@ impl SnaqLiteBackend {
         };
 
         let (elements, total_count, supports_cursor, explicit_has_more) = {
-            let sub_value = {
-                let db_for_path = db_for_slice_work.clone();
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let value_for_path = value.clone();
-                    let path_for_path = path_segments.clone();
-                    tokio::task::spawn_blocking(move || {
-                        Self::resolve_path(&value_for_path, &path_for_path, &db_for_path)
-                    })
-                    .await
-                    .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?
-                    .ok_or_else(|| {
-                        tower_lsp::jsonrpc::Error::invalid_params("Invalid path or value not found")
-                    })?
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    Self::resolve_path(&value, &path_segments, &db_for_path).ok_or_else(|| {
-                        tower_lsp::jsonrpc::Error::invalid_params("Invalid path or value not found")
-                    })?
-                }
-            };
+            let sub_value = Self::resolve_path(&value, &path_segments, &db_for_slice_work)
+                .ok_or_else(|| {
+                    tower_lsp::jsonrpc::Error::invalid_params("Invalid path or value not found")
+                })?;
 
-            let (elements, total_count, supports_cursor, explicit_has_more) = match &sub_value {
+            let (elements, total_count, supports_cursor, explicit_has_more) = match sub_value {
                 snaq_lite_lang::Value::Vector(v) => {
-                    let non_replayable = matches!(v.inner, snaq_lite_lang::LazyVector::FromInput(_));
+                    let non_replayable = v.is_forward_only_lineage();
+                    let is_direct_input = matches!(&v.inner, snaq_lite_lang::LazyVector::FromInput(_));
                     let offset = params.offset as usize;
                     let limit = params.limit as usize;
 
-                    let (total_count, slice_vec, has_more_override) = match &v.inner {
+                    if non_replayable && source_handle.is_some() && !is_direct_input {
+                        return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                            "forward-only lineage slice is only supported for direct input vectors",
+                        ));
+                    }
+
+                    let (total_count, slice_vec, has_more_override) = match v.inner {
                         snaq_lite_lang::LazyVector::FromEvaluated(collected) => {
                             let total_count = collected.len() as u64;
                             let start = offset.min(collected.len());
@@ -2887,13 +2869,13 @@ impl SnaqLiteBackend {
                                 .map_err(tower_lsp::jsonrpc::Error::invalid_params)?;
                             (page.total_count, page.items, Some(page.has_more))
                         }
-                        _ => {
+                        inner => {
                             // Stream once to compute both total count and requested window.
                             // Intentionally evaluated on the current runtime thread: deferred
                             // vector elements can depend on thread-local evaluation/closure state.
                             let (total_count, slice_vec) = vector_slice::collect_vector_slice_window(
                                 &db_for_slice_work,
-                                v.inner.clone(),
+                                inner,
                                 offset,
                                 limit,
                             );
@@ -3298,116 +3280,13 @@ fn root_def_is_resolved(def: &snaq_lite_lang::ExprDef) -> bool {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn run_local_future<F>(future: F) -> F::Output
-where
-    F: futures::Future,
-{
-    let mut pool = futures::executor::LocalPool::new();
-    pool.run_until(future)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn send_batch_native(
-    senders: &mut [snaq_lite_lang::StreamChunkSender],
-    mut batch: Vec<Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>>,
-) {
-    use futures::sink::SinkExt;
-    if senders.is_empty() {
-        return;
-    }
-    let last_idx = senders.len().saturating_sub(1);
-    for (idx, sender) in senders.iter_mut().enumerate() {
-        if idx == last_idx {
-            let payload = std::mem::take(&mut batch);
-            let _ = run_local_future(sender.send(payload));
-        } else {
-            let _ = run_local_future(sender.send(batch.clone()));
-        }
-    }
-}
-
 /// Feed one upstream value to multiple Chunk senders (one handle per edge when one source feeds multiple inputs).
-/// Uses bounded send (block_on on native, spawn_local on WASM) for back-pressure.
 fn feed_value_to_senders(
     value: &snaq_lite_lang::Value,
     db: &salsa::DatabaseImpl,
     senders: Vec<snaq_lite_lang::StreamChunkSender>,
 ) {
-    use futures::sink::SinkExt;
-
-    match value {
-        snaq_lite_lang::Value::Vector(v) => {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                use futures::stream::StreamExt;
-                const FANOUT_CHUNK_SIZE: usize = 128;
-                let mut senders = senders;
-                let mut stream = snaq_lite_lang::vector_into_stream(db, v.inner.clone());
-                let mut batch: Vec<Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>> =
-                    Vec::with_capacity(FANOUT_CHUNK_SIZE);
-                loop {
-                    let next = run_local_future(stream.next());
-                    match next {
-                        Some(item) => {
-                            batch.push(item);
-                            if batch.len() >= FANOUT_CHUNK_SIZE {
-                                send_batch_native(&mut senders, std::mem::take(&mut batch));
-                            }
-                        }
-                        None => break,
-                    }
-                }
-                if !batch.is_empty() {
-                    send_batch_native(&mut senders, batch);
-                }
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                const FANOUT_CHUNK_SIZE: usize = 128;
-                for mut sender in senders {
-                    let db_for_stream = db.clone();
-                    let inner = v.inner.clone();
-                    wasm_bindgen_futures::spawn_local(async move {
-                        use futures::sink::SinkExt;
-                        use futures::stream::StreamExt;
-
-                        let mut stream = snaq_lite_lang::vector_into_stream(&db_for_stream, inner);
-                        let mut batch: Vec<
-                            Result<Option<snaq_lite_lang::Value>, snaq_lite_lang::RunError>,
-                        > = Vec::with_capacity(FANOUT_CHUNK_SIZE);
-                        while let Some(item) = stream.next().await {
-                            batch.push(item);
-                            if batch.len() >= FANOUT_CHUNK_SIZE {
-                                if sender.send(std::mem::take(&mut batch)).await.is_err() {
-                                    return;
-                                }
-                            }
-                        }
-                        if !batch.is_empty() {
-                            let _ = sender.send(batch).await;
-                        }
-                    });
-                }
-            }
-        }
-        _ => {
-            let chunk = vec![Ok(Some(value.clone()))];
-            for mut sender in senders {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let _ = run_local_future(sender.send(chunk.clone()));
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let c = chunk.clone();
-                    wasm_bindgen_futures::spawn_local(async move {
-                        let _ = sender.send(c).await;
-                    });
-                }
-            }
-        }
-    }
+    snaq_lite_lang::feed_value_to_senders_streaming(value, db, senders);
 }
 
 /// Native: run the stream in a blocking thread and send batches via notification_tx.
@@ -3428,7 +3307,6 @@ fn run_stream_consumer(
 ) {
     use futures::future::{select, Either};
     use futures::stream::StreamExt;
-    use futures::task::LocalSpawnExt;
     const BATCH_SIZE: usize = 100;
     let run = async move {
         let mut stream = snaq_lite_lang::vector_into_stream(&db, inner);
@@ -3531,10 +3409,7 @@ fn run_stream_consumer(
             },
         ));
     };
-    let mut pool = futures::executor::LocalPool::new();
-    let spawner = pool.spawner();
-    spawner.spawn_local(run).ok();
-    pool.run();
+    futures::executor::block_on(run);
 }
 
 /// Native: run the stream for a widget and send WidgetDataUpdate notifications.
@@ -3550,7 +3425,6 @@ fn run_stream_consumer_for_widget(
 ) {
     use futures::future::{select, Either};
     use futures::stream::StreamExt;
-    use futures::task::LocalSpawnExt;
     const BATCH_SIZE: usize = 100;
     let run = async move {
         let mut stream = snaq_lite_lang::vector_into_stream(&db, inner);
@@ -3629,10 +3503,7 @@ fn run_stream_consumer_for_widget(
             payload: Some(completed_payload),
         });
     };
-    let mut pool = futures::executor::LocalPool::new();
-    let spawner = pool.spawner();
-    spawner.spawn_local(run).ok();
-    pool.run();
+    futures::executor::block_on(run);
 }
 
 /// Build the LSP service (same for native and WASM).
@@ -3733,6 +3604,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn block_on_test<F: std::future::Future>(future: F) -> F::Output {
+        futures::executor::block_on(future)
+    }
     use tower_lsp::lsp_types::Url;
 
     // ---- span_to_range ----
@@ -3949,6 +3824,41 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn resolve_path_returns_vector_index_element() {
+        let (value, db) = snaq_lite_lang::run_with_stream_inputs(
+            "[10, 20, 30]",
+            &snaq_lite_lang::default_si_registry(),
+            std::collections::HashMap::new(),
+        )
+        .unwrap();
+        let resolved = SnaqLiteBackend::resolve_path(
+            &value,
+            &[PathSegment::Index(1)],
+            &db,
+        );
+        assert!(matches!(
+            resolved,
+            Some(snaq_lite_lang::Value::Numeric(q)) if (q.value() - 20.0).abs() < 1e-10
+        ));
+    }
+
+    #[test]
+    fn subscribe_short_circuit_applies_only_to_direct_input_vector() {
+        let (id, _sender) = snaq_lite_lang::create_stream_input();
+        let direct = snaq_lite_lang::LazyVector::FromInput(id);
+        assert!(SnaqLiteBackend::should_short_circuit_vector_subscription(&direct));
+
+        let wrapped = snaq_lite_lang::LazyVector::Map {
+            source: Box::new(snaq_lite_lang::LazyVector::FromInput(id)),
+            op: snaq_lite_lang::vector::VectorMapOp::Neg,
+        };
+        assert!(
+            !SnaqLiteBackend::should_short_circuit_vector_subscription(&wrapped),
+            "wrapped forward-only vectors must stream on initial subscription"
+        );
+    }
+
     // ---- state (LspState) ----
 
     #[test]
@@ -4146,7 +4056,7 @@ mod tests {
             cancel_rx,
         );
 
-        let messages = run_local_future(async move {
+        let messages = block_on_test(async move {
             let mut out = Vec::new();
             while let Some((_, params)) = rx.next().await {
                 let is_completed = matches!(params.status, PublishStatus::Completed);

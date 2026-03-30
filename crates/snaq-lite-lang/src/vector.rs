@@ -48,6 +48,12 @@ pub struct VectorValue {
     pub orientation: VectorOrientation,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamLineage {
+    Replayable,
+    ForwardOnly,
+}
+
 impl VectorValue {
     pub fn column(inner: LazyVector) -> Self {
         Self {
@@ -71,6 +77,14 @@ impl VectorValue {
             },
             orientation: self.orientation.flip(),
         }
+    }
+
+    pub fn stream_lineage(&self) -> StreamLineage {
+        self.inner.stream_lineage()
+    }
+
+    pub fn is_forward_only_lineage(&self) -> bool {
+        self.stream_lineage() == StreamLineage::ForwardOnly
     }
 }
 
@@ -219,6 +233,31 @@ impl LazyVector {
             | LazyVector::Take { .. }
             | LazyVector::FromInput(_) => None,
         }
+    }
+
+    pub fn stream_lineage(&self) -> StreamLineage {
+        match self {
+            LazyVector::FromInput(_) => StreamLineage::ForwardOnly,
+            LazyVector::FromExprs(_)
+            | LazyVector::FromEvaluated(_)
+            | LazyVector::FromExprsWithEnv { .. } => StreamLineage::Replayable,
+            LazyVector::Map { source, .. }
+            | LazyVector::Transpose { source }
+            | LazyVector::Take { source, .. } => source.stream_lineage(),
+            LazyVector::ZipMap { left, right, .. } | LazyVector::Outer { left, right, .. } => {
+                if left.stream_lineage() == StreamLineage::ForwardOnly
+                    || right.stream_lineage() == StreamLineage::ForwardOnly
+                {
+                    StreamLineage::ForwardOnly
+                } else {
+                    StreamLineage::Replayable
+                }
+            }
+        }
+    }
+
+    pub fn is_forward_only_lineage(&self) -> bool {
+        self.stream_lineage() == StreamLineage::ForwardOnly
     }
 
     /// Produce a stream of elements. Each element is evaluated only when the stream is polled for that position.

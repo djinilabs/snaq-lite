@@ -25,26 +25,6 @@ pub(crate) fn collect_vector_slice_window(
     offset: usize,
     limit: usize,
 ) -> (u64, Vec<Result<Option<Value>, RunError>>) {
-    use futures::stream::StreamExt;
     let known_total = known_lazy_vector_len(&inner).map(|len| len as u64);
-    let end = offset.saturating_add(limit);
-    let mut stream = snaq_lite_lang::vector_into_stream(db, inner);
-    // Keep collection on the caller thread: deferred vector evaluation can depend on
-    // thread-local runtime state (e.g. closure env lookup for mapped user functions).
-    futures::executor::block_on(async move {
-        let mut total = 0u64;
-        let mut out: Vec<Result<Option<Value>, RunError>> = Vec::with_capacity(limit);
-        while let Some(item) = stream.next().await {
-            let idx = total as usize;
-            if idx >= offset && idx < end {
-                out.push(item);
-            }
-            total += 1;
-            if known_total.is_some() && idx + 1 >= end {
-                break;
-            }
-        }
-        let effective_total = known_total.unwrap_or(total);
-        (effective_total, out)
-    })
+    snaq_lite_lang::collect_vector_slice_window_streaming(db, inner, offset, limit, known_total)
 }

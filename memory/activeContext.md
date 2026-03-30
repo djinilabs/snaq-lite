@@ -2,6 +2,121 @@
 
 ## Just completed
 
+- **Subscription dead-end fix for wrapped forward-only vectors:**
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - Fixed `subscribeNode` native short-circuit policy to apply only to direct `LazyVector::FromInput` roots.
+    - Wrapped forward-only lineages (e.g. `Map` over `FromInput`) now follow the streaming consumer path on initial subscription.
+    - Added regression unit test `subscribe_short_circuit_applies_only_to_direct_input_vector`.
+  - Verification green:
+    - `cargo test -p snaq-lite-lsp --lib subscribe_short_circuit_applies_only_to_direct_input_vector`
+    - `cargo test -p snaq-lite-lsp --test lsp_integration native_subscribe_node_vector_returns_subscription_id`
+    - `cargo test -p snaq-lite-lsp --test lsp_integration fetch_result_slice_rejects_random_access_for_wrapped_forward_only_result_handle`
+    - `cargo test -p snaq-lite-lsp --lib`
+
+- **Post-review improvement pass (async-wrapper complexity reduction):**
+  - `crates/snaq-lite-lang/src/queries.rs`:
+    - Removed no-op async wrappers that immediately delegated to sync `block_on` helpers:
+      - `collect_vector_stream_async`
+      - `collect_vector_slice_window_streaming_async`
+      - `next_vector_item_streaming_async`
+      - `feed_value_to_senders_streaming_async`
+    - Kept one canonical sync helper path for slice/path/fanout streaming.
+  - `crates/snaq-lite-lang/src/lib.rs`:
+    - Removed re-exports of removed async wrapper helpers.
+  - `crates/snaq-lite-lsp/src/vector_slice.rs`:
+    - Replaced `collect_vector_slice_window_async` with sync `collect_vector_slice_window`.
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - `resolve_path` converted back to sync helper (`next_vector_item_streaming` direct call).
+    - `fetch_result_slice` now calls sync slice/path helpers directly (removed fake await chain).
+    - `run_node_with_graph_inputs_impl` and `feed_value_to_senders` simplified to sync, removing clone-heavy async wrapper flow.
+    - Updated unit tests to match sync helper forms (`resolve_path_returns_vector_index_element`; removed now-obsolete future-send assertion).
+  - Verification green:
+    - `cargo test -p snaq-lite-lsp --test lsp_integration`
+    - `cargo test -p snaq-lite-lsp`
+    - `cargo test -p snaq-lite-lang`
+    - `pnpm test`
+    - `pnpm run lint`
+    - `pnpm run build:lsp-wasm`
+
+- **Blocking-elimination phased execution (LSP slice + fanout + lang helper surface):**
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - `resolve_path` now follows an async call shape and delegates single-item vector pulls through shared lang helper wrappers.
+    - `fetch_result_slice` now awaits shared async slice/path helpers while preserving cursor/path/non-replayable behavior.
+    - `feed_value_to_senders` now routes through shared lang fanout helper and async call chain (`run_node_with_graph_inputs_impl` became async).
+  - `crates/snaq-lite-lsp/src/vector_slice.rs`:
+    - Added async slice-window helper entrypoint (`collect_vector_slice_window_async`) while preserving single-pass window extraction semantics.
+  - `crates/snaq-lite-lang/src/queries.rs` + `crates/snaq-lite-lang/src/lib.rs`:
+    - Added shared streaming helper family and async-first wrappers:
+      - `collect_vector_slice_window_streaming(_async)`
+      - `next_vector_item_streaming(_async)`
+      - `feed_value_to_senders_streaming(_async)`
+      - `collect_vector_stream_async`
+    - Kept behavior parity (no eager full-vector materialization introduced in LSP slice/fanout paths).
+  - `crates/snaq-lite-lsp/src/lib.rs` tests:
+    - Added/updated async helper coverage:
+      - `fetch_result_slice_async_window_collection_equivalent`
+      - `resolve_path_async_returns_vector_index_element`
+      - `resolve_path_future_is_send`
+  - Verification green:
+    - `cargo test -p snaq-lite-lsp --test lsp_integration`
+    - `cargo test -p snaq-lite-lsp`
+    - `cargo test -p snaq-lite-lang`
+    - `pnpm run build:lsp-wasm`
+
+- **Post-review correctness simplification pass (streaming regressions removed):**
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - Removed detached `std::thread::spawn` fanout path in `feed_value_to_senders`; restored deterministic in-thread fanout behavior to avoid race/lifecycle complexity.
+  - `crates/snaq-lite-lsp/src/vector_slice.rs`:
+    - Reverted unknown-length slice fallback from full collect/materialization to prior single-pass streaming window extraction.
+  - `crates/snaq-lite-lang/src/queries.rs`:
+    - Removed unnecessary async helper split introduced in prior pass for internal stream helpers; restored simpler direct helpers (same behavior, less accidental complexity).
+  - Verification green:
+    - `cargo test -p snaq-lite-lang`
+    - `cargo test -p snaq-lite-lsp`
+
+- **Async streaming and laziness hardening pass (phase execution on runtime paths):**
+  - `crates/snaq-lite-lang/src/vector.rs`:
+    - Added transitive stream-lineage helpers (`StreamLineage`, `stream_lineage()`, `is_forward_only_lineage()`), so wrapped lineages (`Map/Take/ZipMap/Outer/Transpose` over `FromInput`) are classified consistently.
+  - `crates/snaq-lite-lang/src/lib.rs`:
+    - Formatting guards now use transitive lineage detection; forward-only wrapped vectors return `"<stream-vector>"` without consuming the underlying stream.
+    - Added regression test `format_value_for_display_does_not_consume_wrapped_forward_only_lineage`.
+  - `crates/snaq-lite-lang/src/queries.rs`:
+    - Order-stat reducers (`median`, `quantile`) now reject transitive forward-only lineages (not only direct `FromInput`).
+    - Added async stream-helper counterparts (`collect_vector_stream_async` and async helper variants) while retaining compatibility wrappers.
+  - `crates/snaq-lite-lsp/src/result_handle_registry.rs`:
+    - Forward-only handle classification now uses transitive lineage.
+    - `update_handle_value` now recomputes `forward_only` metadata and clears stale continuation state.
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - `subscribeNode` non-consumption guard now covers wrapped forward-only lineages.
+    - `fetchResultSlice` path/cursor checks now use lineage-aware non-replayable detection.
+    - Added fail-closed guard for unsupported forward-only handle shapes (`resultHandle` + wrapped lineage not direct `FromInput`).
+    - Removed request-path explicit `block_on` usage in `resolve_path` by using shared lang stream collection helper.
+  - `crates/snaq-lite-lsp/src/vector_slice.rs`:
+    - Removed local `block_on` collector; slice windowing now routes through lang stream helpers.
+  - `crates/snaq-lite-lsp/tests/lsp_integration.rs`:
+    - Added regression `fetch_result_slice_rejects_random_access_for_wrapped_forward_only_result_handle`.
+  - Verification green:
+    - `cargo test -p snaq-lite-lang`
+    - `cargo test -p snaq-lite-lsp`
+    - `pnpm test`
+    - `pnpm run lint`
+    - `pnpm run build:lsp-wasm`
+
+- **Unified LSP slice/path/fanout execution cleanup (no target-fork in these paths):**
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - Removed native/wasm branch split in `fetch_result_slice` path resolution; both targets now use the same `resolve_path(...)` core path.
+    - Collapsed `resolve_path_blocking` + wrapper into one function (`resolve_path`) to reduce accidental complexity.
+    - Reworked `feed_value_to_senders` to one shared code path (removed `run_local_future`/`send_batch_native` helper split).
+    - Removed `LocalPool` usage from native stream consumer runners (`run_stream_consumer`, `run_stream_consumer_for_widget`) by directly driving the async routine.
+  - `crates/snaq-lite-lsp/src/vector_slice.rs`:
+    - Kept one centralized `collect_vector_slice_window` helper and cleaned comments/flow to match the unified fetch path.
+  - Verification green:
+    - `cargo test -p snaq-lite-lsp --lib`
+    - `cargo test -p snaq-lite-lsp --test lsp_integration`
+    - `cargo test -p snaq-lite-lang`
+    - `pnpm test`
+    - `pnpm run lint`
+
 - **Review-and-improve stabilization pass (LSP runtime cleanup):**
   - `crates/snaq-lite-lsp/src/lib.rs`:
     - Removed incomplete session-cache plumbing from production paths (`SnaqLiteBackend` field, lifecycle cleanup hooks, graph-run parameters/flags, and service wiring).

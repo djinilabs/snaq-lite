@@ -5514,6 +5514,122 @@ async fn fetch_result_slice_rejects_random_access_for_non_replayable_result_hand
 }
 
 #[tokio::test]
+async fn fetch_result_slice_rejects_random_access_for_wrapped_forward_only_result_handle() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/wrapped-nonreplay-src.sl",
+        "[1,2,3,4]",
+        1,
+    )
+    .await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/wrapped-nonreplay-tgt.sl",
+        "input x: Vector\nx.map(fn (v) => (v * 2))",
+        1,
+    )
+    .await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":2104,"method":"snaqlite/graph/connect",
+        "params":{"sourceUri":"snaq://graph/wrapped-nonreplay-src.sl","targetUri":"snaq://graph/wrapped-nonreplay-tgt.sl","targetInputName":"x"}
+    });
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 2104).await;
+
+    let sub_req = serde_json::json!({
+        "jsonrpc":"2.0","id":2105,"method":"snaqlite/subscribeNode",
+        "params":{"sourceUri":"snaq://graph/wrapped-nonreplay-tgt.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&sub_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 2105).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let result_handle = v["result"]["resultHandle"]
+        .as_str()
+        .map(ToString::to_string)
+        .expect("subscribeNode should return resultHandle");
+
+    let fetch = serde_json::json!({
+        "jsonrpc":"2.0","id":2106,"method":"snaqlite/graph/fetchResultSlice",
+        "params":{"resultHandle": result_handle, "path":[],"offset":1,"limit":2}
+    });
+    client_w
+        .write_all(&lsp_message(&fetch.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 2106).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"]["code"].as_i64(), Some(-32602));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("forward-only handle requires cursor for offset > 0"),
+        "expected wrapped forward-only random-access rejection: {v}"
+    );
+
+    let nested_fetch = serde_json::json!({
+        "jsonrpc":"2.0","id":2107,"method":"snaqlite/graph/fetchResultSlice",
+        "params":{"resultHandle": result_handle, "path":[0],"offset":0,"limit":1}
+    });
+    client_w
+        .write_all(&lsp_message(&nested_fetch.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 2107).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"]["code"].as_i64(), Some(-32602));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not support nested paths"),
+        "expected wrapped forward-only nested path rejection: {v}"
+    );
+
+    let first_page = serde_json::json!({
+        "jsonrpc":"2.0","id":2108,"method":"snaqlite/graph/fetchResultSlice",
+        "params":{"resultHandle": result_handle, "path":[],"offset":0,"limit":2}
+    });
+    client_w
+        .write_all(&lsp_message(&first_page.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 2108).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"]["code"].as_i64(), Some(-32602));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("only supported for direct input vectors"),
+        "expected wrapped forward-only shape rejection: {v}"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
 async fn graph_operations_require_snaq_canvas_uris() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);

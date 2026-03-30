@@ -891,6 +891,104 @@ pub fn collect_vector_stream(
     futures::executor::block_on(async move { stream.collect().await })
 }
 
+/// Stream one page window while counting total elements.
+///
+/// This performs single-pass streaming extraction (no full materialization) and can stop
+/// early when `known_total` is available and the requested window has been fully traversed.
+pub fn collect_vector_slice_window_streaming(
+    db: &dyn salsa::Database,
+    v: LazyVector,
+    offset: usize,
+    limit: usize,
+    known_total: Option<u64>,
+) -> (u64, Vec<Result<Option<Value>, RunError>>) {
+    use futures::stream::StreamExt;
+    let end = offset.saturating_add(limit);
+    let mut stream = vector_into_stream(db, v);
+    futures::executor::block_on(async move {
+        let mut total = 0u64;
+        let mut out: Vec<Result<Option<Value>, RunError>> = Vec::with_capacity(limit);
+        while let Some(item) = stream.next().await {
+            let idx = total as usize;
+            if idx >= offset && idx < end {
+                out.push(item);
+            }
+            total += 1;
+            if known_total.is_some() && idx + 1 >= end {
+                break;
+            }
+        }
+        (known_total.unwrap_or(total), out)
+    })
+}
+
+/// Return the first stream item if present.
+///
+/// Used by request-path helpers that need a bounded one-element pull without materializing
+/// the full vector.
+pub fn next_vector_item_streaming(
+    db: &dyn salsa::Database,
+    v: LazyVector,
+) -> Option<Result<Option<Value>, RunError>> {
+    use futures::stream::StreamExt;
+    let mut stream = vector_into_stream(db, v);
+    futures::executor::block_on(async move { stream.next().await })
+}
+
+/// Feed one upstream value to multiple chunk senders.
+///
+/// This keeps deterministic sender iteration and bounded chunk fanout without eager
+/// full-vector materialization.
+pub fn feed_value_to_senders_streaming(
+    value: &Value,
+    db: &dyn salsa::Database,
+    senders: Vec<crate::stream_handle::StreamChunkSender>,
+) {
+    use futures::sink::SinkExt;
+    use futures::stream::StreamExt;
+
+    if senders.is_empty() {
+        return;
+    }
+
+    match value {
+        Value::Vector(v) => {
+            const FANOUT_CHUNK_SIZE: usize = 128;
+            let mut stream = vector_into_stream(db, v.inner.clone());
+            let mut batch: Vec<Result<Option<Value>, RunError>> = Vec::with_capacity(FANOUT_CHUNK_SIZE);
+            loop {
+                let next = futures::executor::block_on(stream.next());
+                match next {
+                    Some(item) => {
+                        batch.push(item);
+                        if batch.len() >= FANOUT_CHUNK_SIZE {
+                            for sender in &senders {
+                                let mut sender = sender.clone();
+                                let _ = futures::executor::block_on(sender.send(batch.clone()));
+                            }
+                            batch.clear();
+                        }
+                    }
+                    None => break,
+                }
+            }
+            if !batch.is_empty() {
+                for sender in &senders {
+                    let mut sender = sender.clone();
+                    let _ = futures::executor::block_on(sender.send(batch.clone()));
+                }
+            }
+        }
+        _ => {
+            let chunk = vec![Ok(Some(value.clone()))];
+            for sender in senders {
+                let mut sender = sender;
+                let _ = futures::executor::block_on(sender.send(chunk.clone()));
+            }
+        }
+    }
+}
+
 fn count_vector_stream(db: &dyn salsa::Database, v: LazyVector) -> usize {
     use futures::stream::StreamExt;
     let mut stream = vector_into_stream(db, v);
@@ -3328,7 +3426,7 @@ fn eval_vector_method_order_stats(
                     "median takes no arguments".to_string(),
                 )));
             }
-            if matches!(inner, LazyVector::FromInput(_)) {
+            if inner.is_forward_only_lineage() {
                 return Err(run_err_with_span(
                     db,
                     expr,
@@ -3358,7 +3456,7 @@ fn eval_vector_method_order_stats(
                 ))
             })?;
             let p = p_q.value();
-            if matches!(inner, LazyVector::FromInput(_)) {
+            if inner.is_forward_only_lineage() {
                 return Err(run_err_with_span(
                     db,
                     expr,

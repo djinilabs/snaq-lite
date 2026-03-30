@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ensureCanvasSession } from './session-orchestrator'
+import {
+  ensureCanvasSession,
+  planEnsureCanvasSessionRequests,
+} from './session-orchestrator'
 import type { LspClient } from './client'
 
 const makeSendRequest = (impl?: (method: string, params?: unknown) => Promise<unknown>) =>
@@ -92,5 +95,46 @@ describe('ensureCanvasSession', () => {
     expect(sendRequestSpy).toHaveBeenCalledWith('snaqlite/graph/resetNamespace', {
       uriPrefix: 'snaq://canvas-a/',
     })
+  })
+})
+
+describe('planEnsureCanvasSessionRequests', () => {
+  const snapshot = {
+    canvasId: 'demo',
+    revision: 1,
+    nodes: [{ uri: 'snaq://demo/a.sl', source: '1 + 1' }],
+    edges: [] as { sourceUri: string; targetUri: string; targetParamId: string }[],
+  }
+
+  it('plans bootstrap + import when canvas matches or server has no canvas', () => {
+    expect(planEnsureCanvasSessionRequests('demo', snapshot, { canvasId: 'demo', runtimeDrained: true })).toEqual([
+      { method: 'snaqlite/bootstrapSession', params: {} },
+      { method: 'snaqlite/graph/importCanvasDocument', params: { canvasDocument: snapshot } },
+    ])
+    expect(planEnsureCanvasSessionRequests('demo', snapshot, { canvasId: undefined, runtimeDrained: true })).toEqual([
+      { method: 'snaqlite/bootstrapSession', params: {} },
+      { method: 'snaqlite/graph/importCanvasDocument', params: { canvasDocument: snapshot } },
+    ])
+  })
+
+  it('plans resetNamespace + import + second bootstrap when switching canvases with live runtime', () => {
+    expect(
+      planEnsureCanvasSessionRequests('other', snapshot, { canvasId: 'demo', runtimeDrained: false }),
+    ).toEqual([
+      { method: 'snaqlite/bootstrapSession', params: {} },
+      { method: 'snaqlite/graph/resetNamespace', params: { uriPrefix: 'snaq://demo/' } },
+      { method: 'snaqlite/graph/importCanvasDocument', params: { canvasDocument: snapshot } },
+      { method: 'snaqlite/bootstrapSession', params: {} },
+    ])
+  })
+
+  it('skips resetNamespace when runtime is already drained', () => {
+    expect(
+      planEnsureCanvasSessionRequests('other', snapshot, { canvasId: 'demo', runtimeDrained: true }),
+    ).toEqual([
+      { method: 'snaqlite/bootstrapSession', params: {} },
+      { method: 'snaqlite/graph/importCanvasDocument', params: { canvasDocument: snapshot } },
+      { method: 'snaqlite/bootstrapSession', params: {} },
+    ])
   })
 })

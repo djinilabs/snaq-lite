@@ -2,6 +2,50 @@
 
 ## Just completed
 
+- **Bridge canvas / WASM LSP gaps (plan):**
+  - `didOpen`/`didChange`: always `force_downstream`; `recompute_and_push(..., emit_signatures)` sends `nodeSignatureUpdated` for every URI in the BFS wave.
+  - `send_node_signature_updated`: uses `NodeResultRegistry` output type when present to avoid a second full graph run (prevents stdio duplex stalls); falls back to `run_node_with_graph_inputs` when needed.
+  - `renameParam` / `applyPatch`: rewrites `$name` for the target param (see unit + integration tests in `snaq-lite-lsp`).
+  - Integration tests: forced downstream + whitespace upstream; `native_incremental_multi_change` fixed (UTF-16 column for `π` digit + drain after `didOpen`); renamed same-output widget test to expect a second `Completed`; Phase 1b: `native_upstream_did_change_emits_node_signature_updated_for_downstream`.
+  - Docs: `docs/LSP.md`, `docs/EXTERNAL_STREAMS.md`; memory: `systemPatterns.md`; frontend: `graph-patch.test.ts` uses `x.sum() * 2` for wired Numeric; `planEnsureCanvasSessionRequests` lives in `session-orchestrator.ts` (Vitest in `session-orchestrator.test.ts`).
+  - Verify: `cargo test -p snaq-lite-lsp`, `pnpm test`, `pnpm run lint`.
+
+- **RuntimeEngine rollout + Send-safe LSP (phased plan):**
+  - `runtime_engine`: native `resolve_path_blocking` / `collect_slice_window_blocking` (same-thread `block_on`); WASM `spawn_local` worker + `RuntimeRequest` queue; graph fanout uses `feed_value_to_senders_streaming` in `run_node_with_graph_inputs_impl` (sync) so tower-lsp futures stay `Send`.
+  - `fetch_result_slice`: native uses blocking helpers; WASM keeps async `RuntimeHandle` methods.
+  - Lang: unified `InputDecl` as vector pipeline on all targets; integration tests/docs use `.sum()` (etc.) for wired numeric inputs.
+  - `tests/wasm_runtime_contract.rs` + `package.json` `test:backend` includes `wasm-pack test --node crates/snaq-lite-lsp`; tokio dev-deps only on native for that crate.
+  - Verify: `cargo test --workspace`, `wasm-pack test --node crates/snaq-lite-lsp`, `cargo clippy --workspace -- -D warnings`, `pnpm run build:lsp-wasm`.
+
+- **WASM-first streaming helper and subscription parity pass (plan execution):**
+  - `crates/snaq-lite-lang/src/queries.rs`:
+    - Added real async helper implementations:
+      - `collect_vector_slice_window_streaming_async`
+      - `next_vector_item_streaming_async`
+      - `feed_value_to_senders_streaming_async`
+    - Kept sync compatibility wrappers and routed helper internals to async implementations.
+    - Added helper regression tests:
+      - `collect_vector_slice_window_streaming_async_matches_sync`
+      - `next_vector_item_streaming_async_returns_first_item`
+      - `feed_value_to_senders_streaming_async_fans_out_scalar`
+      - `feed_value_to_senders_streaming_async_fans_out_vector_without_materializing`
+  - `crates/snaq-lite-lang/src/lib.rs`:
+    - Exported new async streaming helpers alongside sync compatibility APIs.
+  - `crates/snaq-lite-lsp/src/vector_slice.rs`:
+    - Added async slice helper (`collect_vector_slice_window_async`) and retained sync wrapper.
+  - `crates/snaq-lite-lsp/src/lib.rs`:
+    - Unified native/wasm vector subscription publish path through one shared summary publisher (`publish_vector_subscription_payload`).
+    - Removed target-forked subscription branches for vector publish behavior in `subscribeNode` and recompute subscriber refresh path.
+    - Kept graph run/fanout and slice/path execution on sync runtime-safe path due current `tower-lsp` `Send` future constraints with non-`Sync` Salsa DB references.
+  - Verification green:
+    - `cargo test -p snaq-lite-lang`
+    - `cargo test -p snaq-lite-lsp --lib`
+    - `cargo test -p snaq-lite-lsp --test lsp_integration`
+    - `pnpm test`
+    - `pnpm run lint`
+    - `pnpm build`
+    - `pnpm run build:lsp-wasm`
+
 - **Subscription dead-end fix for wrapped forward-only vectors:**
   - `crates/snaq-lite-lsp/src/lib.rs`:
     - Fixed `subscribeNode` native short-circuit policy to apply only to direct `LazyVector::FromInput` roots.

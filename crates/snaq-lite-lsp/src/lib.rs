@@ -10,6 +10,7 @@ pub mod state;
 pub mod subscription;
 pub mod vector_slice;
 pub mod widget_registry;
+pub mod runtime_engine;
 
 #[cfg(target_arch = "wasm32")]
 pub mod stream_host;
@@ -44,6 +45,7 @@ use crate::subscription::SubscriptionRegistry;
 use crate::widget_registry::WidgetRegistry;
 use crate::node_result_registry::NodeResultRegistry;
 use crate::result_handle_registry::ResultHandleRegistry;
+use crate::runtime_engine::RuntimeHandle;
 #[cfg(not(target_arch = "wasm32"))]
 use tower_lsp::Server;
 use tower_lsp::{Client, LanguageServer, LspService};
@@ -103,6 +105,8 @@ pub struct SnaqLiteBackend {
     pub widget_notification_rx: Arc<Mutex<WidgetNotificationReceiver>>,
     pub run_cache: SharedRunCache,
     pub result_handles: SharedResultHandles,
+    /// Single-threaded stream/eval worker (native OS thread or WASM `spawn_local` loop).
+    pub runtime: RuntimeHandle,
 }
 
 #[tower_lsp::async_trait]
@@ -205,13 +209,11 @@ impl LanguageServer for SnaqLiteBackend {
         drop(state);
         self.reconcile_graph_for_uri(&uri).await;
         let revalidated_targets = self.revalidate_related_edge_types(&uri).await;
-        let force_downstream = !revalidated_targets.is_empty();
         let changed_roots = Self::recompute_roots_for_change(&uri, revalidated_targets);
-        self.recompute_and_push(&changed_roots, force_downstream).await;
+        self.recompute_and_push(&changed_roots, true, true).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
         self.publish_diagnostics(uri.clone()).await;
-        self.send_node_signature_updated(&uri).await;
     }
 
     async fn did_change(&self, params: tower_lsp::lsp_types::DidChangeTextDocumentParams) {
@@ -236,13 +238,11 @@ impl LanguageServer for SnaqLiteBackend {
         drop(state);
         self.reconcile_graph_for_uri(&uri).await;
         let revalidated_targets = self.revalidate_related_edge_types(&uri).await;
-        let force_downstream = !revalidated_targets.is_empty();
         let changed_roots = Self::recompute_roots_for_change(&uri, revalidated_targets);
-        self.recompute_and_push(&changed_roots, force_downstream).await;
+        self.recompute_and_push(&changed_roots, true, true).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
         self.publish_diagnostics(uri.clone()).await;
-        self.send_node_signature_updated(&uri).await;
     }
 
     async fn did_close(&self, params: tower_lsp::lsp_types::DidCloseTextDocumentParams) {
@@ -262,7 +262,7 @@ impl LanguageServer for SnaqLiteBackend {
         let changed_roots = self.cleanup_for_closed_uri(&uri).await;
         self.client.publish_diagnostics(uri.clone(), Vec::new(), None).await;
         if !changed_roots.is_empty() {
-            self.recompute_and_push(&changed_roots, true).await;
+            self.recompute_and_push(&changed_roots, true, true).await;
         }
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
@@ -419,15 +419,15 @@ impl LanguageServer for SnaqLiteBackend {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParamRenameSpanKind {
+    Ident,
+    DollarStream,
+}
+
 impl SnaqLiteBackend {
     fn value_has_forward_only_lineage(value: &snaq_lite_lang::Value) -> bool {
         matches!(value, snaq_lite_lang::Value::Vector(v) if v.is_forward_only_lineage())
-    }
-
-    fn should_short_circuit_vector_subscription(inner: &snaq_lite_lang::LazyVector) -> bool {
-        // Only direct input vectors should skip native stream-consumer startup.
-        // Wrapped forward-only lineages (e.g. map over input) must stream normally.
-        matches!(inner, snaq_lite_lang::LazyVector::FromInput(_))
     }
 
     fn recompute_roots_for_change(changed_uri: &Url, revalidated_targets: Vec<Url>) -> Vec<Url> {
@@ -631,8 +631,7 @@ impl SnaqLiteBackend {
             .await;
     }
 
-    #[cfg(target_arch = "wasm32")]
-    async fn publish_wasm_vector_subscription_payload(
+    async fn publish_vector_subscription_payload(
         &self,
         subscription_id: &str,
         uri: &Url,
@@ -995,54 +994,23 @@ impl SnaqLiteBackend {
             match result.clone() {
                 Ok((value, db)) => match value {
                     snaq_lite_lang::Value::Vector(v) => {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            let inner = v.inner.clone();
-                            let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
-                            self.subscriptions
-                                .lock()
-                                .await
-                                .set_cancel_tx(&subscription_id, Some(cancel_tx));
-                            let sid = subscription_id.clone();
-                            let notification_tx = self.notification_tx.clone();
-                            let canvas_id_for_stream = canvas_id.clone();
-                            let uri_for_stream = uri.to_string();
-                            let result_handle_for_stream =
-                                result_handle.map(ToOwned::to_owned);
-                            std::thread::spawn(move || {
-                                run_stream_consumer(
-                                    db,
-                                    inner,
-                                    sid,
-                                    revision,
-                                    canvas_id_for_stream,
-                                    Some(uri_for_stream),
-                                    result_handle_for_stream,
-                                    notification_tx,
-                                    cancel_rx,
-                                );
-                            });
-                        }
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            self.publish_wasm_vector_subscription_payload(
-                                &subscription_id,
-                                &uri,
-                                revision,
-                                canvas_id.clone(),
-                                Self::build_completed_payload(
-                                    &snaq_lite_lang::Value::Vector(v.clone()),
-                                    &db,
-                                    result_handle,
-                                ),
+                        self.publish_vector_subscription_payload(
+                            &subscription_id,
+                            uri,
+                            revision,
+                            canvas_id.clone(),
+                            Self::build_completed_payload(
+                                &snaq_lite_lang::Value::Vector(v.clone()),
+                                &db,
                                 result_handle,
-                            )
-                            .await;
-                            self.subscriptions
-                                .lock()
-                                .await
-                                .set_cancel_tx(&subscription_id, None);
-                        }
+                            ),
+                            result_handle,
+                        )
+                        .await;
+                        self.subscriptions
+                            .lock()
+                            .await
+                            .set_cancel_tx(&subscription_id, None);
                     }
                     _ => {
                         self.publish_scalar_subscription_payload(
@@ -1085,7 +1053,15 @@ impl SnaqLiteBackend {
     /// Descendants are enqueued when:
     /// - a node's semantic fingerprint changed, or
     /// - caller sets `force_downstream` (topology/type-driven wave).
-    async fn recompute_and_push(&self, changed: &[Url], force_downstream: bool) {
+    ///
+    /// When `emit_signatures` is true, sends `nodeSignatureUpdated` for every URI visited in this wave
+    /// (in BFS order), so downstream inferred ports stay in sync after upstream edits.
+    async fn recompute_and_push(
+        &self,
+        changed: &[Url],
+        force_downstream: bool,
+        emit_signatures: bool,
+    ) {
         let docs = {
             let state = self.state.lock().await;
             state.document_uris()
@@ -1093,7 +1069,8 @@ impl SnaqLiteBackend {
         let mut shared_cache = { self.run_cache.lock().await.clone() };
         let mut queue: std::collections::VecDeque<Url> = std::collections::VecDeque::new();
         let mut queued: std::collections::HashSet<Url> = std::collections::HashSet::new();
-        // Seed changed roots; descendants are always enqueued for this mutation wave.
+        let mut wave_uris: Vec<Url> = Vec::new();
+        // Seed changed roots; descendants enqueue when `force_downstream` or upstream semantic fingerprint changes.
         for uri in changed {
             if docs.contains(uri) && queued.insert(uri.clone()) {
                 shared_cache.remove(uri);
@@ -1101,6 +1078,7 @@ impl SnaqLiteBackend {
             }
         }
         while let Some(uri) = queue.pop_front() {
+            wave_uris.push(uri.clone());
             let result = self
                 .run_node_with_graph_inputs_cached(&uri, None, &mut shared_cache)
                 .await;
@@ -1149,21 +1127,21 @@ impl SnaqLiteBackend {
         }
         let mut cache = self.run_cache.lock().await;
         *cache = shared_cache;
+        if emit_signatures {
+            for u in wave_uris {
+                self.send_node_signature_updated(&u).await;
+            }
+        }
     }
 
     /// Send snaqlite/graph/nodeSignatureUpdated for the given URI so the frontend can render ports.
     async fn send_node_signature_updated(&self, uri: &Url) {
-        let (_source, root_def, _unit_registry) = {
+        let root_def = {
             let state = self.state.lock().await;
-            let doc = match state.get_document(uri) {
-                Some(d) => d,
+            match state.get_document(uri) {
+                Some(d) => d.root_def.clone(),
                 None => return,
-            };
-            (
-                doc.source.clone(),
-                doc.root_def.clone(),
-                state.unit_registry().clone(),
-            )
+            }
         };
         let inputs: Vec<NodeInputPort> = root_def
             .as_ref()
@@ -1178,11 +1156,23 @@ impl SnaqLiteBackend {
                     .collect()
             })
             .unwrap_or_default();
-        let output_type = self
-            .run_node_with_graph_inputs(uri, None)
-            .await
-            .ok()
-            .and_then(|(value, _)| snaq_lite_lang::value_type_name(&value));
+        // Prefer the node-result cache from the preceding wave to avoid a second full graph run
+        // (extra work and notification volume; small stdio duplexes can stall in tests).
+        let output_type = {
+            let store = self.node_results.lock().await;
+            store
+                .get(uri)
+                .and_then(|e| e.value.as_ref())
+                .and_then(snaq_lite_lang::value_type_name)
+        };
+        let output_type = match output_type {
+            Some(ot) => Some(ot),
+            None => self
+                .run_node_with_graph_inputs(uri, None)
+                .await
+                .ok()
+                .and_then(|(value, _)| snaq_lite_lang::value_type_name(&value)),
+        };
         let params = NodeSignatureUpdatedParams {
             uri: uri.to_string(),
             inputs,
@@ -1233,73 +1223,23 @@ impl SnaqLiteBackend {
                     .insert(subscription_id.clone(), uri.clone(), version, None);
                 match &value {
                     snaq_lite_lang::Value::Vector(v) => {
-                        let inner = v.inner.clone();
-                        let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
+                        self.publish_vector_subscription_payload(
+                            &subscription_id,
+                            &uri,
+                            Some(revision),
+                            canvas_id.clone(),
+                            Self::build_completed_payload(
+                                &snaq_lite_lang::Value::Vector(v.clone()),
+                                &db,
+                                Some(&result_handle),
+                            ),
+                            Some(&result_handle),
+                        )
+                        .await;
                         self.subscriptions
                             .lock()
                             .await
-                            .set_cancel_tx(&subscription_id, Some(cancel_tx));
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            if Self::should_short_circuit_vector_subscription(&inner) {
-                                let payload = Self::build_completed_payload(
-                                    &snaq_lite_lang::Value::Vector(v.clone()),
-                                    &db,
-                                    Some(&result_handle),
-                                );
-                                self.send_publish_result_notifications(PublishResultParams {
-                                    subscription_id: subscription_id.clone(),
-                                    status: PublishStatus::Completed,
-                                    revision: Some(revision),
-                                    canvas_id: canvas_id.clone(),
-                                    uri: Some(uri.to_string()),
-                                    data: Some(payload),
-                                })
-                                .await;
-                                self.subscriptions
-                                    .lock()
-                                    .await
-                                    .set_cancel_tx(&subscription_id, None);
-                                std::mem::drop(cancel_rx);
-                            } else {
-                                let sid = subscription_id.clone();
-                                let notification_tx = self.notification_tx.clone();
-                                let canvas_id_for_stream = canvas_id.clone();
-                                let uri_for_stream = uri.to_string();
-                                let result_handle_for_stream = result_handle.clone();
-                                std::thread::spawn(move || {
-                                    run_stream_consumer(
-                                        db,
-                                        inner,
-                                        sid,
-                                        Some(revision),
-                                        canvas_id_for_stream,
-                                        Some(uri_for_stream),
-                                        Some(result_handle_for_stream),
-                                        notification_tx,
-                                        cancel_rx,
-                                    );
-                                });
-                            }
-                        }
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            let _ = cancel_rx;
-                            let _ = inner;
-                            self.publish_wasm_vector_subscription_payload(
-                                &subscription_id,
-                                &uri,
-                                Some(revision),
-                                canvas_id.clone(),
-                                Self::build_completed_payload(
-                                    &snaq_lite_lang::Value::Vector(v.clone()),
-                                    &db,
-                                    Some(&result_handle),
-                                ),
-                                Some(&result_handle),
-                            )
-                            .await;
-                        }
+                            .set_cancel_tx(&subscription_id, None);
                     }
                     _ => {
                         self.publish_scalar_subscription_payload(
@@ -1411,11 +1351,11 @@ impl SnaqLiteBackend {
             let mut graph = self.graph_state.lock().await;
             graph.connect(source_uri.clone(), target_uri.clone(), target_param_id);
         }
-        self.recompute_and_push(std::slice::from_ref(&target_uri), true).await;
+        self.recompute_and_push(std::slice::from_ref(&target_uri), true, true).await;
         self.drain_widget_notifications().await;
         self.drain_notifications().await;
+        // Source is not in the downstream recompute wave from `target_uri`; refresh its signature for clients.
         self.send_node_signature_updated(&source_uri).await;
-        self.send_node_signature_updated(&target_uri).await;
         Ok(())
     }
 
@@ -1444,10 +1384,9 @@ impl SnaqLiteBackend {
             let mut graph = self.graph_state.lock().await;
             graph.disconnect(&target_uri, &target_param_id);
         }
-        self.recompute_and_push(std::slice::from_ref(&target_uri), true).await;
+        self.recompute_and_push(std::slice::from_ref(&target_uri), true, true).await;
         self.drain_widget_notifications().await;
         self.drain_notifications().await;
-        self.send_node_signature_updated(&target_uri).await;
         Ok(())
     }
 
@@ -1487,32 +1426,12 @@ impl SnaqLiteBackend {
         out
     }
 
-    fn replace_identifier_spans(
-        source: &str,
-        spans: &[snaq_lite_lang::Span],
-        replacement: &str,
-    ) -> String {
-        let mut ordered = spans.to_vec();
-        ordered.sort_by(|a, b| b.start.cmp(&a.start).then_with(|| b.end.cmp(&a.end)));
-        let mut out = source.to_string();
-        for span in ordered {
-            if span.start >= span.end || span.end > out.len() {
-                continue;
-            }
-            if !out.is_char_boundary(span.start) || !out.is_char_boundary(span.end) {
-                continue;
-            }
-            out.replace_range(span.start..span.end, replacement);
-        }
-        out
-    }
-
-    fn collect_param_symbol_rename_spans(
+    fn collect_param_rename_edits(
         source: &str,
         target_param_id: &str,
         old_name: &str,
         unit_registry: &snaq_lite_lang::UnitRegistry,
-    ) -> tower_lsp::jsonrpc::Result<Vec<snaq_lite_lang::Span>> {
+    ) -> tower_lsp::jsonrpc::Result<Vec<(snaq_lite_lang::Span, ParamRenameSpanKind)>> {
         use snaq_lite_lang::ir::{SpannedCallArg, SpannedExprDef, SpannedExprDefKind};
 
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1532,7 +1451,7 @@ impl SnaqLiteBackend {
             expr: &SpannedExprDef,
             old_name: &str,
             scopes: &mut Vec<std::collections::HashMap<String, BindingOrigin>>,
-            out: &mut Vec<snaq_lite_lang::Span>,
+            out: &mut Vec<(snaq_lite_lang::Span, ParamRenameSpanKind)>,
             target_param_id: &str,
         ) {
             match &expr.value {
@@ -1540,7 +1459,14 @@ impl SnaqLiteBackend {
                     if name == old_name
                         && matches!(current_binding(scopes, old_name), Some(BindingOrigin::TargetParam))
                     {
-                        out.push(expr.span);
+                        out.push((expr.span, ParamRenameSpanKind::Ident));
+                    }
+                }
+                SpannedExprDefKind::ExternalStream(name) => {
+                    if name == old_name
+                        && matches!(current_binding(scopes, old_name), Some(BindingOrigin::TargetParam))
+                    {
+                        out.push((expr.span, ParamRenameSpanKind::DollarStream));
                     }
                 }
                 SpannedExprDefKind::Add(l, r)
@@ -1643,8 +1569,7 @@ impl SnaqLiteBackend {
                 | SpannedExprDefKind::Lit(_)
                 | SpannedExprDefKind::LitFuzzyBool(_)
                 | SpannedExprDefKind::LitTemporal(_)
-                | SpannedExprDefKind::LitDate(_)
-                | SpannedExprDefKind::ExternalStream(_) => {}
+                | SpannedExprDefKind::LitDate(_) => {}
             }
         }
 
@@ -1656,6 +1581,36 @@ impl SnaqLiteBackend {
         let mut out = Vec::new();
         visit_expr(&resolved, old_name, &mut scopes, &mut out, target_param_id);
         Ok(out)
+    }
+
+    fn apply_param_rename_edits(
+        source: &str,
+        edits: &[(snaq_lite_lang::Span, ParamRenameSpanKind)],
+        trimmed_new_name: &str,
+    ) -> String {
+        let mut ordered: Vec<(snaq_lite_lang::Span, ParamRenameSpanKind)> = edits.to_vec();
+        ordered.sort_by(|a, b| {
+            b.0.start
+                .cmp(&a.0.start)
+                .then_with(|| b.0.end.cmp(&a.0.end))
+        });
+        let mut out = source.to_string();
+        for (span, kind) in ordered {
+            if span.start >= span.end || span.end > out.len() {
+                continue;
+            }
+            if !out.is_char_boundary(span.start) || !out.is_char_boundary(span.end) {
+                continue;
+            }
+            match kind {
+                ParamRenameSpanKind::Ident => out.replace_range(span.start..span.end, trimmed_new_name),
+                ParamRenameSpanKind::DollarStream => {
+                    let replacement = format!("${trimmed_new_name}");
+                    out.replace_range(span.start..span.end, &replacement);
+                }
+            }
+        }
+        out
     }
 
     fn compute_rename_param_source(
@@ -1682,13 +1637,14 @@ impl SnaqLiteBackend {
                 "paramId not found",
             ));
         };
-        let rename_spans = Self::collect_param_symbol_rename_spans(
+        let edits = Self::collect_param_rename_edits(
             source,
             found_param_id,
             old_name,
             unit_registry,
         )?;
-        let symbols_updated = Self::replace_identifier_spans(source, &rename_spans, trimmed_new_name);
+        let symbols_updated =
+            Self::apply_param_rename_edits(source, &edits, trimmed_new_name);
         let new_decl = format!("input {}@{}: {}", trimmed_new_name, found_param_id, ty);
         Ok(Self::replace_span(&symbols_updated, *span, &new_decl))
     }
@@ -1863,11 +1819,10 @@ impl SnaqLiteBackend {
         let revalidated_targets = self.revalidate_related_edge_types(uri).await;
         let force_downstream = true;
         let changed_roots = Self::recompute_roots_for_change(uri, revalidated_targets);
-        self.recompute_and_push(&changed_roots, force_downstream).await;
+        self.recompute_and_push(&changed_roots, force_downstream, true).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
         self.publish_diagnostics(uri.clone()).await;
-        self.send_node_signature_updated(uri).await;
         Ok(())
     }
 
@@ -2274,15 +2229,11 @@ impl SnaqLiteBackend {
             let mut state = self.state.lock().await;
             let _ = state.bump_canvas_revision();
         }
-        self.recompute_and_push(&changed_roots_vec, force_downstream).await;
+        self.recompute_and_push(&changed_roots_vec, force_downstream, true).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
         for uri in &changed_sources {
             self.publish_diagnostics(uri.clone()).await;
-            self.send_node_signature_updated(uri).await;
-        }
-        for uri in &changed_roots {
-            self.send_node_signature_updated(uri).await;
         }
 
         let mut affected_uris: Vec<String> = changed_roots.into_iter().map(|u| u.to_string()).collect();
@@ -2395,7 +2346,7 @@ impl SnaqLiteBackend {
             self.client.publish_diagnostics(uri.clone(), Vec::new(), None).await;
         }
         if !impacted_descendants.is_empty() {
-            self.recompute_and_push(&impacted_descendants, true).await;
+            self.recompute_and_push(&impacted_descendants, true, true).await;
         }
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
@@ -2526,9 +2477,8 @@ impl SnaqLiteBackend {
         let uris: Vec<Url> = node_entries.iter().map(|(u, _, _)| u.clone()).collect();
         for uri in &uris {
             self.publish_diagnostics(uri.clone()).await;
-            self.send_node_signature_updated(uri).await;
         }
-        self.recompute_and_push(&uris, true).await;
+        self.recompute_and_push(&uris, true, true).await;
         self.drain_notifications().await;
         self.drain_widget_notifications().await;
         Ok(ImportCanvasDocumentResponse {
@@ -2626,41 +2576,6 @@ impl SnaqLiteBackend {
             obj.insert("resultHandle".to_string(), serde_json::json!(handle));
         }
         serde_json::Value::Object(obj.clone())
-    }
-
-    /// Resolve path segments to a sub-value. Empty path returns Some(value). Returns None if path is invalid.
-    ///
-    /// This stays on the current runtime thread because vector path traversal can execute deferred
-    /// vector elements (including user-map closures), and closure environments are thread-local.
-    fn resolve_path(
-        value: &snaq_lite_lang::Value,
-        path: &[PathSegment],
-        db: &salsa::DatabaseImpl,
-    ) -> Option<snaq_lite_lang::Value> {
-        use crate::pubsub::PathSegment;
-        use snaq_lite_lang::map_registry;
-        let mut current = value.clone();
-        for segment in path {
-            current = match (&current, segment) {
-                (snaq_lite_lang::Value::Vector(v), PathSegment::Index(i)) => {
-                    let idx = *i as usize;
-                    let slice = snaq_lite_lang::LazyVector::Take {
-                        source: Box::new(v.inner.clone()),
-                        start: idx,
-                        length: 1,
-                    };
-                    match snaq_lite_lang::next_vector_item_streaming(db, slice) {
-                        Some(Ok(Some(val))) => val,
-                        _ => return None,
-                    }
-                }
-                (snaq_lite_lang::Value::Map(id), PathSegment::Key(k)) => {
-                    map_registry::get_key(*id, k)?.clone()
-                }
-                _ => return None,
-            };
-        }
-        Some(current)
     }
 
     /// Handle snaqlite/graph/subscribeWidget: run source node (with graph inputs when wired), cache result and send Completed with summary.
@@ -2824,16 +2739,37 @@ impl SnaqLiteBackend {
                 PathSegment::Key(k) => serde_json::json!(k),
             })
             .collect();
-        let db_for_slice_work = {
+        let (db_for_slice_work, unit_registry) = {
             let state = self.state.lock().await;
-            state.db().clone()
+            (state.db().clone(), state.unit_registry().clone())
         };
 
         let (elements, total_count, supports_cursor, explicit_has_more) = {
-            let sub_value = Self::resolve_path(&value, &path_segments, &db_for_slice_work)
-                .ok_or_else(|| {
-                    tower_lsp::jsonrpc::Error::invalid_params("Invalid path or value not found")
-                })?;
+            let sub_value = {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.runtime
+                        .resolve_path(
+                            value.clone(),
+                            path_segments.clone(),
+                            db_for_slice_work.clone(),
+                            unit_registry.clone(),
+                        )
+                        .await
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    crate::runtime_engine::resolve_path_blocking(
+                        &value,
+                        &path_segments,
+                        &db_for_slice_work,
+                        unit_registry.clone(),
+                    )
+                }
+            }
+            .ok_or_else(|| {
+                tower_lsp::jsonrpc::Error::invalid_params("Invalid path or value not found")
+            })?;
 
             let (elements, total_count, supports_cursor, explicit_has_more) = match sub_value {
                 snaq_lite_lang::Value::Vector(v) => {
@@ -2870,15 +2806,30 @@ impl SnaqLiteBackend {
                             (page.total_count, page.items, Some(page.has_more))
                         }
                         inner => {
-                            // Stream once to compute both total count and requested window.
-                            // Intentionally evaluated on the current runtime thread: deferred
-                            // vector elements can depend on thread-local evaluation/closure state.
-                            let (total_count, slice_vec) = vector_slice::collect_vector_slice_window(
-                                &db_for_slice_work,
-                                inner,
-                                offset,
-                                limit,
-                            );
+                            let (total_count, slice_vec) = {
+                                #[cfg(target_arch = "wasm32")]
+                                {
+                                    self.runtime
+                                        .collect_slice_window(
+                                            db_for_slice_work.clone(),
+                                            inner,
+                                            offset,
+                                            limit,
+                                            unit_registry.clone(),
+                                        )
+                                        .await
+                                }
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    crate::runtime_engine::collect_slice_window_blocking(
+                                        db_for_slice_work.clone(),
+                                        inner,
+                                        offset,
+                                        limit,
+                                        unit_registry.clone(),
+                                    )
+                                }
+                            };
                             (total_count, slice_vec, None)
                         }
                     };
@@ -3152,12 +3103,11 @@ fn run_node_with_graph_inputs_impl(
                 .or_default()
                 .push(sender);
         }
-        for (source_uri, senders) in senders_by_source {
-            let Some((value, db)) = output_values.get(&source_uri) else {
-                continue;
-            };
-            feed_value_to_senders(value, db, senders);
-        }
+        crate::runtime_engine::feed_fanout_batch_blocking(
+            unit_registry.clone(),
+            senders_by_source,
+            &output_values,
+        );
         let (value, db) = if projection.parse_succeeded {
             if let Some(root_def) = projection.root_def.clone() {
                 if root_def_is_resolved(&root_def) {
@@ -3280,234 +3230,9 @@ fn root_def_is_resolved(def: &snaq_lite_lang::ExprDef) -> bool {
     }
 }
 
-/// Feed one upstream value to multiple Chunk senders (one handle per edge when one source feeds multiple inputs).
-fn feed_value_to_senders(
-    value: &snaq_lite_lang::Value,
-    db: &salsa::DatabaseImpl,
-    senders: Vec<snaq_lite_lang::StreamChunkSender>,
-) {
-    snaq_lite_lang::feed_value_to_senders_streaming(value, db, senders);
-}
-
-/// Native: run the stream in a blocking thread and send batches via notification_tx.
-/// Creates the stream inside the async block so it borrows db correctly.
-/// Exits on stream end (sends Completed) or when cancel_rx fires (no final notification).
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)]
-fn run_stream_consumer(
-    db: salsa::DatabaseImpl,
-    inner: snaq_lite_lang::LazyVector,
-    subscription_id: String,
-    revision: Option<u64>,
-    canvas_id: Option<String>,
-    uri: Option<String>,
-    result_handle: Option<String>,
-    notification_tx: NotificationSender,
-    cancel_rx: futures::channel::oneshot::Receiver<()>,
-) {
-    use futures::future::{select, Either};
-    use futures::stream::StreamExt;
-    const BATCH_SIZE: usize = 100;
-    let run = async move {
-        let mut stream = snaq_lite_lang::vector_into_stream(&db, inner);
-        let mut batch: Vec<serde_json::Value> = Vec::with_capacity(BATCH_SIZE);
-        let mut offset: u64 = 0;
-        let mut total: u64 = 0;
-        let mut stream_next = stream.next();
-        let mut cancel_rx = cancel_rx;
-        loop {
-            match select(stream_next, cancel_rx).await {
-                Either::Left((opt, cr)) => {
-                    cancel_rx = cr;
-                    match opt {
-                        Some(item) => {
-                            let json = crate::pubsub::stream_element_to_json(&db, &item);
-                            batch.push(json);
-                            total += 1;
-                            if batch.len() >= BATCH_SIZE {
-                                let data = if let Some(handle) = &result_handle {
-                                    serde_json::json!({
-                                        "elements": batch.clone(),
-                                        "offset": offset,
-                                        "count": batch.len(),
-                                        "resultHandle": handle
-                                    })
-                                } else {
-                                    serde_json::json!({
-                                    "elements": batch.clone(),
-                                    "offset": offset,
-                                    "count": batch.len()
-                                    })
-                                };
-                                let _ = notification_tx.unbounded_send((
-                                    subscription_id.clone(),
-                                    PublishResultParams {
-                                        subscription_id: subscription_id.clone(),
-                                        status: PublishStatus::Running,
-                                        revision,
-                                        canvas_id: canvas_id.clone(),
-                                        uri: uri.clone(),
-                                        data: Some(data),
-                                    },
-                                ));
-                                offset += batch.len() as u64;
-                                batch.clear();
-                            }
-                            stream_next = stream.next();
-                        }
-                        None => break,
-                    }
-                }
-                Either::Right(_) => {
-                    // Cancelled: exit without sending Completed
-                    return;
-                }
-            }
-        }
-        if !batch.is_empty() {
-            let data = if let Some(handle) = &result_handle {
-                serde_json::json!({
-                    "elements": batch,
-                    "offset": offset,
-                    "count": batch.len(),
-                    "resultHandle": handle
-                })
-            } else {
-                serde_json::json!({
-                    "elements": batch,
-                    "offset": offset,
-                    "count": batch.len()
-                })
-            };
-            let _ = notification_tx.unbounded_send((
-                subscription_id.clone(),
-                PublishResultParams {
-                    subscription_id: subscription_id.clone(),
-                    status: PublishStatus::Running,
-                    revision,
-                    canvas_id: canvas_id.clone(),
-                    uri: uri.clone(),
-                    data: Some(data),
-                },
-            ));
-        }
-        let sid = subscription_id.clone();
-        let completed_data = if let Some(handle) = result_handle {
-            serde_json::json!({ "totalElements": total, "resultHandle": handle })
-        } else {
-            serde_json::json!({ "totalElements": total })
-        };
-        let _ = notification_tx.unbounded_send((
-            subscription_id,
-            PublishResultParams {
-                subscription_id: sid,
-                status: PublishStatus::Completed,
-                revision,
-                canvas_id,
-                uri,
-                data: Some(completed_data),
-            },
-        ));
-    };
-    futures::executor::block_on(run);
-}
-
-/// Native: run the stream for a widget and send WidgetDataUpdate notifications.
-/// Kept for potential backward compatibility; current flow uses cached value + fetchResultSlice.
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(dead_code)]
-fn run_stream_consumer_for_widget(
-    db: salsa::DatabaseImpl,
-    inner: snaq_lite_lang::LazyVector,
-    widget_id: String,
-    widget_tx: WidgetNotificationSender,
-    cancel_rx: futures::channel::oneshot::Receiver<()>,
-) {
-    use futures::future::{select, Either};
-    use futures::stream::StreamExt;
-    const BATCH_SIZE: usize = 100;
-    let run = async move {
-        let mut stream = snaq_lite_lang::vector_into_stream(&db, inner);
-        let mut batch: Vec<serde_json::Value> = Vec::with_capacity(BATCH_SIZE);
-        let mut offset: u64 = 0;
-        let mut total: u64 = 0;
-        let mut single_display: Option<String> = None;
-        let mut stream_next = stream.next();
-        let mut cancel_rx = cancel_rx;
-        loop {
-            match select(stream_next, cancel_rx).await {
-                Either::Left((opt, cr)) => {
-                    cancel_rx = cr;
-                    match opt {
-                        Some(item) => {
-                            let json = crate::pubsub::stream_element_to_json(&db, &item);
-                            if total == 0 {
-                                single_display = json
-                                    .get("display")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from);
-                            }
-                            batch.push(json);
-                            total += 1;
-                            if batch.len() >= BATCH_SIZE {
-                                let _ = widget_tx.unbounded_send(WidgetDataUpdateParams {
-                                    widget_id: widget_id.clone(),
-                                    status: WidgetDataStatus::Running,
-                                    revision: None,
-                                    canvas_id: None,
-                                    uri: None,
-                                    payload: Some(serde_json::json!({
-                                        "elements": batch.clone(),
-                                        "offset": offset,
-                                        "count": batch.len()
-                                    })),
-                                });
-                                offset += batch.len() as u64;
-                                batch.clear();
-                            }
-                            stream_next = stream.next();
-                        }
-                        None => break,
-                    }
-                }
-                Either::Right(_) => return,
-            }
-        }
-        if !batch.is_empty() {
-            let _ = widget_tx.unbounded_send(WidgetDataUpdateParams {
-                widget_id: widget_id.clone(),
-                status: WidgetDataStatus::Running,
-                revision: None,
-                canvas_id: None,
-                uri: None,
-                payload: Some(serde_json::json!({
-                    "elements": batch,
-                    "offset": offset,
-                    "count": batch.len()
-                })),
-            });
-        }
-        let completed_payload = if total == 1 {
-            single_display
-                .map(|d| serde_json::json!({ "display": d, "totalElements": 1 }))
-                .unwrap_or_else(|| serde_json::json!({ "totalElements": 1 }))
-        } else {
-            serde_json::json!({ "totalElements": total })
-        };
-        let _ = widget_tx.unbounded_send(WidgetDataUpdateParams {
-            widget_id,
-            status: WidgetDataStatus::Completed,
-            revision: None,
-            canvas_id: None,
-            uri: None,
-            payload: Some(completed_payload),
-        });
-    };
-    futures::executor::block_on(run);
-}
-
 /// Build the LSP service (same for native and WASM).
 pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSocket) {
+    let runtime = crate::runtime_engine::RuntimeEngine::spawn();
     let state: SharedState = Arc::new(Mutex::new(LspState::new()));
     let subscriptions: SharedSubscriptions = Arc::new(Mutex::new(SubscriptionRegistry::new()));
     let graph_state: SharedGraphState = Arc::new(Mutex::new(graph::GraphState::new()));
@@ -3517,6 +3242,7 @@ pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSo
     let result_handles: SharedResultHandles = Arc::new(Mutex::new(ResultHandleRegistry::new()));
     let (notification_tx, notification_rx) = futures::channel::mpsc::unbounded();
     let (widget_notification_tx, widget_notification_rx) = futures::channel::mpsc::unbounded();
+    let runtime_for_service = runtime.clone();
     let (service, socket) = LspService::build(move |client| SnaqLiteBackend {
         client,
         state: Arc::clone(&state),
@@ -3530,6 +3256,7 @@ pub fn create_lsp_service() -> (LspService<SnaqLiteBackend>, tower_lsp::ClientSo
         widget_notification_rx: Arc::new(Mutex::new(widget_notification_rx)),
         run_cache: Arc::clone(&run_cache),
         result_handles: Arc::clone(&result_handles),
+        runtime: runtime_for_service.clone(),
     })
     .custom_method("snaqlite/subscribeNode", SnaqLiteBackend::subscribe_node)
     .custom_method("snaqlite/unsubscribeNode", SnaqLiteBackend::unsubscribe_node)
@@ -3604,10 +3331,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn block_on_test<F: std::future::Future>(future: F) -> F::Output {
-        futures::executor::block_on(future)
-    }
     use tower_lsp::lsp_types::Url;
 
     // ---- span_to_range ----
@@ -3803,8 +3526,9 @@ mod tests {
         assert!(root_def_is_resolved(&resolved));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn fetch_result_slice_async_window_collection_equivalent() {
+    fn fetch_result_slice_window_collection_equivalent() {
         let (value, db) = snaq_lite_lang::run_with_stream_inputs(
             "[1, sqrt(-1)]",
             &snaq_lite_lang::default_si_registry(),
@@ -3815,7 +3539,13 @@ mod tests {
             snaq_lite_lang::Value::Vector(v) => v.inner,
             _ => panic!("expected vector"),
         };
-        let (total, slice) = vector_slice::collect_vector_slice_window(&db, inner, 0, 1);
+        let (total, slice) = crate::runtime_engine::collect_slice_window_blocking(
+            db,
+            inner,
+            0,
+            1,
+            snaq_lite_lang::default_si_registry(),
+        );
         assert_eq!(total, 2);
         assert_eq!(slice.len(), 1);
         assert!(matches!(
@@ -3824,6 +3554,7 @@ mod tests {
         ));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn resolve_path_returns_vector_index_element() {
         let (value, db) = snaq_lite_lang::run_with_stream_inputs(
@@ -3832,31 +3563,17 @@ mod tests {
             std::collections::HashMap::new(),
         )
         .unwrap();
-        let resolved = SnaqLiteBackend::resolve_path(
+        let resolved = crate::runtime_engine::resolve_path_blocking(
             &value,
             &[PathSegment::Index(1)],
             &db,
-        );
+            snaq_lite_lang::default_si_registry(),
+        )
+        .expect("resolve path");
         assert!(matches!(
             resolved,
-            Some(snaq_lite_lang::Value::Numeric(q)) if (q.value() - 20.0).abs() < 1e-10
+            snaq_lite_lang::Value::Numeric(q) if (q.value() - 20.0).abs() < 1e-10
         ));
-    }
-
-    #[test]
-    fn subscribe_short_circuit_applies_only_to_direct_input_vector() {
-        let (id, _sender) = snaq_lite_lang::create_stream_input();
-        let direct = snaq_lite_lang::LazyVector::FromInput(id);
-        assert!(SnaqLiteBackend::should_short_circuit_vector_subscription(&direct));
-
-        let wrapped = snaq_lite_lang::LazyVector::Map {
-            source: Box::new(snaq_lite_lang::LazyVector::FromInput(id)),
-            op: snaq_lite_lang::vector::VectorMapOp::Neg,
-        };
-        assert!(
-            !SnaqLiteBackend::should_short_circuit_vector_subscription(&wrapped),
-            "wrapped forward-only vectors must stream on initial subscription"
-        );
     }
 
     // ---- state (LspState) ----
@@ -4026,68 +3743,6 @@ mod tests {
             display.contains("3"),
             "display should show result: {}",
             display
-        );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn run_stream_consumer_propagates_metadata_fields() {
-        use futures::stream::StreamExt;
-        let (value, db) = snaq_lite_lang::run_with_stream_inputs(
-            "[1, 2, 3]",
-            &snaq_lite_lang::default_si_registry(),
-            std::collections::HashMap::new(),
-        )
-        .expect("vector run");
-        let snaq_lite_lang::Value::Vector(v) = value else {
-            panic!("expected vector value");
-        };
-        let (tx, mut rx) = futures::channel::mpsc::unbounded::<(String, PublishResultParams)>();
-        let (_cancel_tx, cancel_rx) = futures::channel::oneshot::channel::<()>();
-        run_stream_consumer(
-            db,
-            v.inner,
-            "sub-1".to_string(),
-            Some(7),
-            Some("canvas-a".to_string()),
-            Some("snaq://canvas-a/node.sl".to_string()),
-            Some("handle-1".to_string()),
-            tx,
-            cancel_rx,
-        );
-
-        let messages = block_on_test(async move {
-            let mut out = Vec::new();
-            while let Some((_, params)) = rx.next().await {
-                let is_completed = matches!(params.status, PublishStatus::Completed);
-                out.push(params);
-                if is_completed {
-                    break;
-                }
-            }
-            out
-        });
-        assert!(!messages.is_empty(), "stream consumer should emit notifications");
-        for params in &messages {
-            assert_eq!(params.revision, Some(7));
-            assert_eq!(params.canvas_id.as_deref(), Some("canvas-a"));
-            assert_eq!(params.uri.as_deref(), Some("snaq://canvas-a/node.sl"));
-            if let Some(data) = &params.data {
-                assert_eq!(data["resultHandle"].as_str(), Some("handle-1"));
-            }
-        }
-        let completed = messages
-            .iter()
-            .find(|p| matches!(p.status, PublishStatus::Completed))
-            .expect("completed payload");
-        let completed_data = completed.data.as_ref().expect("completed data");
-        assert!(
-            completed_data.get("display").is_none(),
-            "vector completion payload must not include eager display"
-        );
-        assert!(
-            completed_data.get("totalElements").is_some(),
-            "vector completion payload should include element count"
         );
     }
 
@@ -4524,5 +4179,57 @@ mod tests {
             PublishStatus::Completed => {}
             _ => panic!("round-trip should preserve Completed"),
         }
+    }
+
+    #[test]
+    fn param_rename_dollar_stream_span_covers_dollar_and_name() {
+        let reg = snaq_lite_lang::default_si_registry();
+        let source = "input x@p1: Numeric\n$x.sum()";
+        let edits = SnaqLiteBackend::collect_param_rename_edits(source, "p1", "x", &reg).unwrap();
+        let dollar: Vec<_> = edits
+            .iter()
+            .filter(|(_, k)| *k == crate::ParamRenameSpanKind::DollarStream)
+            .collect();
+        assert_eq!(dollar.len(), 1, "expected one $x span, got {:?}", edits);
+        let (sp, _) = dollar[0];
+        assert_eq!(&source[sp.start..sp.end], "$x");
+    }
+
+    #[test]
+    fn compute_rename_param_source_rewrites_dollar_stream_access() {
+        let reg = snaq_lite_lang::default_si_registry();
+        let out = SnaqLiteBackend::compute_rename_param_source(
+            "input x@p1: Numeric\n$x.sum()",
+            "p1",
+            "revenue",
+            &reg,
+        )
+        .unwrap();
+        assert!(out.contains("input revenue@p1"));
+        assert!(out.contains("$revenue.sum()"), "got:\n{out}");
+        assert!(!out.contains("$x"));
+    }
+
+    #[test]
+    fn compute_rename_param_source_respects_lambda_param_shadowing_dollar_stream() {
+        let reg = snaq_lite_lang::default_si_registry();
+        // Outer graph input `x@p1`; lambda parameter `x` shadows the name for `$x` inside the body.
+        let source = concat!(
+            "input x@p1: Numeric\n",
+            "input y@p2: Numeric\n",
+            "fn f(x) => ($x.sum())\n",
+            "$x.sum()",
+        );
+        let out = SnaqLiteBackend::compute_rename_param_source(source, "p1", "zordan", &reg).unwrap();
+        assert!(out.contains("input zordan@p1"));
+        assert!(out.contains("input y@p2"));
+        assert!(
+            out.contains("fn f(x) => ($x.sum())"),
+            "lambda body $x must not rename to $zordan; got:\n{out}"
+        );
+        assert!(
+            out.contains("$zordan.sum()"),
+            "outer $x should become $zordan; got:\n{out}"
+        );
     }
 }

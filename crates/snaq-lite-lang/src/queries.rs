@@ -7,8 +7,6 @@
 use crate::error::{RunError, RunErrorKind, Span};
 use crate::functions;
 use crate::ir::{CallArg, ExprData, ExprDef, Expression, ProgramDef, SpannedExprDef, SpannedExprDefKind, StreamInputRegistry};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::stream_handle::create_stream_input;
 use crate::stream_handle::{take_receiver, ChunkFlattenStream};
 use crate::map_registry;
 use crate::scope::{closure_env_get, closure_env_register, Env, Scope, StoredValue};
@@ -895,7 +893,7 @@ pub fn collect_vector_stream(
 ///
 /// This performs single-pass streaming extraction (no full materialization) and can stop
 /// early when `known_total` is available and the requested window has been fully traversed.
-pub fn collect_vector_slice_window_streaming(
+pub async fn collect_vector_slice_window_streaming_async(
     db: &dyn salsa::Database,
     v: LazyVector,
     offset: usize,
@@ -905,41 +903,58 @@ pub fn collect_vector_slice_window_streaming(
     use futures::stream::StreamExt;
     let end = offset.saturating_add(limit);
     let mut stream = vector_into_stream(db, v);
-    futures::executor::block_on(async move {
-        let mut total = 0u64;
-        let mut out: Vec<Result<Option<Value>, RunError>> = Vec::with_capacity(limit);
-        while let Some(item) = stream.next().await {
-            let idx = total as usize;
-            if idx >= offset && idx < end {
-                out.push(item);
-            }
-            total += 1;
-            if known_total.is_some() && idx + 1 >= end {
-                break;
-            }
+    let mut total = 0u64;
+    let mut out: Vec<Result<Option<Value>, RunError>> = Vec::with_capacity(limit);
+    while let Some(item) = stream.next().await {
+        let idx = total as usize;
+        if idx >= offset && idx < end {
+            out.push(item);
         }
-        (known_total.unwrap_or(total), out)
-    })
+        total += 1;
+        if known_total.is_some() && idx + 1 >= end {
+            break;
+        }
+    }
+    (known_total.unwrap_or(total), out)
+}
+
+pub fn collect_vector_slice_window_streaming(
+    db: &dyn salsa::Database,
+    v: LazyVector,
+    offset: usize,
+    limit: usize,
+    known_total: Option<u64>,
+) -> (u64, Vec<Result<Option<Value>, RunError>>) {
+    futures::executor::block_on(collect_vector_slice_window_streaming_async(
+        db, v, offset, limit, known_total,
+    ))
 }
 
 /// Return the first stream item if present.
 ///
 /// Used by request-path helpers that need a bounded one-element pull without materializing
 /// the full vector.
-pub fn next_vector_item_streaming(
+pub async fn next_vector_item_streaming_async(
     db: &dyn salsa::Database,
     v: LazyVector,
 ) -> Option<Result<Option<Value>, RunError>> {
     use futures::stream::StreamExt;
     let mut stream = vector_into_stream(db, v);
-    futures::executor::block_on(async move { stream.next().await })
+    stream.next().await
+}
+
+pub fn next_vector_item_streaming(
+    db: &dyn salsa::Database,
+    v: LazyVector,
+) -> Option<Result<Option<Value>, RunError>> {
+    futures::executor::block_on(next_vector_item_streaming_async(db, v))
 }
 
 /// Feed one upstream value to multiple chunk senders.
 ///
 /// This keeps deterministic sender iteration and bounded chunk fanout without eager
 /// full-vector materialization.
-pub fn feed_value_to_senders_streaming(
+pub async fn feed_value_to_senders_streaming_async(
     value: &Value,
     db: &dyn salsa::Database,
     senders: Vec<crate::stream_handle::StreamChunkSender>,
@@ -957,14 +972,14 @@ pub fn feed_value_to_senders_streaming(
             let mut stream = vector_into_stream(db, v.inner.clone());
             let mut batch: Vec<Result<Option<Value>, RunError>> = Vec::with_capacity(FANOUT_CHUNK_SIZE);
             loop {
-                let next = futures::executor::block_on(stream.next());
+                let next = stream.next().await;
                 match next {
                     Some(item) => {
                         batch.push(item);
                         if batch.len() >= FANOUT_CHUNK_SIZE {
                             for sender in &senders {
                                 let mut sender = sender.clone();
-                                let _ = futures::executor::block_on(sender.send(batch.clone()));
+                                let _ = sender.send(batch.clone()).await;
                             }
                             batch.clear();
                         }
@@ -975,7 +990,7 @@ pub fn feed_value_to_senders_streaming(
             if !batch.is_empty() {
                 for sender in &senders {
                     let mut sender = sender.clone();
-                    let _ = futures::executor::block_on(sender.send(batch.clone()));
+                    let _ = sender.send(batch.clone()).await;
                 }
             }
         }
@@ -983,10 +998,18 @@ pub fn feed_value_to_senders_streaming(
             let chunk = vec![Ok(Some(value.clone()))];
             for sender in senders {
                 let mut sender = sender;
-                let _ = futures::executor::block_on(sender.send(chunk.clone()));
+                let _ = sender.send(chunk.clone()).await;
             }
         }
     }
+}
+
+pub fn feed_value_to_senders_streaming(
+    value: &Value,
+    db: &dyn salsa::Database,
+    senders: Vec<crate::stream_handle::StreamChunkSender>,
+) {
+    futures::executor::block_on(feed_value_to_senders_streaming_async(value, db, senders))
 }
 
 fn count_vector_stream(db: &dyn salsa::Database, v: LazyVector) -> usize {
@@ -1069,68 +1092,6 @@ where
         }
         Ok::<(), RunError>(())
     })
-}
-
-/// Consume a stream input handle once and return its value (single element -> that value; multiple -> Vector).
-/// Used by scalar-friendly native input declaration binding paths.
-#[cfg(not(target_arch = "wasm32"))]
-fn stream_input_to_value(handle_id: crate::stream_handle::StreamHandleId) -> Result<Value, RunError> {
-    use futures::stream::StreamExt;
-    let receiver = take_receiver(handle_id)
-        .ok_or_else(|| RunError::new(RunErrorKind::StreamInputNotAvailable))?;
-    let mut stream = ChunkFlattenStream::new(receiver);
-    let first = futures::executor::block_on(async { stream.next().await });
-    let Some(first_item) = first else {
-        return Ok(Value::Undefined);
-    };
-    match first_item {
-        Err(e) => Err(e),
-        Ok(first_opt) => {
-            let second = futures::executor::block_on(async { stream.next().await });
-            let Some(second_item) = second else {
-                return match first_opt {
-                    Some(v) => Ok(v),
-                    None => Ok(Value::Undefined),
-                };
-            };
-            let (new_handle, mut sender) = create_stream_input();
-            futures::executor::block_on(async {
-                use futures::SinkExt;
-                sender
-                    .send(vec![Ok(first_opt), second_item])
-                    .await
-                    .map_err(|_| RunError::new(RunErrorKind::StreamInputNotAvailable))
-            })?;
-            std::thread::spawn(move || {
-                use futures::SinkExt;
-                use futures::stream::StreamExt;
-                const FORWARD_CHUNK_SIZE: usize = 128;
-                let mut batch: Vec<Result<Option<Value>, RunError>> =
-                    Vec::with_capacity(FORWARD_CHUNK_SIZE);
-                loop {
-                    let next = futures::executor::block_on(async { stream.next().await });
-                    match next {
-                        Some(item) => {
-                            batch.push(item);
-                            if batch.len() >= FORWARD_CHUNK_SIZE
-                                && futures::executor::block_on(async {
-                                    sender.send(std::mem::take(&mut batch)).await
-                                })
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                        None => break,
-                    }
-                }
-                if !batch.is_empty() {
-                    let _ = futures::executor::block_on(async { sender.send(batch).await });
-                }
-            });
-            Ok(Value::Vector(VectorValue::column(LazyVector::FromInput(new_handle))))
-        }
-    }
 }
 
 /// Parse bracket-key string as vector index: non-negative integer literal, or variable name (look up in scope).
@@ -1928,24 +1889,13 @@ fn value_inner<'db>(
                                     e.span(db),
                                 ));
                             }
-                            // Bind declared input names. Vector-typed declarations stay lazy.
-                            // Other declarations preserve scalar-friendly native behavior.
+                            // Bind declared input names: wired graph/file streams are always lazy
+                            // `LazyVector::FromInput` on every target (native + WASM). Consume with
+                            // vector ops or `$name` external stream access; no `block_on` at bind time.
                             let handle_id = STREAM_INPUT_REGISTRY.with(|r| {
                                 let reg = r.borrow();
                                 reg.as_ref().and_then(|registry| registry.inputs(db).get(name).copied())
                             });
-                            #[cfg(not(target_arch = "wasm32"))]
-                            let input_value = if let Some(handle_id) = handle_id {
-                                if _type_name == "Vector" {
-                                    Value::Vector(VectorValue::column(LazyVector::FromInput(handle_id)))
-                                } else {
-                                    stream_input_to_value(handle_id)
-                                        .map_err(|err| with_span_if_missing(err, e.span(db)))?
-                                }
-                            } else {
-                                Value::Undefined
-                            };
-                            #[cfg(target_arch = "wasm32")]
                             let input_value = if let Some(handle_id) = handle_id {
                                 Value::Vector(VectorValue::column(LazyVector::FromInput(handle_id)))
                             } else {
@@ -4319,5 +4269,195 @@ RunError::new(RunErrorKind::DimensionMismatch { left, right })
         Value::Date(_) => Err(RunError::new(RunErrorKind::InvalidArgument(
             "scale_expr_to_unit: date not supported".to_string(),
         ))),
+    }
+}
+
+#[cfg(test)]
+mod streaming_helper_tests {
+    use super::{
+        collect_vector_slice_window_streaming, collect_vector_slice_window_streaming_async,
+        collect_vector_stream, feed_value_to_senders_streaming_async, next_vector_item_streaming_async,
+    };
+    use crate::{
+        create_stream_input, default_si_registry, run_with_stream_inputs, LazyVector, Quantity, Value,
+        VectorValue,
+    };
+    use futures::executor::block_on;
+
+    fn numeric_element_value(item: &Result<Option<Value>, crate::RunError>) -> f64 {
+        match item {
+            Ok(Some(Value::Numeric(q))) => q.value(),
+            other => panic!("expected numeric element, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn collect_vector_slice_window_streaming_async_matches_sync() {
+        let (value, db) = run_with_stream_inputs(
+            "[1, 2, 3, 4]",
+            &default_si_registry(),
+            std::collections::HashMap::new(),
+        )
+        .expect("vector evaluation should succeed");
+        let inner = match value {
+            Value::Vector(v) => v.inner,
+            other => panic!("expected vector value, got {other:?}"),
+        };
+
+        let (sync_total, sync_slice) =
+            collect_vector_slice_window_streaming(&db, inner.clone(), 1, 2, None);
+        let (async_total, async_slice) = block_on(collect_vector_slice_window_streaming_async(
+            &db,
+            inner,
+            1,
+            2,
+            None,
+        ));
+
+        assert_eq!(sync_total, async_total);
+        assert_eq!(sync_slice.len(), async_slice.len());
+        assert_eq!(numeric_element_value(&sync_slice[0]), 2.0);
+        assert_eq!(numeric_element_value(&sync_slice[1]), 3.0);
+        assert_eq!(numeric_element_value(&async_slice[0]), 2.0);
+        assert_eq!(numeric_element_value(&async_slice[1]), 3.0);
+    }
+
+    #[test]
+    fn collect_vector_slice_window_streaming_async_respects_known_total() {
+        let (value, db) = run_with_stream_inputs(
+            "[1, 2, 3, 4, 5]",
+            &default_si_registry(),
+            std::collections::HashMap::new(),
+        )
+        .expect("vector evaluation should succeed");
+        let inner = match value {
+            Value::Vector(v) => v.inner,
+            other => panic!("expected vector value, got {other:?}"),
+        };
+
+        let (total, slice) =
+            block_on(collect_vector_slice_window_streaming_async(&db, inner, 1, 2, Some(5)));
+        assert_eq!(total, 5);
+        assert_eq!(slice.len(), 2);
+        assert_eq!(numeric_element_value(&slice[0]), 2.0);
+        assert_eq!(numeric_element_value(&slice[1]), 3.0);
+    }
+
+    #[test]
+    fn next_vector_item_streaming_async_returns_first_item() {
+        let (value, db) = run_with_stream_inputs(
+            "[10, 20]",
+            &default_si_registry(),
+            std::collections::HashMap::new(),
+        )
+        .expect("vector evaluation should succeed");
+        let inner = match value {
+            Value::Vector(v) => v.inner,
+            other => panic!("expected vector value, got {other:?}"),
+        };
+        let first = block_on(next_vector_item_streaming_async(&db, inner));
+        assert!(first.is_some());
+        assert_eq!(numeric_element_value(first.as_ref().expect("first item")), 10.0);
+    }
+
+    #[test]
+    fn next_vector_item_streaming_async_returns_none_for_empty_vector() {
+        let (value, db) = run_with_stream_inputs(
+            "[]",
+            &default_si_registry(),
+            std::collections::HashMap::new(),
+        )
+        .expect("vector evaluation should succeed");
+        let inner = match value {
+            Value::Vector(v) => v.inner,
+            other => panic!("expected vector value, got {other:?}"),
+        };
+        let first = block_on(next_vector_item_streaming_async(&db, inner));
+        assert!(first.is_none());
+    }
+
+    #[test]
+    fn feed_value_to_senders_streaming_async_fans_out_scalar() {
+        let db = salsa::DatabaseImpl::new();
+        let (left_id, left_sender) = create_stream_input();
+        let (right_id, right_sender) = create_stream_input();
+        let senders = vec![left_sender, right_sender];
+        let value = Value::Numeric(Quantity::from_exact_scalar(7.0));
+
+        block_on(feed_value_to_senders_streaming_async(&value, &db, senders));
+
+        let left = collect_vector_stream(&db, LazyVector::FromInput(left_id));
+        let right = collect_vector_stream(&db, LazyVector::FromInput(right_id));
+        assert_eq!(left.len(), 1);
+        assert_eq!(right.len(), 1);
+        assert_eq!(numeric_element_value(&left[0]), 7.0);
+        assert_eq!(numeric_element_value(&right[0]), 7.0);
+    }
+
+    #[test]
+    fn feed_value_to_senders_streaming_async_fans_out_vector_without_materializing() {
+        let (value, db) = run_with_stream_inputs(
+            "[1, 2, 3]",
+            &default_si_registry(),
+            std::collections::HashMap::new(),
+        )
+        .expect("vector evaluation should succeed");
+        let vector_value = match value {
+            Value::Vector(v) => v,
+            other => panic!("expected vector value, got {other:?}"),
+        };
+        let (left_id, left_sender) = create_stream_input();
+        let (right_id, right_sender) = create_stream_input();
+
+        block_on(feed_value_to_senders_streaming_async(
+            &Value::Vector(VectorValue::column(vector_value.inner)),
+            &db,
+            vec![left_sender, right_sender],
+        ));
+
+        let left = collect_vector_stream(&db, LazyVector::FromInput(left_id));
+        let right = collect_vector_stream(&db, LazyVector::FromInput(right_id));
+        assert_eq!(left.len(), 3);
+        assert_eq!(right.len(), 3);
+        assert_eq!(numeric_element_value(&left[0]), 1.0);
+        assert_eq!(numeric_element_value(&left[2]), 3.0);
+        assert_eq!(numeric_element_value(&right[0]), 1.0);
+        assert_eq!(numeric_element_value(&right[2]), 3.0);
+    }
+
+    #[test]
+    fn feed_value_to_senders_streaming_async_handles_multiple_chunks() {
+        let values = (0..130)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let script = format!("[{values}]");
+        let (value, db) = run_with_stream_inputs(
+            &script,
+            &default_si_registry(),
+            std::collections::HashMap::new(),
+        )
+        .expect("vector evaluation should succeed");
+        let vector_value = match value {
+            Value::Vector(v) => v,
+            other => panic!("expected vector value, got {other:?}"),
+        };
+        let (left_id, left_sender) = create_stream_input();
+        let (right_id, right_sender) = create_stream_input();
+
+        block_on(feed_value_to_senders_streaming_async(
+            &Value::Vector(VectorValue::column(vector_value.inner)),
+            &db,
+            vec![left_sender, right_sender],
+        ));
+
+        let left = collect_vector_stream(&db, LazyVector::FromInput(left_id));
+        let right = collect_vector_stream(&db, LazyVector::FromInput(right_id));
+        assert_eq!(left.len(), 130);
+        assert_eq!(right.len(), 130);
+        assert_eq!(numeric_element_value(&left[0]), 0.0);
+        assert_eq!(numeric_element_value(&left[129]), 129.0);
+        assert_eq!(numeric_element_value(&right[0]), 0.0);
+        assert_eq!(numeric_element_value(&right[129]), 129.0);
     }
 }

@@ -13,10 +13,11 @@ describe('graph patch helpers', () => {
   it('builds deterministic source with param ids', () => {
     const source = buildNodeSource({
       uri: 'snaq://canvas-a/node-1.sl',
-      source: 'x * 2',
+      // Wired graph inputs are stream-backed vectors; reduce before scalar-style arithmetic.
+      source: 'x.sum() * 2',
       params: [{ name: 'x', paramId: 'p1', typeName: 'Numeric' }],
     })
-    expect(source).toBe('input x@p1: Numeric\nx * 2')
+    expect(source).toBe('input x@p1: Numeric\nx.sum() * 2')
   })
 
   it('creates setNodeSource patch for node edits', () => {

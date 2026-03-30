@@ -5,7 +5,7 @@
   "scripts": {
     "install:frontend": "pnpm -C apps/frontend install",
     "test": "pnpm run test:backend && pnpm run test:frontend",
-    "test:backend": "cargo test --workspace && wasm-pack test --node crates/snaq-lite-wasm",
+    "test:backend": "cargo test --workspace && wasm-pack test --node crates/snaq-lite-wasm && wasm-pack test --node crates/snaq-lite-lsp",
     "test:frontend": "pnpm -C apps/frontend run test",
     "test:frontend:watch": "pnpm -C apps/frontend run test:watch",
     "build": "pnpm run build:backend && pnpm run build:frontend",

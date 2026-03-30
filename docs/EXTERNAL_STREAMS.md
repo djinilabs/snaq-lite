@@ -7,7 +7,9 @@ Programs can refer to **external stream inputs** using the `$name` syntax. The H
 - **Syntax:** `$` followed by an identifier (e.g. `$sales_data`, `$readings`).
 - **Meaning:** The expression denotes an external stream identified by `name`. The name is looked up in a **stream input registry** provided by the Host at run time. The registry maps names to **stream handles**, not to the data itself.
 - **Use in expressions:** You can use `$name` anywhere a vector is valid. For example: `$sales_data * 2`, `$readings.sum()`, `take($log, 0, 100)`.
-- **Browser (WASM):** When a computation input is wired from a file block, you **must** use `$name` in the expression (e.g. `$aa * 10`). Do not use the bare name `aa` — the stream is not bound to the identifier in the browser, so `aa * 10` would fail or hang.
+- **Graph `input` declarations:** On both native and WASM, a wired numeric input is bound as a **vector pipeline** (same representation as a stream-backed vector). Treat it like any other vector: use reducers and vector ops (e.g. `x.sum()`, `x * 2` element-wise where types allow), not as a bare scalar.
+- **Canvas LSP:** In the visual graph, the same semantics apply: wired ports feed **lazy streams**. Prefer reductions (`.sum()`, `.mean()`, …) or explicit vector ops before using results as scalars. Presentation widgets and `fetchResultSlice` use forward-only rules for non-replayable handles; see [docs/LSP.md](LSP.md) (widgets, `fetchResultSlice`, reactive updates).
+- **File blocks (WASM):** For file-backed streams referenced by **name** in source, continue to use **`$name`** in the expression (e.g. `$aa.sum() * 10`). The graph wires **inputs** by identifier; external file streams still use the `$` form when you refer to them inside the script.
 
 If the Host runs a program that uses `$name` but does **not** set the stream input registry (or does not register that name), evaluation fails with **unbound stream input: name**.
 

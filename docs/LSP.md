@@ -61,14 +61,16 @@ The server supports a **visual computation graph** (DAG): each **Computation Box
 ### Node signature (input/output ports)
 
 - **Input declarations** — At the start of a block, nodes can declare typed inputs, e.g. `input revenue: ProbabilisticTensor` and `input count: Vector`. These are syntactic only (no runtime type checking in the language); the same names are used as `$name` for stream inputs.
-- **Notification `snaqlite/graph/nodeSignatureUpdated`** — After each `didOpen` / `didChange` for a URI, the server sends this notification with:
+- **Notification `snaqlite/graph/nodeSignatureUpdated`** — After `didOpen` / `didChange`, the server finishes a **recompute wave** (BFS from the edited roots, including forced downstream traversal). For that wave it sends one notification **per visited URI** (not only the document that was edited), so downstream ports stay in sync when inferred types change. Payload:
   - `uri` (string)
   - `inputs`: array of `{ name, paramId, type }` (declared input ports; `paramId` is stable across rename)
-  - `outputType`: optional string (e.g. `"Vector"`, `"Numeric"`) inferred from graph-aware execution (upstream inputs applied when wired), or `null` if not available.
+  - `outputType`: optional string (e.g. `"Vector"`, `"Numeric"`) from the latest cached graph run for that URI when available, or `null` if not available (e.g. run error and no successful value in the node-result registry).
 
 The frontend can use this to draw input/output anchors on the canvas.
 
 ### Graph wiring and type safety
+
+- **Wired inputs are streams** — At runtime, values from graph edges are **lazy vector pipelines** (including many `Numeric`-declared ports). Use reductions such as `.sum()` (or other vector ops) before treating a wired value as a scalar; see [External streams](EXTERNAL_STREAMS.md). For paginated reads, use **snaqlite/graph/fetchResultSlice** (forward-only cursor rules apply to non-replayable handles; see the Widget subscriptions / `fetchResultSlice` bullets below).
 
 - **Request `snaqlite/graph/connect`** — Params: `sourceUri`, `targetUri`, `targetInputName`. `targetInputName` can be either display name or stable `paramId`. The server resolves both URIs to open documents, rejects cycle-creating connects, infers source output with graph-aware execution, and verifies type compatibility (exact type name match; target `Undefined` accepts any). On success it adds or replaces the edge (at most one source per target input/paramId). On type mismatch it returns JSON-RPC error `-32001` (`"Type mismatch"`). On cycle it returns server error `-32002`.
 - **Request `snaqlite/graph/disconnect`** — Params: `targetUri`, `targetInputName`. Removes the edge for that target and input. Widgets subscribed to the target node are invalidated (see reactive invalidation).
@@ -100,7 +102,7 @@ Notifications can include metadata fields:
 
 ### Reactive updates and lifecycle
 
-- **Document change** — On `didChange` / `didOpen` for canvas URIs, the server reconciles graph inputs, recomputes impacted nodes, and pushes fresh `Completed` / `Error` updates to active subscriptions/widgets for affected nodes. Descendants are always reevaluated during the mutation wave so dependent subscriptions/widgets observe consistent updates, even when source edits preserve the same semantic output.
+- **Document change** — On `didChange` / `didOpen` for canvas URIs, the server reconciles graph inputs, recomputes impacted nodes, and pushes fresh `Completed` / `Error` updates to active subscriptions/widgets for affected nodes. Descendants are always reevaluated during the mutation wave so dependent subscriptions/widgets observe consistent updates, even when source edits preserve the same semantic output. Per-node **revision** may be unchanged when the cached output fingerprint matches; clients may still see another terminal `Completed` until optional deduplication is implemented.
 - **Document close** — On `didClose` for a URI, the server removes the document from state, removes graph edges where the URI is source/target, clears cached node result, cancels subscriptions/widgets bound to that URI (`Cancelled` with reason `"Document closed"`), and recomputes downstream dependents.
 - **Edge removal** — When `snaqlite/graph/disconnect` is called, the server removes the edge and invalidates all widget subscriptions for the target URI (cancel and send `widgetDataUpdate` Cancelled). The UI triggers disconnect when the user deletes an edge (e.g. select edge and Backspace).
 - **Node removal (patch lifecycle)** — When `snaqlite/graph/applyPatch` includes `removeNode`, the server removes the node document and all attached edges, clears node-result/handle state, cancels affected subscriptions/widgets (`reason: "Node removed"`), and recomputes remaining dependents in the same mutation wave.
@@ -137,7 +139,7 @@ Optional helpers for UI ergonomics while keeping source text canonical:
   - node lifecycle ops: `addNode { uri, source, version? }`, `removeNode { uri }`
   - graph/source ops: `setNodeSource`, `connect`, `disconnect`, `renameParam`, `addParam`, `removeParam`
 
-`renameParam` updates the input declaration and also rewrites safe in-scope identifier usages in the same block body. Shadowed bindings are not rewritten.
+`renameParam` updates the input declaration and also rewrites safe in-scope identifier usages in the same block body, including **`$name` stream references** that resolve to the renamed input (replacement is `$newName`, preserving the `$` token). Shadowed bindings are not rewritten.
 
 ### Canonical canvas snapshot
 

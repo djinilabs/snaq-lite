@@ -37,9 +37,10 @@ pub use ir::{ExprDef, Expression, NumLiteral, ProgramDef, SpannedExprDef, Stream
 pub use scope::{empty_scope, Env, Scope, StoredValue};
 pub use parser::parse;
 pub use queries::{
-    collect_vector_slice_window_streaming, collect_vector_stream, next_vector_item_streaming,
-    feed_value_to_senders_streaming, program, set_eval_registry, set_stream_input_registry, value,
-    vector_into_stream,
+    collect_vector_slice_window_streaming, collect_vector_slice_window_streaming_async,
+    collect_vector_stream, next_vector_item_streaming, next_vector_item_streaming_async,
+    feed_value_to_senders_streaming, feed_value_to_senders_streaming_async, program,
+    set_eval_registry, set_stream_input_registry, value, vector_into_stream,
 };
 pub use symbol_registry::SymbolRegistry;
 pub use fuzzy::FuzzyBool;
@@ -3544,13 +3545,13 @@ mod tests {
         assert_eq!(inputs[0], ("x".to_string(), "Vector".to_string()));
     }
 
-    /// Wiring computation A (e.g. "42") to named argument "abc" in B ("input abc: Numeric\nabc * 10")
-    /// should bind abc to the wired value so the result is 420, not symbolic "10 * abc".
+    /// Wiring computation A (e.g. "42") to named argument "abc" in B (`input abc: Numeric` + `abc.sum() * 10`)
+    /// should bind abc to the lazy wired stream so the result is 420, not symbolic.
     #[test]
     fn run_input_decl_binds_stream_input_to_identifier() {
         use futures::sink::SinkExt;
 
-        let program = "input abc: Numeric\nabc * 10";
+        let program = "input abc: Numeric\nabc.sum() * 10";
         let (handle_id, mut sender) = create_stream_input();
         let q42 = Quantity::from_scalar(42.0);
         let _ = futures::executor::block_on(sender.send(vec![Ok(Some(Value::Numeric(q42)))]));
@@ -3579,7 +3580,7 @@ mod tests {
         drop(sender);
         let stream_inputs = std::collections::HashMap::from([("x".to_string(), handle_id)]);
         let (value, _db) = run_with_stream_inputs(
-            "input x: Numeric\nx + 1",
+            "input x: Numeric\nx.sum() + 1",
             &default_si_registry(),
             stream_inputs,
         )
@@ -3596,7 +3597,7 @@ mod tests {
     fn run_two_input_decls_two_handles_same_scalar_yields_product() {
         use futures::sink::SinkExt;
 
-        let program = "input abc: Numeric\ninput ggg: Numeric\nabc * ggg";
+        let program = "input abc: Numeric\ninput ggg: Numeric\nabc.sum() * ggg.sum()";
         let scalar = Value::Numeric(Quantity::from_scalar(42.0));
         let chunk = vec![Ok(Some(scalar))];
         let (handle_abc, mut sender_abc) = create_stream_input();
@@ -3683,7 +3684,7 @@ mod tests {
         drop(s_dollar);
 
         let (v_decl, _db1) = run_with_stream_inputs(
-            "input abc: Numeric\nabc * 10",
+            "input abc: Numeric\nabc.sum() * 10",
             &default_si_registry(),
             std::collections::HashMap::from([("abc".to_string(), h_decl)]),
         )

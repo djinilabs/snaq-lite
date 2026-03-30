@@ -77,6 +77,58 @@ async fn read_one_lsp_message_async(
     String::from_utf8(body).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
+/// Drain outbound messages until we see `publishDiagnostics` for `uri` (typically after `didOpen`).
+/// Prevents small duplex buffers from filling when the server emits many notifications before the test reads.
+async fn drain_until_publish_diagnostics(
+    client_r: &mut (impl tokio::io::AsyncRead + Unpin),
+    uri: &str,
+    max_messages: usize,
+) -> bool {
+    for _ in 0..max_messages {
+        let body = match timeout(
+            Duration::from_secs(3),
+            read_one_lsp_message_async(client_r),
+        )
+        .await
+        {
+            Ok(Ok(b)) => b,
+            _ => return false,
+        };
+        if body.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else {
+            continue;
+        };
+        if v.get("method").and_then(|m| m.as_str()) == Some("textDocument/publishDiagnostics")
+            && v.pointer("/params/uri").and_then(|u| u.as_str()) == Some(uri)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// After [`drain_until_publish_diagnostics`], keep reading until no more messages for a short window
+/// so `didOpen` notifications (signatures, etc.) cannot fill the duplex and block the server on later edits.
+async fn drain_remaining_outbound_idle(
+    client_r: &mut (impl tokio::io::AsyncRead + Unpin),
+    idle_rounds: usize,
+) {
+    let mut idle = 0usize;
+    while idle < idle_rounds {
+        match timeout(
+            Duration::from_millis(25),
+            read_one_lsp_message_async(client_r),
+        )
+        .await
+        {
+            Ok(Ok(_)) => idle = 0,
+            _ => idle += 1,
+        }
+    }
+}
+
 #[tokio::test]
 async fn native_initialize_returns_capabilities() {
     let (client_w, server_r) = duplex(4096);
@@ -1894,6 +1946,88 @@ async fn native_node_signature_updated_after_did_open() {
     let _ = server_handle.await;
 }
 
+/// Phase 1b: after `didChange` on an upstream node, the recompute wave emits `nodeSignatureUpdated`
+/// for downstream graph nodes (not only the edited URI), so clients can refresh ports/inferred types.
+#[tokio::test]
+async fn native_upstream_did_change_emits_node_signature_updated_for_downstream() {
+    const UP: &str = "snaq://sig-fanout-phase1b/src.sl";
+    const DOWN: &str = "snaq://sig-fanout-phase1b/tgt.sl";
+
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, UP, "1", 1).await;
+    open_document_uri(&mut client_w, DOWN, "input x: Symbolic\nx", 1).await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "snaqlite/graph/connect",
+        "params": {
+            "sourceUri": UP,
+            "targetUri": DOWN,
+            "targetInputName": "x"
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 2).await;
+
+    drain_remaining_outbound_idle(&mut client_r, 12).await;
+
+    let did_change = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": UP, "version": 2 },
+            "contentChanges": [{ "text": "2" }]
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&did_change.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    let mut saw_downstream = false;
+    for _ in 0..48 {
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout waiting for notifications after upstream didChange")
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/nodeSignatureUpdated") {
+            let uri = v
+                .pointer("/params/uri")
+                .and_then(|u| u.as_str())
+                .unwrap_or("");
+            if uri == DOWN {
+                saw_downstream = true;
+                break;
+            }
+        }
+    }
+
+    assert!(
+        saw_downstream,
+        "expected nodeSignatureUpdated for downstream {DOWN} after upstream didChange (wave fanout)"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
 /// Delay before triggering a request so the server can drain pending widgetDataUpdate (background consumer sends asynchronously).
 const WIDGET_DRAIN_DELAY_MS: u64 = 150;
 
@@ -2026,7 +2160,7 @@ async fn native_graph_wired_widget_gets_downstream_result() {
     let _ = server_handle.await;
 }
 
-/// Computation-to-computation wiring with identifier: source "42", target "input abc: Numeric\nabc * 10";
+/// Computation-to-computation wiring with identifier: source "42", target `input abc: Numeric` + `abc.sum() * 10`;
 /// connect source → target input "abc"; subscribe to target → get Completed with display "420".
 #[tokio::test]
 async fn native_computation_to_computation_wired_input_binds_identifier() {
@@ -2044,7 +2178,7 @@ async fn native_computation_to_computation_wired_input_binds_identifier() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/downstream.sl",
-        "input abc: Numeric\nabc * 10",
+        "input abc: Numeric\nabc.sum() * 10",
         1,
     )
     .await;
@@ -2141,7 +2275,7 @@ async fn native_computation_to_computation_wired_input_binds_identifier() {
     let _ = server_handle.await;
 }
 
-/// One output wired to two inputs of the same box: source "42", target "input abc: Numeric\ninput ggg: Numeric\nabc * ggg";
+/// One output wired to two inputs of the same box: source "42", target `abc.sum() * ggg.sum()` on Numeric inputs;
 /// connect source → "abc" and source → "ggg"; subscribe to target → get Completed with display "1764" (no stream input error).
 #[tokio::test]
 async fn native_one_output_to_two_inputs_same_box_yields_result() {
@@ -2159,7 +2293,7 @@ async fn native_one_output_to_two_inputs_same_box_yields_result() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/downstream.sl",
-        "input abc: Numeric\ninput ggg: Numeric\nabc * ggg",
+        "input abc: Numeric\ninput ggg: Numeric\nabc.sum() * ggg.sum()",
         1,
     )
     .await;
@@ -2455,6 +2589,297 @@ async fn native_downstream_widget_receives_push_update_when_source_changes() {
     assert!(
         second_completed_ok,
         "after didChange source to 100, client should receive a second Completed with display \"100\" or totalElements 1"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+/// Phase 1 acceptance: no-op upstream edit (whitespace) still recomputes downstream and pushes a
+/// second widget Completed (force_downstream on didChange).
+#[tokio::test]
+async fn native_downstream_widget_second_completed_on_whitespace_only_upstream_edit() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://whitespace-probe/up.sl", "7", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://whitespace-probe/down.sl",
+        "input x: Undefined\n$x",
+        1,
+    )
+    .await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "snaqlite/graph/connect",
+        "params": {
+            "sourceUri": "snaq://whitespace-probe/up.sl",
+            "targetUri": "snaq://whitespace-probe/down.sl",
+            "targetInputName": "x"
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 2).await;
+
+    let widget_id = "w-whitespace-probe";
+    let subscribe_widget = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "snaqlite/graph/subscribeWidget",
+        "params": { "widgetId": widget_id, "sourceUri": "snaq://whitespace-probe/down.sl" }
+    });
+    client_w
+        .write_all(&lsp_message(&subscribe_widget.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(WIDGET_DRAIN_DELAY_MS)).await;
+
+    let mut completed_count = 0u32;
+    for _ in 0..30 {
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout reading first batch")
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
+            assert!(v.get("error").is_none(), "subscribeWidget: {body}");
+            continue;
+        }
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
+            let params = v.get("params").and_then(|p| p.as_object()).unwrap();
+            if params.get("widgetId").and_then(|w| w.as_str()) == Some(widget_id)
+                && params.get("status").and_then(|s| s.as_str()) == Some("Completed")
+            {
+                completed_count += 1;
+            }
+        }
+        if completed_count >= 1 {
+            break;
+        }
+    }
+    assert!(
+        completed_count >= 1,
+        "expected initial widget Completed for {widget_id}"
+    );
+
+    let did_change = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": "snaq://whitespace-probe/up.sl", "version": 2 },
+            "contentChanges": [{ "text": " 7\n" }]
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&did_change.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(WIDGET_DRAIN_DELAY_MS)).await;
+
+    for _ in 0..40 {
+        if completed_count >= 2 {
+            break;
+        }
+        let body = timeout(
+            Duration::from_secs(2),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("timeout after whitespace didChange")
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/graph/widgetDataUpdate") {
+            let params = v.get("params").and_then(|p| p.as_object()).unwrap();
+            if params.get("widgetId").and_then(|w| w.as_str()) == Some(widget_id)
+                && params.get("status").and_then(|s| s.as_str()) == Some("Completed")
+            {
+                completed_count += 1;
+            }
+        }
+    }
+
+    assert!(
+        completed_count >= 2,
+        "expected second Completed after whitespace-only upstream edit, got {completed_count}"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+/// Same as whitespace widget probe but for subscribeNode / publishNodeResult.
+#[tokio::test]
+async fn native_downstream_subscribe_node_second_completed_on_whitespace_only_upstream_edit() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(&mut client_w, "snaq://subnode-whitespace/up.sl", "7", 1).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://subnode-whitespace/down.sl",
+        "input x: Undefined\n$x",
+        1,
+    )
+    .await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "snaqlite/graph/connect",
+        "params": {
+            "sourceUri": "snaq://subnode-whitespace/up.sl",
+            "targetUri": "snaq://subnode-whitespace/down.sl",
+            "targetInputName": "x"
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 2).await;
+
+    tokio::time::sleep(Duration::from_millis(WIDGET_DRAIN_DELAY_MS)).await;
+
+    let sub_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "snaqlite/subscribeNode",
+        "params": { "sourceUri": "snaq://subnode-whitespace/down.sl" }
+    });
+    client_w
+        .write_all(&lsp_message(&sub_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    // Order may be: publishNodeResult (Completed) before or after the subscribe JSON-RPC response.
+    let mut subscription_id: Option<String> = None;
+    let mut completed_count = 0u32;
+    let mut saw_subscribe_response = false;
+    for _ in 0..80 {
+        let body = timeout(
+            Duration::from_secs(5),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("subscribeNode / first publish")
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("id").and_then(|i| i.as_u64()) == Some(3) {
+            assert!(
+                v.get("error").is_none(),
+                "subscribeNode failed: {body}"
+            );
+            saw_subscribe_response = true;
+            let sid = v["result"]["subscriptionId"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            assert!(!sid.is_empty());
+            match &subscription_id {
+                None => subscription_id = Some(sid),
+                Some(existing) => assert_eq!(existing, &sid, "subscriptionId mismatch"),
+            }
+        }
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/publishNodeResult") {
+            let Some(params) = v.get("params").and_then(|p| p.as_object()) else {
+                continue;
+            };
+            if params.get("status").and_then(|s| s.as_str()) != Some("Completed") {
+                continue;
+            }
+            let sid = params
+                .get("subscriptionId")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default();
+            if sid.is_empty() {
+                continue;
+            }
+            match &subscription_id {
+                None => {
+                    subscription_id = Some(sid.to_string());
+                    completed_count += 1;
+                }
+                Some(s) if s == sid => {
+                    completed_count += 1;
+                }
+                Some(_) => {}
+            }
+        }
+        if saw_subscribe_response && completed_count >= 1 {
+            break;
+        }
+    }
+    assert!(
+        saw_subscribe_response && completed_count >= 1,
+        "expected subscribeNode response and initial publishNodeResult Completed"
+    );
+    let subscription_id = subscription_id.expect("subscription id");
+
+    let did_change = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": "snaq://subnode-whitespace/up.sl", "version": 2 },
+            "contentChanges": [{ "text": " 7\n" }]
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&did_change.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+
+    for _ in 0..40 {
+        if completed_count >= 2 {
+            break;
+        }
+        let body = timeout(
+            Duration::from_secs(5),
+            read_one_lsp_message_async(&mut client_r),
+        )
+        .await
+        .expect("second publish")
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("snaqlite/publishNodeResult") {
+            let params = v.get("params").and_then(|p| p.as_object()).unwrap();
+            if params.get("subscriptionId").and_then(|s| s.as_str()) == Some(subscription_id.as_str())
+                && params.get("status").and_then(|s| s.as_str()) == Some("Completed")
+            {
+                completed_count += 1;
+            }
+        }
+    }
+
+    assert!(
+        completed_count >= 2,
+        "expected second publishNodeResult Completed, got {completed_count}"
     );
 
     server_handle.abort();
@@ -2875,6 +3300,11 @@ async fn native_incremental_multi_change_and_unicode_edits_apply_correctly() {
     send_init_and_initialized(&mut client_w, &mut client_r).await;
     // line 0 has a unicode symbol; line 1 is edited in same didChange batch
     open_document(&mut client_w, "π + 1\nx = 1\nx + 1", 1).await;
+    assert!(
+        drain_until_publish_diagnostics(&mut client_r, TEST_DOC_URI, 128).await,
+        "didOpen should publish diagnostics for test doc"
+    );
+    drain_remaining_outbound_idle(&mut client_r, 8).await;
 
     let did_change = serde_json::json!({
         "jsonrpc": "2.0",
@@ -2883,10 +3313,10 @@ async fn native_incremental_multi_change_and_unicode_edits_apply_correctly() {
             "textDocument": { "uri": TEST_DOC_URI, "version": 2 },
             "contentChanges": [
                 {
-                    // Replace the digit in unicode-containing expression.
+                    // Replace the digit in unicode-containing expression (UTF-16: π is one unit).
                     "range": {
-                        "start": { "line": 0, "character": 5 },
-                        "end": { "line": 0, "character": 6 }
+                        "start": { "line": 0, "character": 4 },
+                        "end": { "line": 0, "character": 5 }
                     },
                     "text": "2"
                 },
@@ -3264,7 +3694,7 @@ async fn param_rename_invalidates_old_edge_and_emits_signature_update() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/downstream-rename.sl",
-        "input x: Numeric\nx * 2",
+        "input x: Numeric\nx.sum() * 2",
         1,
     )
     .await;
@@ -3284,7 +3714,7 @@ async fn param_rename_invalidates_old_edge_and_emits_signature_update() {
         "jsonrpc":"2.0","method":"textDocument/didChange",
         "params":{
             "textDocument":{"uri":"snaq://graph/downstream-rename.sl","version":2},
-            "contentChanges":[{"text":"input y: Numeric\ny * 2"}]
+            "contentChanges":[{"text":"input y: Numeric\ny.sum() * 2"}]
         }
     });
     client_w
@@ -3332,7 +3762,7 @@ async fn param_add_preserves_existing_edges_and_updates_signature() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/d.sl",
-        "input x: Numeric\nx * 2",
+        "input x: Numeric\nx.sum() * 2",
         1,
     )
     .await;
@@ -3354,7 +3784,7 @@ async fn param_add_preserves_existing_edges_and_updates_signature() {
 
     let did_change = serde_json::json!({
         "jsonrpc":"2.0","method":"textDocument/didChange",
-        "params":{"textDocument":{"uri":"snaq://graph/d.sl","version":2},"contentChanges":[{"text":"input x: Numeric\ninput y: Numeric\nx * 2"}]}
+        "params":{"textDocument":{"uri":"snaq://graph/d.sl","version":2},"contentChanges":[{"text":"input x: Numeric\ninput y: Numeric\nx.sum() * 2"}]}
     });
     client_w.write_all(&lsp_message(&did_change.to_string())).await.unwrap();
     client_w.flush().await.unwrap();
@@ -3506,7 +3936,7 @@ async fn did_change_source_does_not_push_completed_for_unrelated_sibling_target(
     open_document_uri(
         &mut client_w,
         "snaq://graph/tgt-a.sl",
-        "input x: Numeric\nx * 2",
+        "input x: Numeric\nx.sum() * 2",
         1,
     )
     .await;
@@ -3514,7 +3944,7 @@ async fn did_change_source_does_not_push_completed_for_unrelated_sibling_target(
     open_document_uri(
         &mut client_w,
         "snaq://graph/tgt-b.sl",
-        "input y: Numeric\ny * 3",
+        "input y: Numeric\ny.sum() * 3",
         1,
     )
     .await;
@@ -3757,7 +4187,7 @@ async fn graph_runtime_recomputes_without_widget_subscriptions() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/tgt.sl",
-        "input x: Numeric\nx * 2",
+        "input x: Numeric\nx.sum() * 2",
         1,
     )
     .await;
@@ -3800,7 +4230,7 @@ async fn graph_runtime_recomputes_without_widget_subscriptions() {
 }
 
 #[tokio::test]
-async fn did_change_on_source_with_same_output_does_not_recompute_descendants() {
+async fn did_change_on_source_with_same_output_still_recomputes_descendants() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
     let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
     let server_handle =
@@ -3812,14 +4242,14 @@ async fn did_change_on_source_with_same_output_does_not_recompute_descendants() 
     open_document_uri(
         &mut client_w,
         "snaq://graph/mid-same.sl",
-        "input x: Numeric\nx + 1",
+        "input x: Numeric\nx.sum() + 1",
         1,
     )
     .await;
     open_document_uri(
         &mut client_w,
         "snaq://graph/tgt-same.sl",
-        "input y: Numeric\ny * 2",
+        "input y: Numeric\ny.sum() * 2",
         1,
     )
     .await;
@@ -3889,7 +4319,7 @@ async fn did_change_on_source_with_same_output_does_not_recompute_descendants() 
         "expected downstream update after semantic source change to 3"
     );
 
-    // Then perform a non-semantic edit (same numeric output) and assert no descendant recompute.
+    // Then perform a formatting-only edit (same numeric output) — forced downstream wave still notifies.
     let did_change_same_output = serde_json::json!({
         "jsonrpc":"2.0","method":"textDocument/didChange",
         "params":{"textDocument":{"uri":"snaq://graph/src-same.sl","version":3},"contentChanges":[{"text":"( 3 )"}]}
@@ -3901,8 +4331,8 @@ async fn did_change_on_source_with_same_output_does_not_recompute_descendants() 
     client_w.flush().await.unwrap();
 
     let mut got_descendant_update = false;
-    for _ in 0..8 {
-        let maybe = timeout(Duration::from_millis(400), read_one_lsp_message_async(&mut client_r)).await;
+    for _ in 0..24 {
+        let maybe = timeout(Duration::from_millis(500), read_one_lsp_message_async(&mut client_r)).await;
         let Ok(Ok(body)) = maybe else {
             continue;
         };
@@ -3916,8 +4346,8 @@ async fn did_change_on_source_with_same_output_does_not_recompute_descendants() 
         }
     }
     assert!(
-        !got_descendant_update,
-        "didChange with unchanged source output must not recompute downstream widget"
+        got_descendant_update,
+        "didChange with whitespace-only source edit should still push downstream widget Completed (forced wave)"
     );
     server_handle.abort();
     let _ = server_handle.await;
@@ -3936,14 +4366,14 @@ async fn topology_mutation_forces_descendant_recompute() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/mid-topo.sl",
-        "input x: Numeric\nx + 1",
+        "input x: Numeric\nx.sum() + 1",
         1,
     )
     .await;
     open_document_uri(
         &mut client_w,
         "snaq://graph/tgt-topo.sl",
-        "input y: Numeric\ny * 2",
+        "input y: Numeric\ny.sum() * 2",
         1,
     )
     .await;
@@ -4057,7 +4487,7 @@ async fn connect_disconnect_did_change_pipeline_updates_results_headlessly() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/tgt2.sl",
-        "input x: Numeric\nx * 2",
+        "input x: Numeric\nx.sum() * 2",
         1,
     )
     .await;
@@ -4100,7 +4530,7 @@ async fn native_param_remove_prunes_edge_and_pushes_error_update() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/downstream.sl",
-        "input x: Numeric\nx * 10",
+        "input x: Numeric\nx.sum() * 10",
         1,
     )
     .await;
@@ -4164,7 +4594,7 @@ async fn native_param_remove_prunes_edge_and_pushes_error_update() {
         "method": "textDocument/didChange",
         "params": {
             "textDocument": { "uri": "snaq://graph/downstream.sl", "version": 2 },
-            "contentChanges": [{ "text": "input y: Numeric\ny * 10" }]
+            "contentChanges": [{ "text": "input y: Numeric\ny.sum() * 10" }]
         }
     });
     client_w
@@ -4223,7 +4653,7 @@ async fn native_transient_parse_error_does_not_prune_existing_edge() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/downstream-parse.sl",
-        "input x: Numeric\nx * 2",
+        "input x: Numeric\nx.sum() * 2",
         1,
     )
     .await;
@@ -4259,7 +4689,7 @@ async fn native_transient_parse_error_does_not_prune_existing_edge() {
 
     let to_valid = serde_json::json!({
         "jsonrpc":"2.0","method":"textDocument/didChange",
-        "params":{"textDocument":{"uri":"snaq://graph/downstream-parse.sl","version":3},"contentChanges":[{"text":"input x: Numeric\nx * 2"}]}
+        "params":{"textDocument":{"uri":"snaq://graph/downstream-parse.sl","version":3},"contentChanges":[{"text":"input x: Numeric\nx.sum() * 2"}]}
     });
     client_w
         .write_all(&lsp_message(&to_valid.to_string()))
@@ -4317,7 +4747,7 @@ async fn native_did_close_removes_document_edges_and_pushes_downstream_error() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/target-close.sl",
-        "input x: Numeric\nx * 2",
+        "input x: Numeric\nx.sum() * 2",
         1,
     )
     .await;
@@ -4407,7 +4837,7 @@ async fn native_reset_namespace_clears_docs_and_allows_clean_reopen() {
     open_document_uri(
         &mut client_w,
         "snaq://canvasA/target.sl",
-        "input x: Numeric\nx * 2",
+        "input x: Numeric\nx.sum() * 2",
         1,
     )
     .await;
@@ -4462,7 +4892,7 @@ async fn native_reset_namespace_clears_docs_and_allows_clean_reopen() {
     open_document_uri(
         &mut client_w,
         "snaq://canvasA/target.sl",
-        "input x: Numeric\nx * 2",
+        "input x: Numeric\nx.sum() * 2",
         2,
     )
     .await;
@@ -4500,7 +4930,7 @@ async fn graph_rehydrates_from_canvas_document_without_ui_replay() {
     open_document_uri(
         &mut client_w,
         "snaq://rehyd/target.sl",
-        "input x@p1: Numeric\nx",
+        "input x@p1: Numeric\nx.sum()",
         1,
     )
     .await;
@@ -4867,7 +5297,7 @@ async fn connect_emits_node_signature_updated_for_topology_target() {
     open_document_uri(
         &mut client_w,
         "snaq://sig-connect/target.sl",
-        "input x@p1: Numeric\nx + 1",
+        "input x@p1: Numeric\nx.sum() + 1",
         1,
     )
     .await;
@@ -4910,7 +5340,7 @@ async fn disconnect_emits_node_signature_updated_for_topology_target() {
     open_document_uri(
         &mut client_w,
         "snaq://sig-disconnect/target.sl",
-        "input x@p1: Numeric\nx + 1",
+        "input x@p1: Numeric\nx.sum() + 1",
         1,
     )
     .await;
@@ -4964,7 +5394,7 @@ async fn apply_patch_topology_connect_emits_node_signature_updated_for_target() 
     open_document_uri(
         &mut client_w,
         "snaq://sig-patch/target.sl",
-        "input x@p1: Numeric\nx + 1",
+        "input x@p1: Numeric\nx.sum() + 1",
         1,
     )
     .await;
@@ -5080,7 +5510,7 @@ async fn native_type_change_prunes_edge_with_same_param_name() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/target-type.sl",
-        "input x: Numeric\nx * 2",
+        "input x: Numeric\nx.sum() * 2",
         1,
     )
     .await;
@@ -5156,7 +5586,7 @@ async fn source_output_type_change_prunes_edge_and_recomputes_target() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/target-output-type.sl",
-        "input x: Numeric\nx * 2",
+        "input x: Numeric\nx.sum() * 2",
         1,
     )
     .await;
@@ -5738,7 +6168,7 @@ async fn graph_param_helpers_rename_add_remove_apply_source_updates() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/param-helpers.sl",
-        "input a@p1: Numeric\na + 1",
+        "input a@p1: Numeric\na.sum() + 1",
         1,
     )
     .await;
@@ -5799,7 +6229,7 @@ async fn graph_rename_param_trims_new_name_before_writing_source() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/rename-trim.sl",
-        "input a@p1: Numeric\na + 1",
+        "input a@p1: Numeric\na.sum() + 1",
         1,
     )
     .await;
@@ -5849,6 +6279,175 @@ async fn graph_rename_param_trims_new_name_before_writing_source() {
     let _ = server_handle.await;
 }
 
+/// renameParam must rewrite `$x` stream access to `$revenue` when renaming display name (Phase 2).
+#[tokio::test]
+async fn graph_rename_param_rewrites_dollar_stream_and_subscribe_still_works() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/dollar-rename-src.sl",
+        "21",
+        1,
+    )
+    .await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/dollar-rename-tgt.sl",
+        "input x@p1: Numeric\n$x.sum() * 2",
+        1,
+    )
+    .await;
+
+    let connect_req = serde_json::json!({
+        "jsonrpc":"2.0","id":820,"method":"snaqlite/graph/connect",
+        "params":{
+            "sourceUri":"snaq://graph/dollar-rename-src.sl",
+            "targetUri":"snaq://graph/dollar-rename-tgt.sl",
+            "targetInputName":"x"
+        }
+    });
+    client_w
+        .write_all(&lsp_message(&connect_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let _ = read_until_response_id(&mut client_r, 820).await;
+
+    let rename_req = serde_json::json!({
+        "jsonrpc":"2.0","id":821,"method":"snaqlite/graph/renameParam",
+        "params":{"uri":"snaq://graph/dollar-rename-tgt.sl","paramId":"p1","newName":"revenue"}
+    });
+    client_w
+        .write_all(&lsp_message(&rename_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 821).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "renameParam should succeed: {v}");
+
+    let export_req = serde_json::json!({
+        "jsonrpc":"2.0","id":822,"method":"snaqlite/graph/exportCanvasDocument","params":{}
+    });
+    client_w
+        .write_all(&lsp_message(&export_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 822).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let nodes = v["result"]["canvasDocument"]["nodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let node = nodes
+        .iter()
+        .find(|n| n["uri"].as_str() == Some("snaq://graph/dollar-rename-tgt.sl"))
+        .expect("export should contain target node");
+    let source = node["source"].as_str().unwrap_or_default();
+    assert!(
+        source.contains("input revenue@p1: Numeric"),
+        "expected renamed input decl, got: {source}"
+    );
+    assert!(
+        source.contains("$revenue.sum() * 2"),
+        "expected $revenue in body, got: {source}"
+    );
+    assert!(
+        !source.contains("$x"),
+        "should not keep $x after rename, got: {source}"
+    );
+
+    let sub_req = serde_json::json!({
+        "jsonrpc":"2.0","id":823,"method":"snaqlite/subscribeNode",
+        "params":{"sourceUri":"snaq://graph/dollar-rename-tgt.sl"}
+    });
+    client_w
+        .write_all(&lsp_message(&sub_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 823).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        v.get("error").is_none(),
+        "subscribeNode after dollar rename should succeed: {v}"
+    );
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
+/// applyPatch renameParam must use the same source rewrite as direct renameParam (including `$`).
+#[tokio::test]
+async fn graph_apply_patch_rename_param_rewrites_dollar_stream() {
+    let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let (server_w, client_r) = duplex(DUPLEX_BUFFER_SIZE);
+    let server_handle =
+        tokio::spawn(async move { snaq_lite_lsp::run_native(server_r, server_w).await });
+    let mut client_w = client_w;
+    let mut client_r = client_r;
+
+    send_init_and_initialized(&mut client_w, &mut client_r).await;
+    open_document_uri(
+        &mut client_w,
+        "snaq://graph/patch-dollar.sl",
+        "input x@p1: Numeric\n$x.sum() * 2",
+        1,
+    )
+    .await;
+
+    let patch_req = serde_json::json!({
+        "jsonrpc":"2.0","id":830,"method":"snaqlite/graph/applyPatch",
+        "params":{"operations":[
+            {"op":"renameParam","uri":"snaq://graph/patch-dollar.sl","paramId":"p1","newName":"revenue"}
+        ]}
+    });
+    client_w
+        .write_all(&lsp_message(&patch_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 830).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("error").is_none(), "applyPatch renameParam should succeed: {v}");
+
+    let export_req = serde_json::json!({
+        "jsonrpc":"2.0","id":831,"method":"snaqlite/graph/exportCanvasDocument","params":{}
+    });
+    client_w
+        .write_all(&lsp_message(&export_req.to_string()))
+        .await
+        .unwrap();
+    client_w.flush().await.unwrap();
+    let body = read_until_response_id(&mut client_r, 831).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let nodes = v["result"]["canvasDocument"]["nodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let node = nodes
+        .iter()
+        .find(|n| n["uri"].as_str() == Some("snaq://graph/patch-dollar.sl"))
+        .expect("export should contain patched node");
+    let source = node["source"].as_str().unwrap_or_default();
+    assert!(
+        source.contains("input revenue@p1: Numeric") && source.contains("$revenue.sum() * 2"),
+        "applyPatch rename should match direct RPC rewrite, got: {source}"
+    );
+    assert!(!source.contains("$x"), "should not keep $x, got: {source}");
+
+    server_handle.abort();
+    let _ = server_handle.await;
+}
+
 #[tokio::test]
 async fn graph_add_param_rejects_duplicate_name_when_whitespace_padded() {
     let (client_w, server_r) = duplex(DUPLEX_BUFFER_SIZE);
@@ -5862,7 +6461,7 @@ async fn graph_add_param_rejects_duplicate_name_when_whitespace_padded() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/add-dup-name-trim.sl",
-        "input revenue@p1: Numeric\nrevenue + 1",
+        "input revenue@p1: Numeric\nrevenue.sum() + 1",
         1,
     )
     .await;
@@ -5906,7 +6505,7 @@ async fn graph_rename_param_updates_usages_and_preserves_other_source_content() 
     open_document_uri(
         &mut client_w,
         "snaq://graph/param-preserve.sl",
-        "input a@p1: Numeric\n\nx = 1\na + x",
+        "input a@p1: Numeric\n\nx = 1\na.sum() + x",
         1,
     )
     .await;
@@ -5948,7 +6547,7 @@ async fn graph_rename_param_updates_usages_and_preserves_other_source_content() 
         "renamed input declaration should be updated: {source}"
     );
     assert!(
-        source.contains("\n\nx = 1\nrevenue + x"),
+        source.contains("\n\nx = 1\nrevenue.sum() + x"),
         "input symbol usages should be renamed in body: {source}"
     );
 
@@ -5969,7 +6568,7 @@ async fn graph_rename_param_does_not_touch_shadowed_bindings() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/param-shadow.sl",
-        "input a@p1: Numeric\nx = a + 1\na = 9\ny = a + 2\nx + y",
+        "input a@p1: Numeric\nx = a.sum() + 1\na = 9\ny = a + 2\nx + y",
         1,
     )
     .await;
@@ -6011,7 +6610,7 @@ async fn graph_rename_param_does_not_touch_shadowed_bindings() {
         "expected renamed input declaration: {source}"
     );
     assert!(
-        source.contains("x = revenue + 1"),
+        source.contains("x = revenue.sum() + 1"),
         "expected pre-shadow usage to be renamed: {source}"
     );
     assert!(
@@ -6036,7 +6635,7 @@ async fn graph_param_helpers_reject_invalid_identifiers() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/param-ident.sl",
-        "input a@p1: Numeric\na + 1",
+        "input a@p1: Numeric\na.sum() + 1",
         1,
     )
     .await;
@@ -6084,7 +6683,7 @@ async fn graph_add_param_preserves_blank_line_before_body() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/add-preserve-blank.sl",
-        "input a@p1: Numeric\n\nx = 1\na + x",
+        "input a@p1: Numeric\n\nx = 1\na.sum() + x",
         1,
     )
     .await;
@@ -6122,7 +6721,7 @@ async fn graph_add_param_preserves_blank_line_before_body() {
         .expect("export should contain node");
     let source = node["source"].as_str().unwrap_or_default();
     assert!(
-        source.contains("input a@p1: Numeric\ninput b@p2: Numeric\n\nx = 1\na + x"),
+        source.contains("input a@p1: Numeric\ninput b@p2: Numeric\n\nx = 1\na.sum() + x"),
         "addParam should keep single blank line before body: {source}"
     );
 
@@ -6145,14 +6744,14 @@ async fn graph_connect_order_does_not_change_downstream_result() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/ord-t1.sl",
-        "input x@px: Numeric\ninput y@py: Numeric\nx + y",
+        "input x@px: Numeric\ninput y@py: Numeric\nx.sum() + y.sum()",
         1,
     )
     .await;
     open_document_uri(
         &mut client_w,
         "snaq://graph/ord-t2.sl",
-        "input x@px: Numeric\ninput y@py: Numeric\nx + y",
+        "input x@px: Numeric\ninput y@py: Numeric\nx.sum() + y.sum()",
         1,
     )
     .await;
@@ -6279,7 +6878,7 @@ async fn connect_allows_deferred_validation_when_source_type_unknown() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/defer-target.sl",
-        "input x@p1: Numeric\nx + 1",
+        "input x@p1: Numeric\nx.sum() + 1",
         1,
     )
     .await;
@@ -6669,7 +7268,7 @@ async fn graph_apply_patch_commits_all_ops_atomically() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/patch-tgt.sl",
-        "input x@p1: Numeric\nx + 1",
+        "input x@p1: Numeric\nx.sum() + 1",
         1,
     )
     .await;
@@ -6765,7 +7364,7 @@ async fn graph_apply_patch_failure_rolls_back_all_ops() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/patch-rollback.sl",
-        "input x@p1: Numeric\nx + 1",
+        "input x@p1: Numeric\nx.sum() + 1",
         1,
     )
     .await;
@@ -6773,7 +7372,7 @@ async fn graph_apply_patch_failure_rolls_back_all_ops() {
     let patch_req = serde_json::json!({
         "jsonrpc":"2.0","id":703,"method":"snaqlite/graph/applyPatch",
         "params":{"operations":[
-            {"op":"setNodeSource","uri":"snaq://graph/patch-rollback.sl","source":"input x@p1: Numeric\nx + 2"},
+            {"op":"setNodeSource","uri":"snaq://graph/patch-rollback.sl","source":"input x@p1: Numeric\nx.sum() + 2"},
             {"op":"connect","sourceUri":"snaq://graph/patch-rollback.sl","targetUri":"snaq://graph/patch-rollback.sl","targetInputName":"missing"}
         ]}
     });
@@ -6806,7 +7405,7 @@ async fn graph_apply_patch_failure_rolls_back_all_ops() {
         .expect("node should still exist");
     let source = node["source"].as_str().unwrap_or_default();
     assert!(
-        source.contains("x + 1"),
+        source.contains("x.sum() + 1"),
         "source should remain unchanged on failed patch, got: {source}"
     );
 
@@ -6873,7 +7472,7 @@ async fn graph_apply_patch_remove_param_prunes_stale_edges() {
     open_document_uri(
         &mut client_w,
         "snaq://graph/patch-prune-tgt.sl",
-        "input x@p1: Numeric\nx + 1",
+        "input x@p1: Numeric\nx.sum() + 1",
         1,
     )
     .await;
